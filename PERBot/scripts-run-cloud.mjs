@@ -3,29 +3,67 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 
 const indexPath = process.env.INDEX_PATH || './data/notion-index.json';
-const alwaysReindex = String(process.env.ALWAYS_REINDEX_ON_START || '').toLowerCase() === 'true';
+const alwaysReindex =
+  String(process.env.ALWAYS_REINDEX_ON_START || '').toLowerCase() === 'true';
 const shouldIndex = alwaysReindex || !existsSync(path.resolve(indexPath));
 
-function run(command, args) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: 'inherit', env: process.env });
-    child.on('exit', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`${command} ${args.join(' ')} exited with code ${code}`));
-    });
+function spawnChild(command, args, label, options = {}) {
+  const child = spawn(command, args, {
+    stdio: 'inherit',
+    env: process.env,
+    shell: process.platform === 'win32',
+    ...options,
   });
+
+  child.on('error', (err) => {
+    console.error(`[PERBot] ${label} failed to start:`, err);
+  });
+
+  return child;
 }
 
 async function main() {
+  console.log('[PERBot] Starting Slack app first...');
+
+  const appChild = spawnChild(
+    'node',
+    ['--enable-source-maps', 'dist/app.js'],
+    'Slack app'
+  );
+
+  appChild.on('exit', (code, signal) => {
+    console.error(
+      `[PERBot] Slack app exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})`
+    );
+    process.exit(code ?? 1);
+  });
+
   if (shouldIndex) {
-    console.log('[PERBot] Building Notion index before starting app...');
-    await run('node', ['--enable-source-maps', 'dist/indexer.js']);
+    console.log('[PERBot] No usable index found or forced reindex enabled.');
+    console.log('[PERBot] Waiting 8 seconds, then starting background indexing...');
+
+    setTimeout(() => {
+      console.log('[PERBot] Starting Notion indexing in background...');
+
+      const indexChild = spawnChild(
+        'node',
+        ['--enable-source-maps', 'dist/indexer.js'],
+        'Indexer'
+      );
+
+      indexChild.on('exit', (code, signal) => {
+        if (code === 0) {
+          console.log('[PERBot] Background indexing finished successfully.');
+        } else {
+          console.error(
+            `[PERBot] Background indexing failed (code=${code ?? 'null'}, signal=${signal ?? 'null'})`
+          );
+        }
+      });
+    }, 8000);
   } else {
     console.log('[PERBot] Existing index found. Skipping startup reindex.');
   }
-
-  console.log('[PERBot] Starting Slack Socket Mode app...');
-  await run('node', ['--enable-source-maps', 'dist/app.js']);
 }
 
 main().catch((err) => {
