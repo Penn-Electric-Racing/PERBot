@@ -52,6 +52,7 @@ export interface NotionPageRecord {
   title: string;
   url: string;
   path: string[];
+  createdTime: string;
   lastEditedTime: string;
   markdown: string;
   isHistorical: boolean;
@@ -75,6 +76,16 @@ export interface NotionIndex {
   currentRev: string;
   pages: NotionPageRecord[];
   chunks: NotionChunkRecord[];
+}
+
+export interface IndexStatus {
+  state: 'idle' | 'indexing' | 'ready' | 'error';
+  startedAt?: string;
+  completedAt?: string;
+  lastError?: string;
+  indexedPages?: number;
+  indexedChunks?: number;
+  message?: string;
 }
 
 export interface SearchResult {
