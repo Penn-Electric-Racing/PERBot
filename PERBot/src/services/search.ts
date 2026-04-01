@@ -3,6 +3,53 @@ import type { NotionIndex, ParsedQuery, SearchResult } from '../types.js';
 import { embedQuery } from './llm.js';
 import { excerptAroundMatch, tokenize } from '../utils/text.js';
 
+const KNOWN_SUBSYSTEMS = [
+  'chassis',
+  'accumulator',
+  'cooling',
+  'aero',
+  'suspension',
+  'drivetrain',
+  'vehicle dynamics',
+  'driver interface',
+  'daqdash',
+  'pcm',
+  'hv',
+  'lv',
+  'brakes',
+  'brake',
+  'electrical',
+  'software',
+];
+
+const HIGH_LEVEL_HINTS = [
+  'high level',
+  'overview',
+  'intro',
+  'introduction',
+  'summary',
+  'main doc',
+  'main docs',
+  'wiki',
+  'guide',
+  'where should i start',
+  'start reading',
+  'new member',
+  'learn',
+];
+
+const OVERVIEW_DOC_HINTS = [
+  'overview',
+  'intro',
+  'introduction',
+  'summary',
+  'wiki',
+  'guide',
+  'readme',
+  'architecture',
+  'high level',
+];
+
 function dot(a: number[], b: number[]): number {
   const len = Math.min(a.length, b.length);
   let total = 0;
@@ -45,11 +92,18 @@ export function parseQuery(input: string): ParsedQuery {
   return { raw: input, cleaned, filters };
 }
 
+function normalize(text: string): string {
+  return text.toLowerCase();
+}
+
 function textForFiltering(result: { title: string; markdown: string; path: string[] }): string {
   return `${result.title} ${result.path.join(' ')} ${result.markdown}`.toLowerCase();
 }
 
-function passesFilters(parsed: ParsedQuery, page: { title: string; markdown: string; path: string[]; isHistorical: boolean }): boolean {
+function passesFilters(
+  parsed: ParsedQuery,
+  page: { title: string; markdown: string; path: string[]; isHistorical: boolean }
+): boolean {
   const corpus = textForFiltering(page);
 
   if (parsed.filters.historical !== undefined && page.isHistorical !== parsed.filters.historical) {
@@ -64,69 +118,254 @@ function passesFilters(parsed: ParsedQuery, page: { title: string; markdown: str
   return true;
 }
 
-function lexicalScore(query: string, title: string, chunkText: string, isHistorical: boolean): number {
-  const q = query.trim().toLowerCase();
+function detectSubsystems(query: string): string[] {
+  const q = normalize(query);
+  return KNOWN_SUBSYSTEMS.filter((name) => q.includes(name));
+}
+
+function queryWantsHighLevel(query: string): boolean {
+  const q = normalize(query);
+  return HIGH_LEVEL_HINTS.some((hint) => q.includes(hint));
+}
+
+function pageLooksLikeOverview(page: { title: string; path: string[]; markdown: string }): boolean {
+  const haystack = normalize(`${page.title} ${page.path.join(' ')} ${page.markdown.slice(0, 1500)}`);
+  return OVERVIEW_DOC_HINTS.some((hint) => haystack.includes(hint));
+}
+
+function titleAndPathText(page: { title: string; path: string[] }): string {
+  return normalize(`${page.title} ${page.path.join(' ')}`);
+}
+
+function countOccurrences(haystack: string, needle: string): number {
+  if (!needle) return 0;
+  return haystack.split(needle).length - 1;
+}
+
+function subsystemScoreBoost(
+  detectedSubsystems: string[],
+  page: { title: string; path: string[]; markdown: string }
+): number {
+  if (detectedSubsystems.length === 0) return 0;
+
+  const titlePath = titleAndPathText(page);
+  const pageText = normalize(page.markdown.slice(0, 4000));
+
+  let score = 0;
+
+  for (const subsystem of detectedSubsystems) {
+    const inTitlePath = titlePath.includes(subsystem);
+    const inText = pageText.includes(subsystem);
+
+    if (inTitlePath) score += 8;
+    if (inText) score += 2.5;
+  }
+
+  const matchedAny = detectedSubsystems.some(
+    (subsystem) => titlePath.includes(subsystem) || pageText.includes(subsystem)
+  );
+
+  if (!matchedAny) {
+    score -= 6;
+  }
+
+  return score;
+}
+
+function unrelatedSubsystemPenalty(
+  detectedSubsystems: string[],
+  page: { title: string; path: string[] }
+): number {
+  if (detectedSubsystems.length === 0) return 0;
+
+  const titlePath = titleAndPathText(page);
+  const matchingSubsystems = KNOWN_SUBSYSTEMS.filter((s) => titlePath.includes(s));
+
+  if (matchingSubsystems.length === 0) return 0;
+
+  const overlaps = matchingSubsystems.some((s) => detectedSubsystems.includes(s));
+  if (overlaps) return 0;
+
+  return -5;
+}
+
+function lexicalScore(
+  query: string,
+  page: { title: string; path: string[]; markdown: string; isHistorical: boolean }
+): number {
+  const q = normalize(query.trim());
   if (!q) return 0;
 
   const queryTokens = tokenize(q);
-  const titleLower = title.toLowerCase();
-  const textLower = chunkText.toLowerCase();
+  const titleLower = normalize(page.title);
+  const pathLower = normalize(page.path.join(' '));
+  const textLower = normalize(page.markdown);
 
   let score = 0;
-  if (titleLower.includes(q)) score += 6;
-  if (textLower.includes(q)) score += 3;
+
+  if (titleLower.includes(q)) score += 12;
+  if (pathLower.includes(q)) score += 8;
+  if (textLower.includes(q)) score += 3.5;
 
   for (const token of queryTokens) {
-    const titleHits = titleLower.split(token).length - 1;
-    const textHits = textLower.split(token).length - 1;
-    score += titleHits * 2.5;
-    score += textHits * 1.0;
+    const titleHits = countOccurrences(titleLower, token);
+    const pathHits = countOccurrences(pathLower, token);
+    const textHits = countOccurrences(textLower, token);
+
+    score += titleHits * 4.0;
+    score += pathHits * 2.5;
+    score += textHits * 0.8;
   }
 
-  if (!isHistorical) score += 0.35;
+  if (!page.isHistorical) score += 0.4;
   return score;
+}
+
+function highLevelIntentBoost(
+  query: string,
+  page: { title: string; path: string[]; markdown: string }
+): number {
+  if (!queryWantsHighLevel(query)) return 0;
+
+  let score = 0;
+  const titlePath = titleAndPathText(page);
+
+  if (pageLooksLikeOverview(page)) score += 6;
+  if (titlePath.includes('overview')) score += 3;
+  if (titlePath.includes('wiki')) score += 3;
+  if (titlePath.includes('guide')) score += 2;
+  if (titlePath.includes('intro')) score += 2;
+  if (titlePath.includes('summary')) score += 2;
+
+  return score;
+}
+
+function historicalAdjustment(
+  query: string,
+  page: { isHistorical: boolean }
+): number {
+  const q = normalize(query);
+  const wantsHistorical =
+    q.includes('historical') || q.includes('old') || q.includes('older') || q.includes('previous');
+
+  if (page.isHistorical && !wantsHistorical) return -2.5;
+  if (page.isHistorical && wantsHistorical) return 1.0;
+  return 0;
 }
 
 export async function searchIndex(index: NotionIndex, rawQuery: string): Promise<SearchResult[]> {
   const parsed = parseQuery(rawQuery);
   const queryText = parsed.cleaned || parsed.raw;
   const queryEmbedding = await embedQuery(queryText);
+  const detectedSubsystems = [
+    ...detectSubsystems(queryText),
+    ...(parsed.filters.subsystem ? [parsed.filters.subsystem] : []),
+  ];
 
-  const scored: SearchResult[] = [];
+  const pageById = new Map(index.pages.map((page) => [page.id, page]));
+
+  const bestChunkPerPage = new Map<
+    string,
+    {
+      chunk: NotionIndex['chunks'][number];
+      bestChunkScore: number;
+      bestLexical: number;
+      bestSemantic: number;
+      excerpt: string;
+      supportingChunkHits: number;
+      aggregatedChunkScore: number;
+    }
+  >();
 
   for (const chunk of index.chunks) {
-    const page = index.pages.find((candidate) => candidate.id === chunk.pageId);
+    const page = pageById.get(chunk.pageId);
     if (!page) continue;
     if (!passesFilters(parsed, page)) continue;
 
-    const lexical = lexicalScore(queryText, page.title, chunk.text, page.isHistorical);
+    const lexical = lexicalScore(queryText, page);
     const semantic = queryEmbedding && chunk.embedding ? dot(queryEmbedding, chunk.embedding) : 0;
 
-    const combined = queryEmbedding && chunk.embedding
-      ? lexical * 0.55 + semantic * 8.0
-      : lexical;
+    const chunkTextLower = normalize(chunk.text);
+    const tokenHits = tokenize(normalize(queryText)).reduce((acc, token) => {
+      return acc + (chunkTextLower.includes(token) ? 1 : 0);
+    }, 0);
 
-    if (combined <= 0) continue;
+    const chunkLocalScore =
+      lexical * 0.55 +
+      (queryEmbedding && chunk.embedding ? semantic * 4.0 : 0) +
+      tokenHits * 0.6;
 
-    scored.push({
-      page,
-      chunk,
-      score: combined,
-      lexicalScore: lexical,
-      semanticScore: semantic,
-      excerpt: excerptAroundMatch(chunk.text, queryText),
-    });
-  }
+    if (chunkLocalScore <= 0) continue;
 
-  const bestPerPage = new Map<string, SearchResult>();
-  for (const result of scored.sort((a, b) => b.score - a.score)) {
-    const existing = bestPerPage.get(result.page.id);
-    if (!existing || result.score > existing.score) {
-      bestPerPage.set(result.page.id, result);
+    const existing = bestChunkPerPage.get(page.id);
+    const excerpt = excerptAroundMatch(chunk.text, queryText);
+
+    if (!existing) {
+      bestChunkPerPage.set(page.id, {
+        chunk,
+        bestChunkScore: chunkLocalScore,
+        bestLexical: lexical,
+        bestSemantic: semantic,
+        excerpt,
+        supportingChunkHits: tokenHits > 0 ? 1 : 0,
+        aggregatedChunkScore: chunkLocalScore,
+      });
+    } else {
+      existing.aggregatedChunkScore += chunkLocalScore * 0.35;
+      if (tokenHits > 0) existing.supportingChunkHits += 1;
+
+      if (chunkLocalScore > existing.bestChunkScore) {
+        existing.chunk = chunk;
+        existing.bestChunkScore = chunkLocalScore;
+        existing.bestLexical = lexical;
+        existing.bestSemantic = semantic;
+        existing.excerpt = excerpt;
+      }
     }
   }
 
-  return [...bestPerPage.values()]
+  const results: SearchResult[] = [];
+
+  for (const [pageId, pageChunkInfo] of bestChunkPerPage.entries()) {
+    const page = pageById.get(pageId);
+    if (!page) continue;
+
+    const titlePathBoost = lexicalScore(queryText, {
+      title: page.title,
+      path: page.path,
+      markdown: '',
+      isHistorical: page.isHistorical,
+    });
+
+    const subsystemBoost = subsystemScoreBoost(detectedSubsystems, page);
+    const unrelatedPenalty = unrelatedSubsystemPenalty(detectedSubsystems, page);
+    const overviewBoost = highLevelIntentBoost(queryText, page);
+    const historyAdj = historicalAdjustment(queryText, page);
+    const supportBoost = Math.min(3, pageChunkInfo.supportingChunkHits * 0.75);
+
+    const finalScore =
+      pageChunkInfo.bestChunkScore * 0.45 +
+      pageChunkInfo.aggregatedChunkScore * 0.20 +
+      titlePathBoost * 0.55 +
+      subsystemBoost +
+      unrelatedPenalty +
+      overviewBoost +
+      historyAdj +
+      supportBoost;
+
+    if (finalScore <= 0) continue;
+
+    results.push({
+      page,
+      chunk: pageChunkInfo.chunk,
+      score: finalScore,
+      lexicalScore: pageChunkInfo.bestLexical,
+      semanticScore: pageChunkInfo.bestSemantic,
+      excerpt: pageChunkInfo.excerpt,
+    });
+  }
+
+  return results
     .sort((a, b) => b.score - a.score)
     .slice(0, config.app.topKResults);
 }
