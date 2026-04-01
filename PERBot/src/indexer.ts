@@ -1,36 +1,160 @@
 import { config, hasOpenAI } from './config.js';
 import { NotionService } from './services/notion.js';
-import { loadIndex, saveIndex, saveStatus } from './services/index-store.js';
-import { chunkText, sleep } from './utils/chunk.js';
+import { saveIndex } from './services/index-store.js';
+import { chunkText } from './utils/chunk.js';
 import { logger } from './utils/logger.js';
 import { embedTexts } from './services/llm.js';
-import type { IndexStatus, NotionChunkRecord, NotionIndex } from './types.js';
+import type {
+  InferredBranch,
+  InferredDocType,
+  InferredSubsystem,
+  NotionChunkRecord,
+  NotionIndex,
+  NotionPageRecord,
+} from './types.js';
 
-const INDEXER_EMBED_BATCH_SIZE = 10;
-const INDEXER_EMBED_BATCH_DELAY_MS = 2000;
+const INDEXER_EMBED_BATCH_SIZE = 20;
+const INDEXER_EMBED_BATCH_DELAY_MS = 1000;
 
-function statusBase(phase: IndexStatus['phase'], message: string): IndexStatus {
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalize(text: string): string {
+  return text.toLowerCase();
+}
+
+function joinPath(path: string[]): string {
+  return path.join(' > ');
+}
+
+function inferBranch(page: { title: string; path: string[] }): InferredBranch {
+  const joined = normalize(`${page.title} ${page.path.join(' ')}`);
+
+  if (joined.includes('mechanical')) return 'mechanical';
+  if (joined.includes('electrical')) return 'electrical';
+  if (joined.includes('operations')) return 'operations';
+  if (joined.includes('software')) return 'software';
+  if (joined.includes('general')) return 'general';
+
+  return 'unknown';
+}
+
+function inferSubsystem(page: { title: string; path: string[]; markdown: string }): InferredSubsystem {
+  const joined = normalize(`${page.title} ${page.path.join(' ')} ${page.markdown.slice(0, 2000)}`);
+
+  if (joined.includes('accumulator') || joined.includes('tractive system accumulator') || joined.includes('tsa')) {
+    return 'accumulator';
+  }
+  if (joined.includes('aero/composites') || joined.includes('aero') || joined.includes('composites')) {
+    return 'aero';
+  }
+  if (joined.includes('chassis')) {
+    return 'chassis';
+  }
+  if (joined.includes('drivetrain')) {
+    return 'drivetrain';
+  }
+  if (joined.includes('suspension')) {
+    return 'suspension';
+  }
+  if (joined.includes('vehicle dynamics')) {
+    return 'vehicle dynamics';
+  }
+  if (joined.includes('cooling') || joined.includes('thermal') || joined.includes('radiator')) {
+    return 'cooling';
+  }
+  if (joined.includes('driver interface') || joined.includes('cockpit') || joined.includes('pedal') || joined.includes('steering')) {
+    return 'driver interface';
+  }
+  if (joined.includes('daqdash')) {
+    return 'daqdash';
+  }
+  if (joined.includes('pcm')) {
+    return 'pcm';
+  }
+  if (joined.includes('high voltage') || joined.includes(' hv ') || joined.startsWith('hv ') || joined.includes(' hv/')) {
+    return 'hv';
+  }
+  if (joined.includes('low voltage') || joined.includes(' lv ') || joined.startsWith('lv ')) {
+    return 'lv';
+  }
+
+  const branch = inferBranch(page);
+  if (branch === 'mechanical') return 'general';
+  if (branch === 'electrical') return 'electrical';
+  if (branch === 'operations') return 'operations';
+  if (branch === 'software') return 'software';
+
+  return 'unknown';
+}
+
+function inferDocType(page: { title: string; path: string[]; markdown: string }): InferredDocType {
+  const joined = normalize(`${page.title} ${page.path.join(' ')} ${page.markdown.slice(0, 1200)}`);
+
+  if (joined.includes('home')) return 'home';
+  if (
+    joined.includes('overview') ||
+    joined.includes('intro') ||
+    joined.includes('introduction') ||
+    joined.includes('wiki') ||
+    joined.includes('guide') ||
+    joined.includes('readme')
+  ) {
+    return 'overview';
+  }
+  if (
+    joined.includes('design') ||
+    joined.includes('architecture') ||
+    joined.includes('packaging') ||
+    joined.includes('cad')
+  ) {
+    return 'design';
+  }
+  if (
+    joined.includes('spec') ||
+    joined.includes('specification') ||
+    joined.includes('requirements')
+  ) {
+    return 'spec';
+  }
+  if (
+    joined.includes('meeting') ||
+    joined.includes('notes') ||
+    joined.includes('minutes') ||
+    joined.includes('agenda') ||
+    joined.includes('sync') ||
+    joined.includes('update')
+  ) {
+    return 'meeting_notes';
+  }
+  if (joined.includes('bom')) return 'bom';
+  if (joined.includes('testing logs') || joined.includes('test log')) return 'testing_logs';
+  if (joined.includes('q&a') || joined.includes('qa') || joined.includes('questions')) return 'qa';
+
+  if (joined.includes('general')) return 'general';
+  return 'unknown';
+}
+
+function enrichPageMetadata(page: {
+  id: string;
+  title: string;
+  url: string;
+  path: string[];
+  lastEditedTime: string;
+  markdown: string;
+  isHistorical: boolean;
+}): NotionPageRecord {
   return {
-    phase,
-    startedAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    pid: process.pid,
-    message,
+    ...page,
+    pathText: joinPath(page.path),
+    inferredBranch: inferBranch(page),
+    inferredSubsystem: inferSubsystem(page),
+    inferredDocType: inferDocType(page),
   };
 }
 
-async function updateStatus(patch: Partial<IndexStatus>): Promise<void> {
-  const now = new Date().toISOString();
-  const current: IndexStatus = {
-    ...(statusBase('building_pages', 'Starting indexing job...')),
-    ...patch,
-    updatedAt: now,
-  };
-  await saveStatus(current);
-}
-
-async function buildEmbeddings(index: NotionIndex): Promise<void> {
-  const chunks = index.chunks;
+async function buildEmbeddings(chunks: NotionChunkRecord[]): Promise<void> {
   if (!hasOpenAI() || chunks.length === 0) {
     logger.warn(
       'OPENAI_API_KEY not found, so index chunks will be stored without embeddings. Search will still work lexically.'
@@ -38,53 +162,19 @@ async function buildEmbeddings(index: NotionIndex): Promise<void> {
     return;
   }
 
-  const unembeddedIndices: number[] = [];
-  chunks.forEach((chunk, idx) => {
-    if (!chunk.embedding) unembeddedIndices.push(idx);
-  });
+  for (let i = 0; i < chunks.length; i += INDEXER_EMBED_BATCH_SIZE) {
+    const batch = chunks.slice(i, i + INDEXER_EMBED_BATCH_SIZE);
+    const vectors = await embedTexts(batch.map((item) => item.text));
 
-  const totalBatches = Math.ceil(unembeddedIndices.length / INDEXER_EMBED_BATCH_SIZE);
-  let completedBatches = 0;
-
-  await updateStatus({
-    ...statusBase('embedding', 'Embedding PERBot chunk vectors...'),
-    totalPages: index.pages.length,
-    totalChunks: chunks.length,
-    embeddedChunkBatches: completedBatches,
-    totalChunkBatches: totalBatches,
-    generatedAt: index.generatedAt,
-  });
-
-  for (let i = 0; i < unembeddedIndices.length; i += INDEXER_EMBED_BATCH_SIZE) {
-    const batchIndices = unembeddedIndices.slice(i, i + INDEXER_EMBED_BATCH_SIZE);
-    const texts = batchIndices.map((chunkIndex) => chunks[chunkIndex].text);
-    const vectors = await embedTexts(texts);
-
-    batchIndices.forEach((chunkIndex, indexInBatch) => {
-      chunks[chunkIndex].embedding = vectors[indexInBatch];
+    batch.forEach((chunk, index) => {
+      chunk.embedding = vectors[index];
     });
 
-    completedBatches += 1;
-    logger.info(`Embedded chunk batch ${completedBatches} / ${totalBatches}`);
+    const batchNumber = Math.floor(i / INDEXER_EMBED_BATCH_SIZE) + 1;
+    const totalBatches = Math.ceil(chunks.length / INDEXER_EMBED_BATCH_SIZE);
+    logger.info(`Embedded chunk batch ${batchNumber} / ${totalBatches}`);
 
-    if (
-      completedBatches % config.app.saveCheckpointEveryBatches === 0 ||
-      completedBatches === totalBatches
-    ) {
-      index.generatedAt = new Date().toISOString();
-      await saveIndex(index);
-      await updateStatus({
-        ...statusBase('embedding', 'Embedding PERBot chunk vectors...'),
-        totalPages: index.pages.length,
-        totalChunks: chunks.length,
-        embeddedChunkBatches: completedBatches,
-        totalChunkBatches: totalBatches,
-        generatedAt: index.generatedAt,
-      });
-      logger.info(`Checkpoint saved at batch ${completedBatches} / ${totalBatches}`);
-    }
-
-    if (i + INDEXER_EMBED_BATCH_SIZE < unembeddedIndices.length) {
+    if (i + INDEXER_EMBED_BATCH_SIZE < chunks.length) {
       await sleep(INDEXER_EMBED_BATCH_DELAY_MS);
     }
   }
@@ -92,10 +182,10 @@ async function buildEmbeddings(index: NotionIndex): Promise<void> {
 
 async function main(): Promise<void> {
   logger.info('Starting PERBot Notion indexing job...');
-  await updateStatus(statusBase('building_pages', 'Fetching pages from Notion...'));
-
   const notion = new NotionService();
-  const pages = await notion.buildIndexablePages();
+
+  const rawPages = await notion.buildIndexablePages();
+  const pages: NotionPageRecord[] = rawPages.map(enrichPageMetadata);
 
   const chunks: NotionChunkRecord[] = [];
   for (const page of pages) {
@@ -104,6 +194,7 @@ async function main(): Promise<void> {
       config.app.maxChunkChars,
       config.app.chunkOverlapChars
     );
+
     pageChunks.forEach((text, chunkIndex) => {
       chunks.push({
         id: `${page.id}:${chunkIndex}`,
@@ -115,56 +206,20 @@ async function main(): Promise<void> {
   }
 
   logger.info(`Prepared ${chunks.length} chunks from ${pages.length} pages.`);
+  await buildEmbeddings(chunks);
 
-  const freshIndex: NotionIndex = {
+  const index: NotionIndex = {
     generatedAt: new Date().toISOString(),
     currentRev: config.app.currentRev,
     pages,
     chunks,
   };
 
-  await saveIndex(freshIndex);
-  logger.info(`Saved lexical PERBot index checkpoint to ${config.app.indexPath}`);
-
-  await updateStatus({
-    ...statusBase('embedding', 'Lexical index ready. Building embeddings...'),
-    totalPages: pages.length,
-    totalChunks: chunks.length,
-    embeddedChunkBatches: 0,
-    totalChunkBatches: Math.ceil(chunks.length / INDEXER_EMBED_BATCH_SIZE),
-    generatedAt: freshIndex.generatedAt,
-  });
-
-  const index = await loadIndex();
-  await buildEmbeddings(index);
-
-  index.generatedAt = new Date().toISOString();
   await saveIndex(index);
-  await saveStatus({
-    phase: 'complete',
-    startedAt: undefined,
-    updatedAt: new Date().toISOString(),
-    completedAt: new Date().toISOString(),
-    totalPages: index.pages.length,
-    totalChunks: index.chunks.length,
-    embeddedChunkBatches: Math.ceil(index.chunks.length / INDEXER_EMBED_BATCH_SIZE),
-    totalChunkBatches: Math.ceil(index.chunks.length / INDEXER_EMBED_BATCH_SIZE),
-    generatedAt: index.generatedAt,
-    message: 'Index complete and saved.',
-    pid: process.pid,
-  });
   logger.info(`Saved PERBot index to ${config.app.indexPath}`);
 }
 
-main().catch(async (error) => {
+main().catch((error) => {
   logger.error('Indexing failed.', error);
-  await saveStatus({
-    phase: 'failed',
-    updatedAt: new Date().toISOString(),
-    failedAt: new Date().toISOString(),
-    lastError: error instanceof Error ? error.stack || error.message : String(error),
-    message: 'Indexing failed.',
-    pid: process.pid,
-  });
   process.exitCode = 1;
 });
