@@ -22,6 +22,14 @@ const KNOWN_SUBSYSTEMS = [
   'software',
 ];
 
+const SUBSYSTEM_ALIASES: Record<string, string[]> = {
+  accumulator: ['battery pack', 'pack', 'tractive system accumulator', 'tsa', 'accumulator container'],
+  chassis: ['frame', 'monocoque', 'tub'],
+  cooling: ['radiator', 'thermal'],
+  'driver interface': ['cockpit', 'pedals', 'steering'],
+  brakes: ['brake system', 'braking'],
+};
+
 const HIGH_LEVEL_HINTS = [
   'high level',
   'overview',
@@ -30,6 +38,9 @@ const HIGH_LEVEL_HINTS = [
   'summary',
   'main doc',
   'main docs',
+  'design doc',
+  'spec',
+  'specification',
   'wiki',
   'guide',
   'where should i start',
@@ -48,6 +59,11 @@ const OVERVIEW_DOC_HINTS = [
   'readme',
   'architecture',
   'high level',
+  'main',
+  'design',
+  'spec',
+  'specification',
+  'subsystem',
 ];
 
 function dot(a: number[], b: number[]): number {
@@ -123,6 +139,19 @@ function detectSubsystems(query: string): string[] {
   return KNOWN_SUBSYSTEMS.filter((name) => q.includes(name));
 }
 
+function expandSubsystemTerms(detectedSubsystems: string[]): string[] {
+  const expanded = new Set<string>();
+
+  for (const subsystem of detectedSubsystems) {
+    expanded.add(subsystem);
+    for (const alias of SUBSYSTEM_ALIASES[subsystem] || []) {
+      expanded.add(alias);
+    }
+  }
+
+  return [...expanded];
+}
+
 function queryWantsHighLevel(query: string): boolean {
   const q = normalize(query);
   return HIGH_LEVEL_HINTS.some((hint) => q.includes(hint));
@@ -143,26 +172,26 @@ function countOccurrences(haystack: string, needle: string): number {
 }
 
 function subsystemScoreBoost(
-  detectedSubsystems: string[],
+  subsystemTerms: string[],
   page: { title: string; path: string[]; markdown: string }
 ): number {
-  if (detectedSubsystems.length === 0) return 0;
+  if (subsystemTerms.length === 0) return 0;
 
   const titlePath = titleAndPathText(page);
   const pageText = normalize(page.markdown.slice(0, 4000));
 
   let score = 0;
 
-  for (const subsystem of detectedSubsystems) {
-    const inTitlePath = titlePath.includes(subsystem);
-    const inText = pageText.includes(subsystem);
+  for (const term of subsystemTerms) {
+    const inTitlePath = titlePath.includes(term);
+    const inText = pageText.includes(term);
 
     if (inTitlePath) score += 8;
     if (inText) score += 2.5;
   }
 
-  const matchedAny = detectedSubsystems.some(
-    (subsystem) => titlePath.includes(subsystem) || pageText.includes(subsystem)
+  const matchedAny = subsystemTerms.some(
+    (term) => titlePath.includes(term) || pageText.includes(term)
   );
 
   if (!matchedAny) {
@@ -189,6 +218,27 @@ function unrelatedSubsystemPenalty(
   return -5;
 }
 
+function requiredSubsystemEvidencePenalty(
+  subsystemTerms: string[],
+  page: { title: string; path: string[]; markdown: string }
+): number {
+  if (subsystemTerms.length === 0) return 0;
+
+  const titlePath = titleAndPathText(page);
+  const body = normalize(page.markdown.slice(0, 3000));
+
+  let strongMatches = 0;
+
+  for (const term of subsystemTerms) {
+    if (titlePath.includes(term)) strongMatches += 2;
+    else if (body.includes(term)) strongMatches += 1;
+  }
+
+  if (strongMatches >= 2) return 0;
+  if (strongMatches === 1) return -3;
+  return -8;
+}
+
 function lexicalScore(
   query: string,
   page: { title: string; path: string[]; markdown: string; isHistorical: boolean }
@@ -203,8 +253,8 @@ function lexicalScore(
 
   let score = 0;
 
-  if (titleLower.includes(q)) score += 12;
-  if (pathLower.includes(q)) score += 8;
+  if (titleLower.includes(q)) score += 18;
+  if (pathLower.includes(q)) score += 12;
   if (textLower.includes(q)) score += 3.5;
 
   for (const token of queryTokens) {
@@ -212,8 +262,8 @@ function lexicalScore(
     const pathHits = countOccurrences(pathLower, token);
     const textHits = countOccurrences(textLower, token);
 
-    score += titleHits * 4.0;
-    score += pathHits * 2.5;
+    score += titleHits * 5.5;
+    score += pathHits * 3.5;
     score += textHits * 0.8;
   }
 
@@ -236,6 +286,9 @@ function highLevelIntentBoost(
   if (titlePath.includes('guide')) score += 2;
   if (titlePath.includes('intro')) score += 2;
   if (titlePath.includes('summary')) score += 2;
+  if (titlePath.includes('design')) score += 2;
+  if (titlePath.includes('spec')) score += 2;
+  if (titlePath.includes('architecture')) score += 2;
 
   return score;
 }
@@ -248,8 +301,8 @@ function historicalAdjustment(
   const wantsHistorical =
     q.includes('historical') || q.includes('old') || q.includes('older') || q.includes('previous');
 
-  if (page.isHistorical && !wantsHistorical) return -2.5;
-  if (page.isHistorical && wantsHistorical) return 1.0;
+  if (page.isHistorical && !wantsHistorical) return -5;
+  if (page.isHistorical && wantsHistorical) return 1.5;
   return 0;
 }
 
@@ -257,10 +310,12 @@ export async function searchIndex(index: NotionIndex, rawQuery: string): Promise
   const parsed = parseQuery(rawQuery);
   const queryText = parsed.cleaned || parsed.raw;
   const queryEmbedding = await embedQuery(queryText);
+
   const detectedSubsystems = [
     ...detectSubsystems(queryText),
     ...(parsed.filters.subsystem ? [parsed.filters.subsystem] : []),
   ];
+  const subsystemTerms = expandSubsystemTerms(detectedSubsystems);
 
   const pageById = new Map(index.pages.map((page) => [page.id, page]));
 
@@ -337,11 +392,12 @@ export async function searchIndex(index: NotionIndex, rawQuery: string): Promise
       isHistorical: page.isHistorical,
     });
 
-    const subsystemBoost = subsystemScoreBoost(detectedSubsystems, page);
+    const subsystemBoost = subsystemScoreBoost(subsystemTerms, page);
     const unrelatedPenalty = unrelatedSubsystemPenalty(detectedSubsystems, page);
+    const subsystemEvidencePenalty = requiredSubsystemEvidencePenalty(subsystemTerms, page);
     const overviewBoost = highLevelIntentBoost(queryText, page);
     const historyAdj = historicalAdjustment(queryText, page);
-    const supportBoost = Math.min(3, pageChunkInfo.supportingChunkHits * 0.75);
+    const supportBoost = Math.min(6, pageChunkInfo.supportingChunkHits * 1.2);
 
     const finalScore =
       pageChunkInfo.bestChunkScore * 0.45 +
@@ -349,6 +405,7 @@ export async function searchIndex(index: NotionIndex, rawQuery: string): Promise
       titlePathBoost * 0.55 +
       subsystemBoost +
       unrelatedPenalty +
+      subsystemEvidencePenalty +
       overviewBoost +
       historyAdj +
       supportBoost;
