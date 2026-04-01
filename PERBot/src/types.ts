@@ -56,6 +56,7 @@ export interface NotionPageRecord {
   lastEditedTime: string;
   markdown: string;
   isHistorical: boolean;
+  snippet?: string;
 
   pathText: string;
   inferredBranch: InferredBranch;
@@ -80,11 +81,22 @@ export interface NotionIndex {
 
 export interface IndexStatus {
   state: 'idle' | 'indexing' | 'ready' | 'error';
+  phase?: 'discovering' | 'chunking' | 'embedding' | 'saving' | 'complete' | 'error';
+
   startedAt?: string;
   completedAt?: string;
-  lastError?: string;
+  generatedAt?: string;
+  failedAt?: string;
+
   indexedPages?: number;
   indexedChunks?: number;
+
+  totalPages?: number;
+  totalChunks?: number;
+  totalChunkBatches?: number;
+  embeddedChunkBatches?: number;
+
+  lastError?: string;
   message?: string;
 }
 
