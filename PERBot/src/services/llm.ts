@@ -2,6 +2,10 @@ import OpenAI from 'openai';
 import { config, hasOpenAI } from '../config.js';
 import type { SearchResult } from '../types.js';
 
+const EMBEDDING_BATCH_SIZE = 10;
+const EMBEDDING_BATCH_DELAY_MS = 2000;
+const MAX_EMBED_RETRIES = 6;
+
 let client: OpenAI | null = null;
 
 function getClient(): OpenAI {
