@@ -141,9 +141,11 @@ function enrichPageMetadata(page: {
   title: string;
   url: string;
   path: string[];
+  createdTime: string;
   lastEditedTime: string;
   markdown: string;
   isHistorical: boolean;
+  snippet?: string;
 }): NotionPageRecord {
   return {
     ...page,
