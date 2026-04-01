@@ -58,10 +58,10 @@ export interface NotionPageRecord {
   isHistorical: boolean;
   snippet?: string;
 
-  pathText: string;
-  inferredBranch: InferredBranch;
-  inferredSubsystem: InferredSubsystem;
-  inferredDocType: InferredDocType;
+  pathText?: string;
+  inferredBranch?: InferredBranch;
+  inferredSubsystem?: InferredSubsystem;
+  inferredDocType?: InferredDocType;
 }
 
 export interface NotionChunkRecord {
@@ -81,7 +81,14 @@ export interface NotionIndex {
 
 export interface IndexStatus {
   state: 'idle' | 'indexing' | 'ready' | 'error';
-  phase?: 'discovering' | 'chunking' | 'embedding' | 'saving' | 'complete' | 'error';
+  phase?:
+    | 'building_pages'
+    | 'discovering'
+    | 'chunking'
+    | 'embedding'
+    | 'saving'
+    | 'complete'
+    | 'error';
 
   startedAt?: string;
   completedAt?: string;
