@@ -18,15 +18,62 @@ function getClient(): OpenAI {
   return client;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function createEmbeddingWithRetry(openai: OpenAI, texts: string[]) {
+  let attempt = 0;
+
+  while (true) {
+    try {
+      return await openai.embeddings.create({
+        model: config.openai.embeddingModel,
+        input: texts,
+        encoding_format: 'float',
+      });
+    } catch (err: any) {
+      const status = err?.status;
+      const message = String(err?.message || '');
+      const isRateLimit = status === 429 || message.includes('Rate limit');
+
+      if (!isRateLimit || attempt >= MAX_EMBED_RETRIES) {
+        throw err;
+      }
+
+      const delay = Math.min(60000, EMBEDDING_BATCH_DELAY_MS * 2 ** attempt);
+      console.warn(
+        `[PERBot] Embedding rate-limited. Retry ${attempt + 1}/${MAX_EMBED_RETRIES} in ${delay}ms`
+      );
+
+      await sleep(delay);
+      attempt += 1;
+    }
+  }
+}
+
 export async function embedTexts(texts: string[]): Promise<number[][]> {
   if (!hasOpenAI() || texts.length === 0) return [];
+
   const openai = getClient();
-  const response = await openai.embeddings.create({
-    model: config.openai.embeddingModel,
-    input: texts,
-    encoding_format: 'float',
-  });
-  return response.data.map((item) => item.embedding);
+  const allEmbeddings: number[][] = [];
+
+  for (let i = 0; i < texts.length; i += EMBEDDING_BATCH_SIZE) {
+    const batch = texts.slice(i, i + EMBEDDING_BATCH_SIZE);
+
+    const response = await createEmbeddingWithRetry(openai, batch);
+    allEmbeddings.push(...response.data.map((item) => item.embedding));
+
+    const batchNumber = Math.floor(i / EMBEDDING_BATCH_SIZE) + 1;
+    const totalBatches = Math.ceil(texts.length / EMBEDDING_BATCH_SIZE);
+    console.log(`[PERBot] Embedded batch ${batchNumber} / ${totalBatches}`);
+
+    if (i + EMBEDDING_BATCH_SIZE < texts.length) {
+      await sleep(EMBEDDING_BATCH_DELAY_MS);
+    }
+  }
+
+  return allEmbeddings;
 }
 
 export async function embedQuery(text: string): Promise<number[] | null> {
