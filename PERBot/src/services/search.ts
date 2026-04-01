@@ -1,7 +1,6 @@
 import { config } from '../config.js';
 import type {
   InferredBranch,
-  InferredDocType,
   InferredSubsystem,
   NotionChunkRecord,
   NotionIndex,
@@ -20,7 +19,17 @@ const SUBSYSTEM_QUERY_MAP: Array<{
   {
     subsystem: 'accumulator',
     preferredBranch: 'mechanical',
-    terms: ['accumulator', 'tractive system accumulator', 'tsa', 'battery pack', 'pack', 'accumulator container', 'substack', 'cell stack', 'hv pack'],
+    terms: [
+      'accumulator',
+      'tractive system accumulator',
+      'tsa',
+      'battery pack',
+      'pack',
+      'accumulator container',
+      'substack',
+      'cell stack',
+      'hv pack',
+    ],
   },
   {
     subsystem: 'chassis',
@@ -173,7 +182,10 @@ function queryWantsHistorical(query: string): boolean {
   return q.includes('historical') || q.includes('old') || q.includes('older') || q.includes('previous');
 }
 
-function detectSubsystemIntent(query: string, explicitSubsystem?: string): {
+function detectSubsystemIntent(
+  query: string,
+  explicitSubsystem?: string
+): {
   subsystem: InferredSubsystem | null;
   terms: string[];
   preferredBranch: InferredBranch | null;
@@ -209,11 +221,11 @@ function passesFilters(parsed: ParsedQuery, page: NotionPageRecord): boolean {
   return true;
 }
 
-function pageTitlePathBody(page: NotionPageRecord): string {
-  return normalize(`${page.title} ${page.path.join(' ')} ${page.markdown.slice(0, 5000)}`);
-}
-
-function pageHasSubsystemEvidence(page: NotionPageRecord, subsystemTerms: string[], targetSubsystem: InferredSubsystem | null): boolean {
+function pageHasSubsystemEvidence(
+  page: NotionPageRecord,
+  subsystemTerms: string[],
+  targetSubsystem: InferredSubsystem | null
+): boolean {
   if (!targetSubsystem || subsystemTerms.length === 0) return true;
 
   const titlePath = normalize(`${page.title} ${page.path.join(' ')}`);
@@ -235,25 +247,26 @@ function docTypeBoost(page: NotionPageRecord, query: string): number {
   const wantsNotes = queryWantsNotes(query);
 
   let score = 0;
+  const docType = page.inferredDocType ?? 'unknown';
 
   if (wantsHighLevel) {
-    if (page.inferredDocType === 'home') score += 9;
-    if (page.inferredDocType === 'overview') score += 8;
-    if (page.inferredDocType === 'design') score += 5;
-    if (page.inferredDocType === 'spec') score += 5;
-    if (page.inferredDocType === 'meeting_notes') score -= 4;
-    if (page.inferredDocType === 'qa') score -= 6;
+    if (docType === 'home') score += 9;
+    if (docType === 'overview') score += 8;
+    if (docType === 'design') score += 5;
+    if (docType === 'spec') score += 5;
+    if (docType === 'meeting_notes') score -= 4;
+    if (docType === 'qa') score -= 6;
   }
 
   if (wantsNotes) {
-    if (page.inferredDocType === 'meeting_notes') score += 8;
-    if (page.inferredDocType === 'overview') score -= 2;
-    if (page.inferredDocType === 'home') score -= 2;
+    if (docType === 'meeting_notes') score += 8;
+    if (docType === 'overview') score -= 2;
+    if (docType === 'home') score -= 2;
   } else {
-    if (page.inferredDocType === 'meeting_notes') score -= 2;
+    if (docType === 'meeting_notes') score -= 2;
   }
 
-  if (!wantsHighLevel && !wantsNotes && page.inferredDocType === 'qa') {
+  if (!wantsHighLevel && !wantsNotes && docType === 'qa') {
     score -= 5;
   }
 
@@ -273,7 +286,11 @@ function branchBoost(page: NotionPageRecord, preferredBranch: InferredBranch | n
   return -2;
 }
 
-function subsystemBoost(page: NotionPageRecord, targetSubsystem: InferredSubsystem | null, subsystemTerms: string[]): number {
+function subsystemBoost(
+  page: NotionPageRecord,
+  targetSubsystem: InferredSubsystem | null,
+  subsystemTerms: string[]
+): number {
   if (!targetSubsystem) return 0;
 
   const titlePath = normalize(`${page.title} ${page.path.join(' ')}`);
@@ -354,7 +371,11 @@ function supportScore(page: NotionPageRecord, chunks: NotionChunkRecord[], query
   return score;
 }
 
-function chooseBestChunkForPage(page: NotionPageRecord, chunks: NotionChunkRecord[], query: string): NotionChunkRecord {
+function chooseBestChunkForPage(
+  page: NotionPageRecord,
+  chunks: NotionChunkRecord[],
+  query: string
+): NotionChunkRecord {
   const q = normalize(query);
   let bestChunk = chunks[0];
   let bestScore = -Infinity;
