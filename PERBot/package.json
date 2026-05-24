@@ -12,14 +12,16 @@
     "check": "tsc --noEmit"
   },
   "dependencies": {
-    "@notionhq/client": "^5.11.1",
+    "@google/generative-ai": "^0.24.1",
+    "@notionhq/client": "^5.22.0",
     "@slack/bolt": "^4.2.0",
+    "@slack/web-api": "^7.16.0",
     "dotenv": "^16.6.1",
     "openai": "^6.7.0"
   },
   "devDependencies": {
-    "@types/node": "^24.5.2",
-    "tsx": "^4.20.5",
+    "@types/node": "^24.12.4",
+    "tsx": "^4.22.3",
     "typescript": "^5.9.2"
   }
 }

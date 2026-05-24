@@ -1,0 +1,31 @@
+name: Meeting Notes — Monday Kickoff
+
+on:
+  schedule:
+    # GitHub cron is UTC and ignores DST. We schedule at both possible UTC times;
+    # the script checks the actual ET hour and exits early on the wrong one.
+    - cron: '0 13 * * 1' # 9am EDT (summer)
+    - cron: '0 14 * * 1' # 9am EST (winter)
+  workflow_dispatch: # allow manual runs from the Actions tab for testing
+
+jobs:
+  post-kickoff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: PERBot/package-lock.json
+
+      - name: Install dependencies
+        working-directory: PERBot
+        run: npm ci
+
+      - name: Post kickoff messages
+        working-directory: PERBot
+        run: npx tsx src/meetingNotes/postKickoff.ts
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}

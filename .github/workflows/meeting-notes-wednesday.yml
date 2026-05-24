@@ -1,0 +1,31 @@
+name: Meeting Notes — Wednesday Generate
+
+on:
+  schedule:
+    - cron: '0 16 * * 3' # 12pm EDT (summer)
+    - cron: '0 17 * * 3' # 12pm EST (winter)
+  workflow_dispatch:
+
+jobs:
+  generate-notes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: PERBot/package-lock.json
+
+      - name: Install dependencies
+        working-directory: PERBot
+        run: npm ci
+
+      - name: Generate meeting notes
+        working-directory: PERBot
+        run: npx tsx src/meetingNotes/generateNotes.ts
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
