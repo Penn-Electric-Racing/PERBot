@@ -11,20 +11,26 @@ export async function getChannelId(channelName: string): Promise<string> {
     return channelIdCache.get(channelName)!;
   }
 
-  // Paginate through channels (Slack returns up to 1000 at a time)
   let cursor: string | undefined;
   do {
-    const result = await slack.conversations.list({
-      types: 'public_channel,private_channel',
-      limit: 1000,
-      cursor,
-    });
-    const match = result.channels?.find((c) => c.name === channelName);
-    if (match?.id) {
-      channelIdCache.set(channelName, match.id);
-      return match.id;
+    try {
+      const result = await slack.conversations.list({
+        types: 'public_channel,private_channel',
+        limit: 1000,
+        cursor,
+      });
+      const match = result.channels?.find((c) => c.name === channelName);
+      if (match?.id) {
+        channelIdCache.set(channelName, match.id);
+        return match.id;
+      }
+      cursor = result.response_metadata?.next_cursor || undefined;
+    } catch (err: any) {
+      if (err.data) {
+        console.error(`Slack error in conversations.list:`, JSON.stringify(err.data, null, 2));
+      }
+      throw err;
     }
-    cursor = result.response_metadata?.next_cursor || undefined;
   } while (cursor);
 
   throw new Error(`Slack channel #${channelName} not found (is the bot invited?)`);
@@ -32,13 +38,21 @@ export async function getChannelId(channelName: string): Promise<string> {
 
 export async function postKickoffMessage(channelName: string, text: string): Promise<string> {
   const channelId = await getChannelId(channelName);
-  const result = await slack.chat.postMessage({
-    channel: channelId,
-    text,
-    mrkdwn: true,
-  });
-  if (!result.ts) throw new Error(`No timestamp returned from chat.postMessage in #${channelName}`);
-  return result.ts;
+  try {
+    const result = await slack.chat.postMessage({
+      channel: channelId,
+      text,
+      mrkdwn: true,
+    });
+    if (!result.ts) throw new Error(`No timestamp returned from chat.postMessage in #${channelName}`);
+    return result.ts;
+  } catch (err: any) {
+    // Surface the full Slack error so we can see `needed` and `provided` scopes
+    if (err.data) {
+      console.error(`Slack error details for #${channelName}:`, JSON.stringify(err.data, null, 2));
+    }
+    throw err;
+  }
 }
 
 /**
