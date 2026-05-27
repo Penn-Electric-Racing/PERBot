@@ -66,30 +66,36 @@ export async function findMostRecentBotThread(
   const channelId = await getChannelId(channelName);
   const auth = await slack.auth.test();
   const botUserId = auth.user_id;
+  console.log(`[${channelName}] Bot user ID: ${botUserId}, searching since ${new Date(sinceUnixSeconds * 1000).toISOString()}`);
 
-  const result = await slack.conversations.history({
-    channel: channelId,
-    oldest: String(sinceUnixSeconds),
-    limit: 100,
-  });
+  try {
+    const result = await slack.conversations.history({
+      channel: channelId,
+      oldest: String(sinceUnixSeconds),
+      limit: 100,
+    });
 
-  const botMessages = result.messages?.filter(
-    (m) => m.user === botUserId && (m.text ?? '').includes(KICKOFF_SIGNATURE)
-  );
+    console.log(`[${channelName}] Got ${result.messages?.length ?? 0} messages from history`);
 
-  // conversations.history returns newest-first, so [0] is most recent
-  return botMessages?.[0]?.ts ?? null;
-}
+    const botMessages = result.messages?.filter(
+      (m) => m.user === botUserId && (m.text ?? '').includes(KICKOFF_SIGNATURE)
+    );
 
-export async function getThreadReplies(channelName: string, threadTs: string) {
-  const channelId = await getChannelId(channelName);
-  const result = await slack.conversations.replies({
-    channel: channelId,
-    ts: threadTs,
-    limit: 200,
-  });
-  // First message in `messages` is the thread root (kickoff). Skip it.
-  return (result.messages ?? []).slice(1);
+    console.log(`[${channelName}] Of those, ${botMessages?.length ?? 0} match the kickoff signature`);
+
+    // Also log if any messages were from the bot but didn't match signature
+    const botMessagesAll = result.messages?.filter((m) => m.user === botUserId);
+    if (botMessagesAll && botMessagesAll.length > 0 && (botMessages?.length ?? 0) === 0) {
+      console.log(`[${channelName}] Found ${botMessagesAll.length} bot messages but none matched signature. First bot message text: ${botMessagesAll[0].text?.substring(0, 100)}`);
+    }
+
+    return botMessages?.[0]?.ts ?? null;
+  } catch (err: any) {
+    if (err.data) {
+      console.error(`[${channelName}] Slack error in conversations.history:`, JSON.stringify(err.data, null, 2));
+    }
+    throw err;
+  }
 }
 
 /**
