@@ -29,3 +29,4 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
