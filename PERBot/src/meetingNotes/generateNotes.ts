@@ -35,6 +35,8 @@ async function main(): Promise<void> {
         imageCount: 0,
       });
     }
+  // Be polite to Gemini's rate limit — 2s between calls
+  await new Promise((r) => setTimeout(r, 2000));
   }
 
   const url = await createMeetingNotesPage(new Date(), subsystemContents);
