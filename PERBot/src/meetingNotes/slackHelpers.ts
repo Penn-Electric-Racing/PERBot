@@ -11,6 +11,7 @@ export async function getChannelId(channelName: string): Promise<string> {
     return channelIdCache.get(channelName)!;
   }
 
+  // Paginate through channels (Slack returns up to 1000 at a time)
   let cursor: string | undefined;
   do {
     try {
@@ -47,7 +48,6 @@ export async function postKickoffMessage(channelName: string, text: string): Pro
     if (!result.ts) throw new Error(`No timestamp returned from chat.postMessage in #${channelName}`);
     return result.ts;
   } catch (err: any) {
-    // Surface the full Slack error so we can see `needed` and `provided` scopes
     if (err.data) {
       console.error(`Slack error details for #${channelName}:`, JSON.stringify(err.data, null, 2));
     }
@@ -86,13 +86,34 @@ export async function findMostRecentBotThread(
     // Also log if any messages were from the bot but didn't match signature
     const botMessagesAll = result.messages?.filter((m) => m.user === botUserId);
     if (botMessagesAll && botMessagesAll.length > 0 && (botMessages?.length ?? 0) === 0) {
-      console.log(`[${channelName}] Found ${botMessagesAll.length} bot messages but none matched signature. First bot message text: ${botMessagesAll[0].text?.substring(0, 100)}`);
+      console.log(
+        `[${channelName}] Found ${botMessagesAll.length} bot messages but none matched signature. First bot message text: ${botMessagesAll[0].text?.substring(0, 100)}`
+      );
     }
 
+    // conversations.history returns newest-first, so [0] is most recent
     return botMessages?.[0]?.ts ?? null;
   } catch (err: any) {
     if (err.data) {
       console.error(`[${channelName}] Slack error in conversations.history:`, JSON.stringify(err.data, null, 2));
+    }
+    throw err;
+  }
+}
+
+export async function getThreadReplies(channelName: string, threadTs: string) {
+  const channelId = await getChannelId(channelName);
+  try {
+    const result = await slack.conversations.replies({
+      channel: channelId,
+      ts: threadTs,
+      limit: 200,
+    });
+    // First message in `messages` is the thread root (kickoff). Skip it.
+    return (result.messages ?? []).slice(1);
+  } catch (err: any) {
+    if (err.data) {
+      console.error(`[${channelName}] Slack error in conversations.replies:`, JSON.stringify(err.data, null, 2));
     }
     throw err;
   }
