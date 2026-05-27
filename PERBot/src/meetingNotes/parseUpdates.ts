@@ -1,6 +1,11 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+/**
+ * Parses freeform Slack thread text into the Notion section structure using Groq.
+ * Groq runs Llama 3.3 70B via an OpenAI-compatible API — much higher free-tier
+ * limits than Gemini and significantly faster.
+ */
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const GROQ_MODEL = 'llama-3.3-70b-versatile';
 
 export interface ParsedUpdate {
   logisticalUpdates: string;
@@ -24,22 +29,10 @@ export const EMPTY_UPDATE: ParsedUpdate = {
   incomplete: '',
 };
 
-/**
- * Send the concatenated thread text to Gemini and ask it to bucket
- * each piece into the appropriate Notion section. Returns structured content.
- */
 export async function parseSubsystemUpdates(
   subsystemName: string,
   threadText: string
 ): Promise<ParsedUpdate> {
-  const model = genAI.getGenerativeModel({
-    model: 'gemini-2.0-flash',
-    generationConfig: {
-      responseMimeType: 'application/json',
-      temperature: 0.2,
-    },
-  });
-
   const prompt = `You are organizing weekly status updates from a Formula SAE Electric racing team into meeting notes.
 
 Below are messages posted by members of the "${subsystemName}" subsystem this week. Bucket each piece of content into the appropriate section.
@@ -61,9 +54,9 @@ RULES:
 - If a section has no relevant content, return an empty string ""
 - Don't invent content. Only use what's in the messages.
 - Don't include image markdown — images are handled separately
-- Speaker names in brackets like [Alice] are message authors; you can attribute things to them naturally ("Alice ordered the elcon charger") or drop the attribution if the bullet reads better without it
+- Speaker names in brackets like [Alice] are message authors; attribute naturally or drop attribution if the bullet reads better
 
-Return ONLY a JSON object with these exact keys:
+Return ONLY a JSON object with these exact keys, no other text:
 {
   "logisticalUpdates": "- bullet\\n- bullet",
   "designUpdates": "",
@@ -78,17 +71,36 @@ Return ONLY a JSON object with these exact keys:
 MESSAGES:
 ${threadText}`;
 
-  const result = await model.generateContent(prompt);
-  const text = result.response.text();
+  const response = await fetch(GROQ_API_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.2,
+      response_format: { type: 'json_object' },
+    }),
+  });
 
-  // Strip fences just in case
+  if (!response.ok) {
+    const errBody = await response.text();
+    throw new Error(`Groq API error ${response.status} for ${subsystemName}: ${errBody}`);
+  }
+
+  const data = (await response.json()) as {
+    choices: { message: { content: string } }[];
+  };
+  const text = data.choices?.[0]?.message?.content ?? '';
   const cleaned = text.replace(/```json|```/g, '').trim();
 
   try {
     const parsed = JSON.parse(cleaned) as Partial<ParsedUpdate>;
     return { ...EMPTY_UPDATE, ...parsed };
   } catch (err) {
-    console.error(`Failed to parse Gemini response for ${subsystemName}:`, text);
-    throw new Error(`Gemini returned non-JSON for ${subsystemName}: ${err}`);
+    console.error(`Failed to parse Groq response for ${subsystemName}:`, text);
+    throw new Error(`Groq returned non-JSON for ${subsystemName}: ${err}`);
   }
 }
