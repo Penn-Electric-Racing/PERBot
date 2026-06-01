@@ -1,11 +1,12 @@
 /**
- * GitHub Actions cron runs in UTC and is often delayed by 15-60 minutes.
- * For automatic (cron) runs we accept the expected hour or the hour after.
- * For manual (workflow_dispatch) runs we skip the check entirely so testing
- * works at any time.
+ * GitHub Actions cron is unreliable — runs can be delayed by hours, especially
+ * on Mondays. To work around this, we schedule the workflow to fire many times
+ * across a window, and use this check + idempotency in the script itself to
+ * ensure only one effective run happens per scheduled occurrence.
+ *
+ * Manual (workflow_dispatch) runs always pass the time check so testing works.
  */
-export function assertExpectedETHour(expectedHour: number): void {
-  // Manual runs from the Actions tab set this env var to 'workflow_dispatch'
+export function assertExpectedETHourRange(minHour: number, maxHour: number): void {
   if (process.env.GITHUB_EVENT_NAME === 'workflow_dispatch') {
     console.log('Manual run detected — skipping time check.');
     return;
@@ -20,9 +21,13 @@ export function assertExpectedETHour(expectedHour: number): void {
     10
   );
 
-  // Accept the expected hour or the hour after (for late cron runs)
-  if (etHour !== expectedHour && etHour !== expectedHour + 1) {
-    console.log(`Skipping run — current ET hour is ${etHour}, expected ${expectedHour} or ${expectedHour + 1}.`);
+  if (etHour < minHour || etHour > maxHour) {
+    console.log(`Skipping run — current ET hour is ${etHour}, expected range ${minHour}-${maxHour}.`);
     process.exit(0);
   }
+}
+
+// Backward-compatible alias (single hour = accept that hour or the next)
+export function assertExpectedETHour(expectedHour: number): void {
+  assertExpectedETHourRange(expectedHour, expectedHour + 1);
 }
