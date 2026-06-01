@@ -6,14 +6,17 @@ import {
   getMessagePermalink,
   getUserDisplayName,
 } from './slackHelpers';
-import { parseSubsystemUpdates, EMPTY_UPDATE } from './parseUpdates';
+import {
+  parseSubsystemUpdates,
+  EMPTY_UPDATE,
+  ProcessedMessage,
+} from './parseUpdates';
 import { createMeetingNotesPage, SubsystemContent } from './notionWriter';
 import { assertExpectedETHour } from './timeCheck';
 
 async function main(): Promise<void> {
   assertExpectedETHour(12);
 
-  // Start-of-week cutoff: Monday 00:00 in ET, converted to unix seconds
   const sinceUnix = computeMondayMidnightETUnix();
   console.log(`Looking for kickoff threads posted since ${new Date(sinceUnix * 1000).toISOString()}`);
 
@@ -27,7 +30,6 @@ async function main(): Promise<void> {
       subsystemContents.push(content);
     } catch (err) {
       console.error(`Failed to process ${sub.name}:`, err);
-      // Don't kill the whole run — push an empty entry and continue
       subsystemContents.push({
         subsystem: sub.name,
         updates: EMPTY_UPDATE,
@@ -35,8 +37,6 @@ async function main(): Promise<void> {
         imageCount: 0,
       });
     }
-  // Be polite to Gemini's rate limit — 2s between calls
-  await new Promise((r) => setTimeout(r, 2000));
   }
 
   const url = await createMeetingNotesPage(new Date(), subsystemContents);
@@ -64,56 +64,46 @@ async function processSubsystem(
     return { subsystem: name, updates: EMPTY_UPDATE, threadLink, imageCount: 0 };
   }
 
-  // Build thread text with author names so Gemini sees who said what
-  const lines: string[] = [];
+  const processedMessages: ProcessedMessage[] = [];
+  let totalImageCount = 0;
   for (const m of replies) {
     const author = m.user ? await getUserDisplayName(m.user) : 'unknown';
     const text = (m.text ?? '').trim();
-    if (text) lines.push(`[${author}] ${text}`);
+    const files =
+      (m as unknown as { files?: { mimetype?: string }[] }).files ?? [];
+    const imageCount = files.filter((f) => f.mimetype?.startsWith('image/')).length;
+    totalImageCount += imageCount;
+    const permalink = m.ts ? getMessagePermalink(channelId, m.ts) : null;
+    if (text || imageCount > 0) {
+      processedMessages.push({ author, text, imageCount, permalink });
+    }
   }
-  const threadText = lines.join('\n\n');
 
-  // Count image attachments across all replies
-  const imageCount = replies.reduce((acc, m) => {
-    const files = (m as unknown as { files?: { mimetype?: string }[] }).files ?? [];
-    return acc + files.filter((f) => f.mimetype?.startsWith('image/')).length;
-  }, 0);
+  console.log(`Found ${replies.length} replies, ${totalImageCount} images. Parsing...`);
+  const updates =
+    processedMessages.length > 0
+      ? await parseSubsystemUpdates(name, processedMessages)
+      : EMPTY_UPDATE;
 
-  console.log(`Found ${replies.length} replies, ${imageCount} images. Calling Gemini...`);
-  const updates = threadText.trim()
-    ? await parseSubsystemUpdates(name, threadText)
-    : EMPTY_UPDATE;
-
-  return { subsystem: name, updates, threadLink, imageCount };
+  return { subsystem: name, updates, threadLink, imageCount: totalImageCount };
 }
 
-/**
- * Compute the unix timestamp (seconds) for Monday 00:00 in America/New_York
- * of the current week. Used as the "oldest" filter when looking for kickoff threads.
- */
 function computeMondayMidnightETUnix(): number {
-  // Get the current date in ET
   const now = new Date();
   const etNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
-
-  // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
   const dayOfWeek = etNow.getDay();
-  // Days to subtract to reach Monday of this week (Mon → 0, Tue → 1, ..., Sun → 6)
   const daysFromMonday = (dayOfWeek + 6) % 7;
 
   const mondayET = new Date(etNow);
   mondayET.setDate(mondayET.getDate() - daysFromMonday);
   mondayET.setHours(0, 0, 0, 0);
 
-  // mondayET above is naive — interpret it as ET, get the equivalent UTC instant
-  // by asking what UTC offset ET currently has and adjusting
   const etOffsetMs = computeETOffsetMs(mondayET);
   const mondayMidnightUtcMs = mondayET.getTime() + etOffsetMs;
   return Math.floor(mondayMidnightUtcMs / 1000);
 }
 
 function computeETOffsetMs(date: Date): number {
-  // The difference between UTC time and the same wall-clock time in ET
   const utcDate = new Date(date.toLocaleString('en-US', { timeZone: 'UTC' }));
   const etDate = new Date(date.toLocaleString('en-US', { timeZone: 'America/New_York' }));
   return utcDate.getTime() - etDate.getTime();
