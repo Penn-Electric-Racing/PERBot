@@ -11,11 +11,23 @@ import {
   EMPTY_UPDATE,
   ProcessedMessage,
 } from './parseUpdates';
-import { createMeetingNotesPage, SubsystemContent } from './notionWriter';
-import { assertExpectedETHour } from './timeCheck';
+import {
+  createMeetingNotesPage,
+  findExistingMeetingPageForToday,
+  SubsystemContent,
+} from './notionWriter';
+import { assertExpectedETHourRange } from './timeCheck';
 
 async function main(): Promise<void> {
-  assertExpectedETHour(12);
+  // Accept any Wednesday run between 11am-1pm ET (target is 12pm, but cron is flaky).
+  assertExpectedETHourRange(11, 13);
+
+  // Idempotency: if a meeting page for today already exists, don't create another one
+  const existingPageUrl = await findExistingMeetingPageForToday();
+  if (existingPageUrl) {
+    console.log(`⊘ Meeting page for today already exists, skipping generation: ${existingPageUrl}`);
+    return;
+  }
 
   const sinceUnix = computeMondayMidnightETUnix();
   console.log(`Looking for kickoff threads posted since ${new Date(sinceUnix * 1000).toISOString()}`);
