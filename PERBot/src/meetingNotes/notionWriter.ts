@@ -33,6 +33,43 @@ export async function createMeetingNotesPage(
   return (result as { url: string }).url;
 }
 
+
+/**
+ * Check if a meeting notes page for today's date already exists under the
+ * parent page. Returns the page URL if found, else null. Used for idempotency
+ * when the Wednesday job might fire multiple times due to GitHub Actions cron
+ * unreliability.
+ */
+export async function findExistingMeetingPageForToday(): Promise<string | null> {
+  const month = new Date().toLocaleString('en-US', {
+    month: 'numeric',
+    timeZone: 'America/New_York',
+  });
+  const day = new Date().toLocaleString('en-US', {
+    day: 'numeric',
+    timeZone: 'America/New_York',
+  });
+  const expectedTitle = `${month}/${day} Mechanical Meeting`;
+ 
+  let cursor: string | undefined;
+  do {
+    const result: any = await notion.blocks.children.list({
+      block_id: NOTION_PARENT_PAGE_ID,
+      start_cursor: cursor,
+    });
+    for (const block of result.results as any[]) {
+      if (block.type === 'child_page' && block.child_page?.title === expectedTitle) {
+        // Build the page URL
+        const pageId = block.id.replace(/-/g, '');
+        return `https://www.notion.so/${pageId}`;
+      }
+    }
+    cursor = result.has_more ? result.next_cursor || undefined : undefined;
+  } while (cursor);
+ 
+  return null;
+}
+
 function buildPageBlocks(contents: SubsystemContent[]): any[] {
   const blocks: any[] = [];
 
