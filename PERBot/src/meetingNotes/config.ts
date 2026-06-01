@@ -28,13 +28,24 @@ export const NOTION_PARENT_PAGE_ID = '33b560bcc03980599c0cd06080df6d5a'; // "REV
 export const SLACK_WORKSPACE_SUBDOMAIN = 'pennelectricracing';
 
 /** Posted by PERBot in each subsystem channel Monday 9am ET. `{date}` is replaced at runtime. */
-export const KICKOFF_MESSAGE = `📋 *Weekly Update Thread — Week of {date}*
+export const KICKOFF_MESSAGE = `📋 *Weekly Update Thread! Week of {date}*
 
-Reply in this thread with what you've been working on. Anything goes — CAD screenshots, blockers, manufacturing progress, testing results, deadlines you're chasing.
+Reply in this thread with what you've been working on. Two ways:
 
-🕛 *Snapshot Wednesday at 12:00 PM ET* — whatever's in this thread gets pulled into the meeting notes.
+*Option 1 — Use section headers* (more precise placement in meeting notes):
+\`\`\`
+*Complete:*
+*Design:*
+*Manufacturing:*
+*Deadlines:*
+\`\`\`
+Recognized headers: Complete, Incomplete, Deadlines, Logistical, Design, Manufacturing, Overdue, Look-ahead
 
-_Missing this thread = your subsystem shows up empty in the Wednesday meeting notes. Don't be that subsystem._`;
+*Option 2 — Just write naturally.* AI will sort what you wrote into the right sections.
+
+📷 Screenshots are encouraged — attach them to whichever message they belong to. They'll link back to this thread from the Notion notes.
+
+🕛 *Snapshot Wednesday 12:00 PM ET, so please thread before then!*`;
 
 /** Signature used by `findMostRecentBotThread` to identify the kickoff message. Must appear in KICKOFF_MESSAGE. */
 export const KICKOFF_SIGNATURE = 'Weekly Update Thread';
