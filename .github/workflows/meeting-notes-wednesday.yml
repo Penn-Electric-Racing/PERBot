@@ -1,14 +1,25 @@
 name: Meeting Notes — Wednesday Generate
 
+# Multiple cron triggers across 11am-1pm ET. Idempotency check in the script
+# ensures only the first successful run creates the Notion page.
 on:
   schedule:
-    - cron: '0 16 * * 3' # 12pm EDT (summer)
-    - cron: '0 17 * * 3' # 12pm EST (winter)
+    - cron: '0 15 * * 3'    # 11am EDT / 10am EST UTC
+    - cron: '30 15 * * 3'
+    - cron: '0 16 * * 3'    # 12pm EDT / 11am EST UTC
+    - cron: '30 16 * * 3'
+    - cron: '0 17 * * 3'    # 1pm EDT / 12pm EST UTC
+    - cron: '30 17 * * 3'
+    - cron: '0 18 * * 3'    # 2pm EDT / 1pm EST UTC (last chance)
   workflow_dispatch:
 
 jobs:
   generate-notes:
     runs-on: ubuntu-latest
+    # Prevent overlapping runs from racing on Notion page creation
+    concurrency:
+      group: wednesday-generate
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
@@ -28,6 +39,5 @@ jobs:
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
