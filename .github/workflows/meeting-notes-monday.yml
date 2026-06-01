@@ -1,16 +1,30 @@
 name: Meeting Notes — Monday Kickoff
 
+# GitHub Actions cron is unreliable (delays up to several hours during peak load).
+# We fire many times across 8am-12pm ET and use idempotency in the script to
+# ensure kickoffs are posted exactly once per channel per Monday.
 on:
   schedule:
-    # GitHub cron is UTC and ignores DST. We schedule at both possible UTC times;
-    # the script checks the actual ET hour and exits early on the wrong one.
-    - cron: '0 13 * * 1' # 9am EDT (summer)
-    - cron: '0 14 * * 1' # 9am EST (winter)
-  workflow_dispatch: # allow manual runs from the Actions tab for testing
+    - cron: '0 12 * * 1'    # 8am EDT / 7am EST UTC
+    - cron: '30 12 * * 1'
+    - cron: '0 13 * * 1'    # 9am EDT / 8am EST UTC
+    - cron: '30 13 * * 1'
+    - cron: '0 14 * * 1'    # 10am EDT / 9am EST UTC
+    - cron: '30 14 * * 1'
+    - cron: '0 15 * * 1'    # 11am EDT / 10am EST UTC
+    - cron: '30 15 * * 1'
+    - cron: '0 16 * * 1'    # 12pm EDT / 11am EST UTC
+    - cron: '30 16 * * 1'
+    - cron: '0 17 * * 1'    # 1pm EDT / 12pm EST UTC
+  workflow_dispatch:
 
 jobs:
   post-kickoff:
     runs-on: ubuntu-latest
+    # Ensure two runs can't overlap and race each other
+    concurrency:
+      group: monday-kickoff
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
