@@ -1,21 +1,37 @@
 import OpenAI from 'openai';
-import { config, hasOpenAI } from '../config.js';
+import { config, hasGroq, hasOpenAI } from '../config.js';
 import type { SearchResult } from '../types.js';
 
 const EMBEDDING_BATCH_SIZE = 5;
 const EMBEDDING_BATCH_DELAY_MS = 3000;
 const MAX_EMBED_RETRIES = 8;
 
-let client: OpenAI | null = null;
+let openaiClient: OpenAI | null = null;
+let groqClient: OpenAI | null = null;
 
-function getClient(): OpenAI {
+function getOpenAIClient(): OpenAI {
   if (!hasOpenAI()) {
-    throw new Error('OPENAI_API_KEY is not configured.');
+    throw new Error(
+      'OPENAI_API_KEY is not configured. Embeddings are required for search to function.'
+    );
   }
-  if (!client) {
-    client = new OpenAI({ apiKey: config.openai.apiKey });
+  if (!openaiClient) {
+    openaiClient = new OpenAI({ apiKey: config.openai.apiKey });
   }
-  return client;
+  return openaiClient;
+}
+
+function getGroqClient(): OpenAI {
+  if (!hasGroq()) {
+    throw new Error('GROQ_API_KEY is not configured. It is required for the reranker.');
+  }
+  if (!groqClient) {
+    groqClient = new OpenAI({
+      apiKey: config.groq.apiKey,
+      baseURL: 'https://api.groq.com/openai/v1',
+    });
+  }
+  return groqClient;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -32,9 +48,9 @@ async function createEmbeddingWithRetry(openai: OpenAI, texts: string[]) {
         input: texts,
         encoding_format: 'float',
       });
-    } catch (err: any) {
-      const status = err?.status;
-      const message = String(err?.message || '');
+    } catch (err: unknown) {
+      const status = (err as { status?: number })?.status;
+      const message = String((err as { message?: string })?.message || '');
       const isRateLimit = status === 429 || message.includes('Rate limit');
 
       if (!isRateLimit || attempt >= MAX_EMBED_RETRIES) {
@@ -53,9 +69,9 @@ async function createEmbeddingWithRetry(openai: OpenAI, texts: string[]) {
 }
 
 export async function embedTexts(texts: string[]): Promise<number[][]> {
-  if (!hasOpenAI() || texts.length === 0) return [];
+  if (texts.length === 0) return [];
 
-  const openai = getClient();
+  const openai = getOpenAIClient();
   const allEmbeddings: number[][] = [];
 
   for (let i = 0; i < texts.length; i += EMBEDDING_BATCH_SIZE) {
@@ -76,10 +92,75 @@ export async function embedTexts(texts: string[]): Promise<number[][]> {
   return allEmbeddings;
 }
 
-export async function embedQuery(text: string): Promise<number[] | null> {
-  if (!hasOpenAI()) return null;
+export async function embedQuery(text: string): Promise<number[]> {
   const vectors = await embedTexts([text]);
-  return vectors[0] ?? null;
+  if (!vectors[0]) throw new Error('Embedding returned empty result for query.');
+  return vectors[0];
+}
+
+export interface RerankCandidate {
+  pageId: string;
+  title: string;
+  excerpt: string;
+}
+
+export async function rerankResults(
+  query: string,
+  candidates: RerankCandidate[]
+): Promise<string[]> {
+  if (candidates.length === 0) return [];
+
+  const groq = getGroqClient();
+
+  const candidateList = candidates
+    .map((c, i) => `[${i}] Title: ${c.title}\nExcerpt: ${c.excerpt}`)
+    .join('\n\n');
+
+  const prompt = `You are a relevance ranker. Given a user query and a list of document candidates, return a JSON array of candidate indices ordered from most to least relevant to the query. Include all indices. Output ONLY a JSON array, e.g. [2, 0, 1].
+
+Query: ${query}
+
+Candidates:
+${candidateList}`;
+
+  try {
+    const response = await groq.chat.completions.create({
+      model: 'llama-3.3-70b-versatile',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0,
+      max_tokens: 256,
+    });
+
+    const raw = response.choices[0]?.message?.content?.trim() ?? '';
+    const cleaned = raw.replace(/```[a-z]*\n?/g, '').replace(/```/g, '').trim();
+    const parsed: unknown = JSON.parse(cleaned);
+
+    if (
+      !Array.isArray(parsed) ||
+      !parsed.every((x) => typeof x === 'number' && x >= 0 && x < candidates.length)
+    ) {
+      console.warn('[PERBot] Reranker returned invalid indices, falling back to RRF order.');
+      return candidates.map((c) => c.pageId);
+    }
+
+    const seen = new Set<number>();
+    const reranked: string[] = [];
+    for (const idx of parsed as number[]) {
+      if (!seen.has(idx)) {
+        seen.add(idx);
+        reranked.push(candidates[idx]!.pageId);
+      }
+    }
+
+    for (let i = 0; i < candidates.length; i++) {
+      if (!seen.has(i)) reranked.push(candidates[i]!.pageId);
+    }
+
+    return reranked;
+  } catch (err) {
+    console.warn('[PERBot] Reranker failed, falling back to RRF order.', err);
+    return candidates.map((c) => c.pageId);
+  }
 }
 
 export async function summarizeSearchResults(query: string, results: SearchResult[]): Promise<string> {
@@ -91,7 +172,7 @@ export async function summarizeSearchResults(query: string, results: SearchResul
     return 'I could not find a strong answer in the indexed PER Notion pages.';
   }
 
-  const openai = getClient();
+  const openai = getOpenAIClient();
   const sourceText = results
     .map((result, index) => {
       const historical = result.page.isHistorical ? 'YES' : 'NO';

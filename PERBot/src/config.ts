@@ -48,6 +48,9 @@ export const config = {
     responseModel: optionalString('OPENAI_RESPONSE_MODEL', 'gpt-5'),
     embeddingModel: optionalString('OPENAI_EMBEDDING_MODEL', 'text-embedding-3-small'),
   },
+  groq: {
+    apiKey: process.env.GROQ_API_KEY?.trim() || '',
+  },
   app: {
     currentRev: optionalString('CURRENT_REV', 'REV11'),
     topKResults: optionalNumber('TOP_K_RESULTS', 3),
@@ -65,4 +68,8 @@ export const config = {
 
 export function hasOpenAI(): boolean {
   return Boolean(config.openai.apiKey);
+}
+
+export function hasGroq(): boolean {
+  return Boolean(config.groq.apiKey);
 }
