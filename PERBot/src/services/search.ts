@@ -8,8 +8,10 @@ import type {
   ParsedQuery,
   SearchResult,
 } from '../types.js';
-import { embedQuery } from './llm.js';
+import { buildBM25Corpus, bm25Score } from '../utils/bm25.js';
+import { reciprocalRankFusion } from '../utils/rrf.js';
 import { excerptAroundMatch, tokenize } from '../utils/text.js';
+import { embedQuery, rerankResults } from './llm.js';
 
 const SUBSYSTEM_QUERY_MAP: Array<{
   subsystem: InferredSubsystem;
@@ -116,20 +118,19 @@ const NOTES_HINTS = [
   'latest',
 ];
 
+const VECTOR_CANDIDATE_N = 50;
+const BM25_CANDIDATE_N = 50;
+const RERANK_TOP_N = 20;
+
 function normalize(text: string): string {
   return text.toLowerCase();
 }
 
-function dot(a: number[], b: number[]): number {
-  const len = Math.min(a.length, b.length);
-  let total = 0;
-  for (let i = 0; i < len; i += 1) total += a[i]! * b[i]!;
-  return total;
-}
-
-function countOccurrences(haystack: string, needle: string): number {
-  if (!needle) return 0;
-  return haystack.split(needle).length - 1;
+function cosine(a: number[], b: number[]): number {
+  if (a.length !== b.length) return 0;
+  let dot = 0;
+  for (let i = 0; i < a.length; i++) dot += a[i]! * b[i]!;
+  return dot;
 }
 
 export function parseQuery(input: string): ParsedQuery {
@@ -140,7 +141,7 @@ export function parseQuery(input: string): ParsedQuery {
   for (const token of tokens) {
     const [rawKey, ...rest] = token.split(':');
     const value = rest.join(':').trim();
-    const key = rawKey.toLowerCase();
+    const key = (rawKey ?? '').toLowerCase();
 
     if (!value) {
       remaining.push(token);
@@ -167,44 +168,6 @@ export function parseQuery(input: string): ParsedQuery {
   return { raw: input, cleaned, filters };
 }
 
-function queryWantsHighLevel(query: string): boolean {
-  const q = normalize(query);
-  return HIGH_LEVEL_HINTS.some((hint) => q.includes(hint));
-}
-
-function queryWantsNotes(query: string): boolean {
-  const q = normalize(query);
-  return NOTES_HINTS.some((hint) => q.includes(hint));
-}
-
-function queryWantsHistorical(query: string): boolean {
-  const q = normalize(query);
-  return q.includes('historical') || q.includes('old') || q.includes('older') || q.includes('previous');
-}
-
-function detectSubsystemIntent(
-  query: string,
-  explicitSubsystem?: string
-): {
-  subsystem: InferredSubsystem | null;
-  terms: string[];
-  preferredBranch: InferredBranch | null;
-} {
-  const q = normalize(`${query} ${explicitSubsystem ?? ''}`);
-
-  for (const candidate of SUBSYSTEM_QUERY_MAP) {
-    if (candidate.terms.some((term) => q.includes(term))) {
-      return {
-        subsystem: candidate.subsystem,
-        terms: candidate.terms,
-        preferredBranch: candidate.preferredBranch ?? null,
-      };
-    }
-  }
-
-  return { subsystem: null, terms: [], preferredBranch: null };
-}
-
 function passesFilters(parsed: ParsedQuery, page: NotionPageRecord): boolean {
   const corpus = normalize(`${page.title} ${page.path.join(' ')} ${page.markdown}`);
 
@@ -221,258 +184,170 @@ function passesFilters(parsed: ParsedQuery, page: NotionPageRecord): boolean {
   return true;
 }
 
-function pageHasSubsystemEvidence(
-  page: NotionPageRecord,
-  subsystemTerms: string[],
-  targetSubsystem: InferredSubsystem | null
-): boolean {
-  if (!targetSubsystem || subsystemTerms.length === 0) return true;
-
-  const titlePath = normalize(`${page.title} ${page.path.join(' ')}`);
-  const body = normalize(page.markdown.slice(0, 4000));
-
-  if (page.inferredSubsystem === targetSubsystem) return true;
-  if (subsystemTerms.some((term) => titlePath.includes(term))) return true;
-
-  let bodyHits = 0;
-  for (const term of subsystemTerms) {
-    if (body.includes(term)) bodyHits += 1;
-  }
-
-  return bodyHits >= 2;
+function queryWantsHighLevel(query: string): boolean {
+  const q = normalize(query);
+  return HIGH_LEVEL_HINTS.some((hint) => q.includes(hint));
 }
 
-function docTypeBoost(page: NotionPageRecord, query: string): number {
-  const wantsHighLevel = queryWantsHighLevel(query);
-  const wantsNotes = queryWantsNotes(query);
+function queryWantsNotes(query: string): boolean {
+  const q = normalize(query);
+  return NOTES_HINTS.some((hint) => q.includes(hint));
+}
 
-  let score = 0;
+function queryWantsHistorical(query: string): boolean {
+  const q = normalize(query);
+  return q.includes('historical') || q.includes('old') || q.includes('older') || q.includes('previous');
+}
+
+function metadataNudge(page: NotionPageRecord, queryText: string): number {
+  const wantsHighLevel = queryWantsHighLevel(queryText);
+  const wantsNotes = queryWantsNotes(queryText);
+  const wantsHistorical = queryWantsHistorical(queryText);
   const docType = page.inferredDocType ?? 'unknown';
 
+  let score = 0;
+
   if (wantsHighLevel) {
-    if (docType === 'home') score += 9;
-    if (docType === 'overview') score += 8;
-    if (docType === 'design') score += 5;
-    if (docType === 'spec') score += 5;
-    if (docType === 'meeting_notes') score -= 4;
-    if (docType === 'qa') score -= 6;
+    if (docType === 'home') score += 0.15;
+    else if (docType === 'overview') score += 0.12;
+    else if (docType === 'meeting_notes') score -= 0.08;
   }
 
   if (wantsNotes) {
-    if (docType === 'meeting_notes') score += 8;
-    if (docType === 'overview') score -= 2;
-    if (docType === 'home') score -= 2;
+    if (docType === 'meeting_notes') score += 0.12;
+    else if (docType === 'home' || docType === 'overview') score -= 0.05;
   } else {
-    if (docType === 'meeting_notes') score -= 2;
+    if (docType === 'meeting_notes') score -= 0.04;
   }
 
-  if (!wantsHighLevel && !wantsNotes && docType === 'qa') {
-    score -= 5;
-  }
+  if (page.isHistorical && !wantsHistorical) score -= 0.08;
+  else if (page.isHistorical && wantsHistorical) score += 0.05;
 
   return score;
 }
 
-function historicalAdjustment(page: NotionPageRecord, query: string): number {
-  const wantsHistorical = queryWantsHistorical(query);
-  if (page.isHistorical && !wantsHistorical) return -5;
-  if (page.isHistorical && wantsHistorical) return 2;
-  return 0;
-}
-
-function branchBoost(page: NotionPageRecord, preferredBranch: InferredBranch | null): number {
-  if (!preferredBranch) return 0;
-  if (page.inferredBranch === preferredBranch) return 8;
-  return -2;
-}
-
-function subsystemBoost(
-  page: NotionPageRecord,
-  targetSubsystem: InferredSubsystem | null,
-  subsystemTerms: string[]
-): number {
-  if (!targetSubsystem) return 0;
-
-  const titlePath = normalize(`${page.title} ${page.path.join(' ')}`);
-  const body = normalize(page.markdown.slice(0, 4000));
-
-  let score = 0;
-
-  if (page.inferredSubsystem === targetSubsystem) score += 20;
-  if (subsystemTerms.some((term) => titlePath.includes(term))) score += 16;
-  if (subsystemTerms.some((term) => body.includes(term))) score += 4;
-
-  return score;
-}
-
-function lexicalScore(page: NotionPageRecord, query: string): number {
-  const q = normalize(query.trim());
-  if (!q) return 0;
-
-  const queryTokens = tokenize(q);
-  const titleLower = normalize(page.title);
-  const pathLower = normalize(page.path.join(' '));
-  const bodyLower = normalize(page.markdown.slice(0, 5000));
-
-  let score = 0;
-
-  if (titleLower.includes(q)) score += 18;
-  if (pathLower.includes(q)) score += 14;
-  if (bodyLower.includes(q)) score += 4;
-
-  for (const token of queryTokens) {
-    score += countOccurrences(titleLower, token) * 5.5;
-    score += countOccurrences(pathLower, token) * 4.5;
-    score += countOccurrences(bodyLower, token) * 0.8;
-  }
-
-  return score;
-}
-
-function pageSemanticScore(queryEmbedding: number[] | null, chunks: NotionChunkRecord[]): number {
-  if (!queryEmbedding) return 0;
-
-  let best = 0;
-  let total = 0;
-  let count = 0;
-
-  for (const chunk of chunks) {
-    if (!chunk.embedding) continue;
-    const score = dot(queryEmbedding, chunk.embedding);
-    if (score > best) best = score;
-    total += score;
-    count += 1;
-  }
-
-  if (count === 0) return 0;
-
-  const avg = total / count;
-  return best * 0.7 + avg * 0.3;
-}
-
-function supportScore(page: NotionPageRecord, chunks: NotionChunkRecord[], query: string): number {
-  const qTokens = tokenize(normalize(query));
-  if (qTokens.length === 0) return 0;
-
-  let supportingChunks = 0;
-  for (const chunk of chunks) {
-    const text = normalize(chunk.text);
-    const hits = qTokens.reduce((acc, token) => acc + (text.includes(token) ? 1 : 0), 0);
-    if (hits >= Math.min(2, qTokens.length)) {
-      supportingChunks += 1;
-    }
-  }
-
-  let score = Math.min(6, supportingChunks * 1.2);
-
-  if (page.inferredDocType === 'home') score += 1.5;
-  if (page.inferredDocType === 'overview') score += 1.2;
-
-  return score;
-}
-
-function chooseBestChunkForPage(
-  page: NotionPageRecord,
+function chooseBestChunk(
   chunks: NotionChunkRecord[],
-  query: string
+  queryEmbedding: number[],
+  queryText: string
 ): NotionChunkRecord {
-  const q = normalize(query);
-  let bestChunk = chunks[0];
+  const q = normalize(queryText);
+  let best = chunks[0]!;
   let bestScore = -Infinity;
 
   for (const chunk of chunks) {
-    const text = normalize(chunk.text);
     let score = 0;
 
-    if (text.includes(q)) score += 10;
-
-    for (const token of tokenize(q)) {
-      if (text.includes(token)) score += 1.5;
+    if (chunk.embedding) {
+      score += cosine(queryEmbedding, chunk.embedding) * 2;
     }
 
-    if (page.inferredDocType === 'home' || page.inferredDocType === 'overview') {
-      score += 1;
+    const text = normalize(chunk.text);
+    if (text.includes(q)) score += 1;
+    for (const token of tokenize(q)) {
+      if (text.includes(token)) score += 0.2;
     }
 
     if (score > bestScore) {
       bestScore = score;
-      bestChunk = chunk;
+      best = chunk;
     }
   }
 
-  return bestChunk;
+  return best;
 }
 
 export async function searchIndex(index: NotionIndex, rawQuery: string): Promise<SearchResult[]> {
   const parsed = parseQuery(rawQuery);
   const queryText = parsed.cleaned || parsed.raw;
+
   const queryEmbedding = await embedQuery(queryText);
 
-  const subsystemIntent = detectSubsystemIntent(queryText, parsed.filters.subsystem);
-  const chunksByPageId = new Map<string, NotionChunkRecord[]>();
+  const queryTerms = tokenize(queryText);
 
+  const candidatePages = index.pages.filter((page) => passesFilters(parsed, page));
+
+  const chunksByPageId = new Map<string, NotionChunkRecord[]>();
   for (const chunk of index.chunks) {
-    const arr = chunksByPageId.get(chunk.pageId) || [];
+    const arr = chunksByPageId.get(chunk.pageId) ?? [];
     arr.push(chunk);
     chunksByPageId.set(chunk.pageId, arr);
   }
 
-  let candidatePages = index.pages.filter((page) => passesFilters(parsed, page));
+  const eligiblePages = candidatePages.filter((p) => (chunksByPageId.get(p.id)?.length ?? 0) > 0);
 
-  if (subsystemIntent.subsystem) {
-    const gated = candidatePages.filter((page) =>
-      pageHasSubsystemEvidence(page, subsystemIntent.terms, subsystemIntent.subsystem)
-    );
+  const corpus = buildBM25Corpus(
+    eligiblePages.map((p) => {
+      const chunks = chunksByPageId.get(p.id) ?? [];
+      return chunks.map((c) => c.text).join(' ');
+    })
+  );
 
-    if (gated.length > 0) {
-      candidatePages = gated;
+  const vectorScores = new Map<string, number>();
+  const bm25Scores = new Map<string, number>();
+
+  for (let pi = 0; pi < eligiblePages.length; pi++) {
+    const page = eligiblePages[pi]!;
+    const chunks = chunksByPageId.get(page.id) ?? [];
+
+    let bestCosine = 0;
+    for (const chunk of chunks) {
+      if (!chunk.embedding) continue;
+      const sim = cosine(queryEmbedding, chunk.embedding);
+      if (sim > bestCosine) bestCosine = sim;
     }
+    vectorScores.set(page.id, bestCosine);
+
+    const docText = chunks.map((c) => c.text).join(' ');
+    bm25Scores.set(page.id, bm25Score(queryTerms, docText, corpus));
   }
 
-  const scoredPages: Array<{
-    page: NotionPageRecord;
-    score: number;
-    lexical: number;
-    semantic: number;
-    chosenChunk: NotionChunkRecord;
-  }> = [];
+  const vectorRanking = eligiblePages
+    .slice()
+    .sort((a, b) => (vectorScores.get(b.id) ?? 0) - (vectorScores.get(a.id) ?? 0))
+    .slice(0, VECTOR_CANDIDATE_N)
+    .map((p) => p.id);
 
-  for (const page of candidatePages) {
-    const pageChunks = chunksByPageId.get(page.id) || [];
-    if (pageChunks.length === 0) continue;
+  const bm25Ranking = eligiblePages
+    .slice()
+    .sort((a, b) => (bm25Scores.get(b.id) ?? 0) - (bm25Scores.get(a.id) ?? 0))
+    .slice(0, BM25_CANDIDATE_N)
+    .map((p) => p.id);
 
-    const lexical = lexicalScore(page, queryText);
-    const semantic = pageSemanticScore(queryEmbedding, pageChunks);
+  const rrfScores = reciprocalRankFusion([vectorRanking, bm25Ranking]);
 
-    const finalScore =
-      lexical * 0.85 +
-      semantic * 2.0 +
-      subsystemBoost(page, subsystemIntent.subsystem, subsystemIntent.terms) +
-      branchBoost(page, subsystemIntent.preferredBranch) +
-      docTypeBoost(page, queryText) +
-      historicalAdjustment(page, queryText) +
-      supportScore(page, pageChunks, queryText);
+  const pageMap = new Map<string, NotionPageRecord>(eligiblePages.map((p) => [p.id, p]));
 
-    if (finalScore <= 0) continue;
+  const fusedRanking = [...rrfScores.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, RERANK_TOP_N);
 
-    scoredPages.push({
+  const rerankedIds = await rerankResults(
+    queryText,
+    fusedRanking.map(([id]) => {
+      const page = pageMap.get(id)!;
+      const chunks = chunksByPageId.get(id) ?? [];
+      const bestChunk = chooseBestChunk(chunks, queryEmbedding, queryText);
+      return { pageId: id, title: page.title, excerpt: excerptAroundMatch(bestChunk.text, queryText) };
+    })
+  );
+
+  const topIds = rerankedIds.slice(0, config.app.topKResults);
+
+  return topIds.map((id) => {
+    const page = pageMap.get(id)!;
+    const chunks = chunksByPageId.get(id) ?? [];
+    const chunk = chooseBestChunk(chunks, queryEmbedding, queryText);
+    const rrfScore = rrfScores.get(id) ?? 0;
+    const nudge = metadataNudge(page, queryText);
+
+    return {
       page,
-      score: finalScore,
-      lexical,
-      semantic,
-      chosenChunk: chooseBestChunkForPage(page, pageChunks, queryText),
-    });
-  }
-
-  return scoredPages
-    .sort((a, b) => b.score - a.score)
-    .slice(0, config.app.topKResults)
-    .map((entry) => ({
-      page: entry.page,
-      chunk: entry.chosenChunk,
-      score: entry.score,
-      lexicalScore: entry.lexical,
-      semanticScore: entry.semantic,
-      excerpt: excerptAroundMatch(entry.chosenChunk.text, queryText),
-    }));
+      chunk,
+      score: rrfScore + nudge,
+      lexicalScore: bm25Scores.get(id) ?? 0,
+      semanticScore: vectorScores.get(id) ?? 0,
+      excerpt: excerptAroundMatch(chunk.text, queryText),
+    };
+  });
 }

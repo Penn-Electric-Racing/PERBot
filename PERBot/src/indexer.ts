@@ -1,4 +1,4 @@
-import { config, hasOpenAI } from './config.js';
+import { config } from './config.js';
 import { NotionService } from './services/notion.js';
 import { saveIndex } from './services/index-store.js';
 import { chunkText } from './utils/chunk.js';
@@ -156,20 +156,22 @@ function enrichPageMetadata(page: {
   };
 }
 
+function normalizeEmbedding(vec: number[]): number[] {
+  const magnitude = Math.sqrt(vec.reduce((sum, v) => sum + v * v, 0));
+  if (magnitude === 0) return vec;
+  return vec.map((v) => v / magnitude);
+}
+
 async function buildEmbeddings(chunks: NotionChunkRecord[]): Promise<void> {
-  if (!hasOpenAI() || chunks.length === 0) {
-    logger.warn(
-      'OPENAI_API_KEY not found, so index chunks will be stored without embeddings. Search will still work lexically.'
-    );
-    return;
-  }
+  if (chunks.length === 0) return;
 
   for (let i = 0; i < chunks.length; i += INDEXER_EMBED_BATCH_SIZE) {
     const batch = chunks.slice(i, i + INDEXER_EMBED_BATCH_SIZE);
     const vectors = await embedTexts(batch.map((item) => item.text));
 
     batch.forEach((chunk, index) => {
-      chunk.embedding = vectors[index];
+      const raw = vectors[index];
+      chunk.embedding = raw ? normalizeEmbedding(raw) : undefined;
     });
 
     const batchNumber = Math.floor(i / INDEXER_EMBED_BATCH_SIZE) + 1;
