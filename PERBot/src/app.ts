@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { config } from './config.js';
 import { logger } from './utils/logger.js';
 import { indexExists, loadIndex, loadStatus } from './services/index-store.js';
+import { downloadIndexFromRelease } from './services/index-downloader.js';
 import { searchIndex } from './services/search.js';
 import { summarizeSearchResults } from './services/llm.js';
 import { buildResultBlocks } from './services/slack-format.js';
@@ -299,6 +300,10 @@ async function main(): Promise<void> {
   await app.start();
   logger.info('⚡️ PERBot is running in Slack Socket Mode.');
   logger.info(`Index path: ${config.app.indexPath}`);
+
+  if (!(await ensureIndexReady())) {
+    await downloadIndexFromRelease();
+  }
 
   if (config.app.autoBootstrapOnMissingIndex && !(await ensureIndexReady())) {
     const status = await loadStatus();
