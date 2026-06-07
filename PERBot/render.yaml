@@ -21,9 +21,17 @@ services:
         value: gpt-5
       - key: OPENAI_EMBEDDING_MODEL
         value: text-embedding-3-small
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GITHUB_REPO
+        value: Penn-Electric-Racing/PERBot
+      - key: INDEX_PATH
+        value: ./data/notion-index.json
+      - key: INDEX_STATUS_PATH
+        value: ./data/index-status.json
       - key: CURRENT_REV
         value: REV11
       - key: TOP_K_RESULTS
         value: 3
-      - key: ALWAYS_REINDEX_ON_START
-        value: "true"
