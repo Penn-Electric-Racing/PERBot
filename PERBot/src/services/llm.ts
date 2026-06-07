@@ -51,9 +51,15 @@ async function createEmbeddingWithRetry(openai: OpenAI, texts: string[]) {
     } catch (err: unknown) {
       const status = (err as { status?: number })?.status;
       const message = String((err as { message?: string })?.message || '');
-      const isRateLimit = status === 429 || message.includes('Rate limit');
+      const cause = (err as { cause?: { code?: string } })?.cause;
+      const isRetryable =
+        status === 429 ||
+        message.includes('Rate limit') ||
+        cause?.code === 'ECONNRESET' ||
+        cause?.code === 'ENOTFOUND' ||
+        cause?.code === 'ETIMEDOUT';
 
-      if (!isRateLimit || attempt >= MAX_EMBED_RETRIES) {
+      if (!isRetryable || attempt >= MAX_EMBED_RETRIES) {
         throw err;
       }
 

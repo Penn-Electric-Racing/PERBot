@@ -78,6 +78,7 @@ export class NotionService {
         Authorization: `Bearer ${config.notion.token}`,
         'Notion-Version': config.notion.apiVersion,
       },
+      signal: AbortSignal.timeout(30_000),
     });
 
     if (!response.ok) {
