@@ -51,6 +51,11 @@ export const config = {
   groq: {
     apiKey: process.env.GROQ_API_KEY?.trim() || '',
   },
+  github: {
+    token: process.env.GITHUB_TOKEN?.trim() || '',
+    repo: optionalString('GITHUB_REPO', 'Penn-Electric-Racing/PERBot'),
+    indexReleaseTag: optionalString('GITHUB_INDEX_RELEASE_TAG', 'notion-index-latest'),
+  },
   app: {
     currentRev: optionalString('CURRENT_REV', 'REV11'),
     topKResults: optionalNumber('TOP_K_RESULTS', 3),

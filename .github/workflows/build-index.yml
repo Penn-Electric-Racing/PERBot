@@ -1,0 +1,58 @@
+name: Build Notion Index
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 4 * * *' # 4 AM UTC daily
+
+permissions:
+  contents: write # required to create/update releases
+
+jobs:
+  build-index:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: PERBot
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: PERBot/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Notion index
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # Slack tokens are required by config.ts at load time but unused by the indexer
+          SLACK_BOT_TOKEN: unused
+          SLACK_APP_TOKEN: unused
+          INDEX_PATH: ./data/notion-index.json
+          INDEX_STATUS_PATH: ./data/index-status.json
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: npm run index
+
+      - name: Compress index
+        run: gzip -9 data/notion-index.json
+
+      - name: Ensure release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view notion-index-latest 2>/dev/null || \
+          gh release create notion-index-latest \
+            --title "Notion Search Index" \
+            --notes "Pre-built Notion search index, updated nightly by CI." \
+            --prerelease
+
+      - name: Upload index to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload notion-index-latest data/notion-index.json.gz --clobber
