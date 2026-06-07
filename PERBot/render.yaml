@@ -32,6 +32,6 @@ services:
       - key: INDEX_STATUS_PATH
         value: ./data/index-status.json
       - key: CURRENT_REV
-        value: REV11
+        value: REV12
       - key: TOP_K_RESULTS
         value: 3
