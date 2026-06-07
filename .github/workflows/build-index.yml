@@ -29,7 +29,7 @@ jobs:
 
       - name: Build Notion index
         env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_TOKEN: ${{ secrets.NOTION_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           # Slack tokens are required by config.ts at load time but unused by the indexer
           SLACK_BOT_TOKEN: unused
