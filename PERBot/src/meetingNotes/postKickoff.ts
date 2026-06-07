@@ -1,6 +1,6 @@
-import { SUBSYSTEMS, KICKOFF_MESSAGE } from './config';
-import { postKickoffMessage, findMostRecentBotThread } from './slackHelpers';
-import { assertExpectedETHourRange } from './timeCheck';
+import { SUBSYSTEMS, KICKOFF_MESSAGE } from './config.js';
+import { postKickoffMessage, findMostRecentBotThread } from './slackHelpers.js';
+import { assertExpectedETHourRange } from './timeCheck.js';
 
 async function main(): Promise<void> {
   // Accept any Monday run between 8am-12pm ET. Cron may be delayed; the

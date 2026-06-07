@@ -1,5 +1,5 @@
 import { WebClient } from '@slack/web-api';
-import { SLACK_WORKSPACE_SUBDOMAIN, KICKOFF_SIGNATURE } from './config';
+import { SLACK_WORKSPACE_SUBDOMAIN, KICKOFF_SIGNATURE } from './config.js';
 
 const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
 

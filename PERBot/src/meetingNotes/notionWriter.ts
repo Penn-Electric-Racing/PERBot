@@ -1,6 +1,6 @@
 import { Client } from '@notionhq/client';
-import { ParsedUpdate } from './parseUpdates';
-import { NOTION_PARENT_PAGE_ID } from './config';
+import { ParsedUpdate } from './parseUpdates.js';
+import { NOTION_PARENT_PAGE_ID } from './config.js';
 
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
 

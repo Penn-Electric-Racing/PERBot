@@ -1,22 +1,22 @@
-import { SUBSYSTEMS } from './config';
+import { SUBSYSTEMS } from './config.js';
 import {
   getChannelId,
   findMostRecentBotThread,
   getThreadReplies,
   getMessagePermalink,
   getUserDisplayName,
-} from './slackHelpers';
+} from './slackHelpers.js';
 import {
   parseSubsystemUpdates,
   EMPTY_UPDATE,
   ProcessedMessage,
-} from './parseUpdates';
+} from './parseUpdates.js';
 import {
   createMeetingNotesPage,
   findExistingMeetingPageForToday,
   SubsystemContent,
-} from './notionWriter';
-import { assertExpectedETHourRange } from './timeCheck';
+} from './notionWriter.js';
+import { assertExpectedETHourRange } from './timeCheck.js';
 
 async function main(): Promise<void> {
   // Accept any Wednesday run between 11am-1pm ET (target is 12pm, but cron is flaky).
