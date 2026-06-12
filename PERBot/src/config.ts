@@ -25,9 +25,9 @@ function optionalString(name: string, fallback: string): string {
   return process.env[name]?.trim() || fallback;
 }
 
-function optionalList(name: string): string[] {
+function optionalList(name: string, fallback: string[] = []): string[] {
   const value = process.env[name]?.trim();
-  if (!value) return [];
+  if (!value) return fallback;
   return value.split(',').map((item) => item.trim()).filter(Boolean);
 }
 
@@ -37,6 +37,12 @@ export const config = {
     appToken: required('SLACK_APP_TOKEN'),
     botUserId: process.env.SLACK_BOT_USER_ID?.trim() || '',
     reindexAllowedUserIds: optionalList('SLACK_REINDEX_ALLOWED_USER_IDS'),
+    anonAllowedChannels: optionalList('ANON_ALLOWED_CHANNELS', [
+      'mech_questions',
+      'ele_questions',
+      'ops-internal',
+      'sof_questions',
+    ]),
   },
   notion: {
     token: required('NOTION_TOKEN'),
