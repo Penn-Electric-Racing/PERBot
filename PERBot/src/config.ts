@@ -40,7 +40,7 @@ export const config = {
     anonAllowedChannels: optionalList('ANON_ALLOWED_CHANNELS', [
       'mech_questions',
       'ele_questions',
-      'ops-internal',
+      'operations',
       'sof_questions',
     ]),
   },
