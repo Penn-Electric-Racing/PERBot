@@ -191,6 +191,17 @@ app.command('/dt', async ({ ack, command, client }) => {
 });
 
 app.command('/anon', async ({ ack, command, client, respond }) => {
+  const allowedChannels = config.slack.anonAllowedChannels;
+  if (!allowedChannels.includes(command.channel_name)) {
+    await ack({
+      response_type: 'ephemeral',
+      text: `\`/anon\` can only be used in: ${allowedChannels
+        .map((name) => `#${name}`)
+        .join(', ')}`,
+    });
+    return;
+  }
+
   const text = command.text.trim();
 
   if (!text) {
