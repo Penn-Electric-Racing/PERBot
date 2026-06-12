@@ -190,6 +190,59 @@ app.command('/dt', async ({ ack, command, client }) => {
   }
 });
 
+app.command('/anon', async ({ ack, command, client, respond }) => {
+  const text = command.text.trim();
+
+  if (!text) {
+    await ack({
+      response_type: 'ephemeral',
+      text:
+        'Usage: `/anon your message`\nPERBot will post your message in this channel without revealing who sent it.',
+    });
+    return;
+  }
+
+  await ack();
+
+  try {
+    await client.chat.postMessage({
+      channel: command.channel_id,
+      text: `:bust_in_silhouette: Anonymous: ${text}`,
+      blocks: [
+        {
+          type: 'section',
+          text: { type: 'mrkdwn', text },
+        },
+        {
+          type: 'context',
+          elements: [
+            {
+              type: 'mrkdwn',
+              text: ':bust_in_silhouette: Sent anonymously via `/anon`',
+            },
+          ],
+        },
+      ],
+      unfurl_links: false,
+      unfurl_media: false,
+    });
+
+    await respond({
+      response_type: 'ephemeral',
+      text: ':white_check_mark: Your anonymous message was posted.',
+    });
+  } catch (error) {
+    // Log only the error itself — never the sender or message text, so
+    // anonymity holds even in server logs.
+    logger.error('Anonymous message post failed.', error);
+    await respond({
+      response_type: 'ephemeral',
+      text:
+        ':x: PERBot could not post your anonymous message. If this is a private channel, invite @PERBot to it first and try again.',
+    });
+  }
+});
+
 app.command('/reindex', async ({ ack, command, client }) => {
   await ack({
     response_type: 'ephemeral',
