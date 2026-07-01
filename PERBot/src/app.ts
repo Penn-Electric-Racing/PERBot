@@ -7,6 +7,7 @@ import { downloadIndexFromRelease } from './services/index-downloader.js';
 import { searchIndex } from './services/search.js';
 import { summarizeSearchResults } from './services/llm.js';
 import { buildResultBlocks } from './services/slack-format.js';
+import { registerSponsorCommands } from './sponsorship/slack.js';
 
 const app = new App({
   token: config.slack.botToken,
@@ -358,6 +359,8 @@ app.event('app_mention', async ({ event, client }) => {
     });
   }
 });
+
+registerSponsorCommands(app);
 
 async function main(): Promise<void> {
   logger.info('[PERBot] Starting Slack Socket Mode...');
