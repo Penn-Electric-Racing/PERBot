@@ -131,10 +131,14 @@ ${candidateList}`;
 
   try {
     const response = await groq.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
+      model: config.groq.model,
       messages: [{ role: 'user', content: prompt }],
       temperature: 0,
-      max_tokens: 256,
+      // gpt-oss-120b is a reasoning model; keep reasoning minimal for this bounded ranking task.
+      reasoning_effort: 'low',
+      // Reasoning tokens count toward the completion budget — give headroom so the JSON index
+      // array isn't truncated (which would silently drop us to the RRF fallback order).
+      max_tokens: 1024,
     });
 
     const raw = response.choices[0]?.message?.content?.trim() ?? '';
