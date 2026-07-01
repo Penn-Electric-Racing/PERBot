@@ -1,7 +1,8 @@
 import { logger } from '../../utils/logger.js';
 import { daysUntil, todayIsoET } from '../dates.js';
+import { fetchSlackDirectory, notionUserToSlackId } from '../identity.js';
 import { SponsorNotion } from '../notion.js';
-import { PipelineRow } from '../types.js';
+import { NotionUser, PipelineRow } from '../types.js';
 import { channelHasMarker, makeSlackClient } from './shared.js';
 
 /**
@@ -49,23 +50,22 @@ export async function runStaleDm(force = process.env.FORCE_STALE_DM?.toLowerCase
     }
   }
 
-  const emailMap = await notion.listUserEmailMap(); // notionId -> email
+  // Build both directories once for identity resolution (email first, name fallback).
+  const notionUsers = await notion.listNotionUsers();
+  const notionUserById = new Map<string, NotionUser>(notionUsers.map((u) => [u.id, u]));
+  const slackDir = await fetchSlackDirectory(client);
   const marker = `sponsor-stale:${todayIsoET()}`;
 
   for (const [notionId, deals] of byUser) {
-    const email = emailMap.get(notionId);
-    if (!email) {
-      logger.warn(`Stale DM: no email for Notion user ${notionId} — cannot DM (${deals.length} deals).`);
+    const notionUser = notionUserById.get(notionId);
+    if (!notionUser) {
+      logger.warn(`Stale DM: DRI ${notionId} not in Notion directory — skipping (${deals.length} deals).`);
       continue;
     }
 
-    let slackUserId: string;
-    try {
-      const lookup: any = await client.users.lookupByEmail({ email });
-      slackUserId = lookup.user?.id;
-      if (!slackUserId) throw new Error('no user id');
-    } catch {
-      logger.warn(`Stale DM: no Slack user for ${email} — skipping.`);
+    const slackUserId = await notionUserToSlackId(client, notionUser, slackDir);
+    if (!slackUserId) {
+      logger.warn(`Stale DM: no Slack match for ${notionUser.name || notionId} — skipping.`);
       continue;
     }
 
@@ -74,7 +74,7 @@ export async function runStaleDm(force = process.env.FORCE_STALE_DM?.toLowerCase
     if (!dmChannel) continue;
 
     if (await channelHasMarker(client, dmChannel, marker)) {
-      logger.info(`Stale DM: already sent to ${email} today — skipping.`);
+      logger.info(`Stale DM: already sent to ${notionUser.name || slackUserId} today — skipping.`);
       continue;
     }
 
@@ -86,7 +86,7 @@ export async function runStaleDm(force = process.env.FORCE_STALE_DM?.toLowerCase
       `${lines.join('\n')}\n\n_Update them in Notion or log a touch with_ \`/sponsor log\`. ${marker}`;
 
     await client.chat.postMessage({ channel: dmChannel, text, unfurl_links: false });
-    logger.info(`Stale DM: sent ${deals.length} overdue deal(s) to ${email}.`);
+    logger.info(`Stale DM: sent ${deals.length} overdue deal(s) to ${notionUser.name || slackUserId}.`);
   }
 }
 

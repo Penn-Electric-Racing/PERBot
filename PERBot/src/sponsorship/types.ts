@@ -62,6 +62,13 @@ export interface CompanyClassification {
   channel: Channel;
 }
 
+/** A Notion workspace user, for bridging DRI persons to Slack identities. */
+export interface NotionUser {
+  id: string;
+  name: string;
+  email: string | null;
+}
+
 /** A parsed Pipeline deal row (subset of properties the commands + jobs use). */
 export interface PipelineRow {
   id: string;

@@ -3,6 +3,7 @@ import type { WebClient } from '@slack/web-api';
 import { logger } from '../utils/logger.js';
 import { todayIsoET } from './dates.js';
 import { DomainResolutionError, enrichCompany } from './enrichCompany.js';
+import { indexNotionUsers, slackUserToNotionId } from './identity.js';
 import { SponsorNotion } from './notion.js';
 import { EnrichResult, PipelineRow } from './types.js';
 
@@ -70,20 +71,6 @@ async function handleAdd(respond: RespondFn, arg: string): Promise<void> {
 
 // --- /sponsor me -------------------------------------------------------------
 
-/** Resolve a Slack user → their Notion user ID, via matching email addresses. */
-async function resolveCallerNotionId(client: WebClient, slackUserId: string): Promise<string | null> {
-  const info: any = await client.users.info({ user: slackUserId });
-  const email: string | undefined = info?.user?.profile?.email;
-  if (!email) return null;
-
-  const emailMap = await notion.listUserEmailMap(); // notionId -> email
-  const target = email.toLowerCase();
-  for (const [notionId, mappedEmail] of emailMap) {
-    if (mappedEmail === target) return notionId;
-  }
-  return null;
-}
-
 function formatDealLine(row: PipelineRow): string {
   const stage = row.stage ?? 'Prospect';
   const next = row.nextAction ? ` — Next: ${row.nextAction}` : '';
@@ -92,11 +79,12 @@ function formatDealLine(row: PipelineRow): string {
 }
 
 async function handleMe(client: WebClient, respond: RespondFn, slackUserId: string): Promise<void> {
-  const notionId = await resolveCallerNotionId(client, slackUserId);
+  const notionUsers = await notion.listNotionUsers();
+  const notionId = await slackUserToNotionId(client, slackUserId, indexNotionUsers(notionUsers));
   if (!notionId) {
     await respond({
       response_type: 'ephemeral',
-      text: "I couldn't match your Slack account to a Notion user (emails must match). Ask an admin to check your Notion access.",
+      text: "I couldn't match your Slack account to a Notion user (by email or name). Ask an admin to check your Notion access.",
     });
     return;
   }

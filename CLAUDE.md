@@ -175,9 +175,10 @@ Slack surface in `slack.ts`; cron jobs in `jobs/`. Model comes from `GROQ_MODEL`
 
 Deltas from the spec above, discovered while building against the live Notion schema:
 
-- **No "Needs Review" column exists** in the Prospect Bank. Low-confidence / unverified
-  Hunter results are surfaced as a `⚠️ NEEDS REVIEW: …` line in the row's **Notes**
-  (see `notion.ts:buildNotes`). Add a real checkbox property later if you want a filter.
+- **`Needs Review` is a checkbox column** on the Prospect Bank (added via MCP DDL). It's
+  set true when the Hunter contact is missing / low-confidence / unverified, and the *reason*
+  is also written as a `⚠️ NEEDS REVIEW: …` line in **Notes** (`notion.ts:buildNotes`). Filter
+  the Bank on the checkbox to triage.
 - **`cash_vs_inkind` → the `Type` property** (Cash / In-Kind). The LLM's `category[]`
   maps to the `Category` multi-select; a row never writes an empty multi-select (defaults
   to `General`). All enum values are validated in `classify.ts` against `types.ts` — keep
@@ -186,11 +187,14 @@ Deltas from the spec above, discovered while building against the live Notion sc
   canonical `https://<domain>` stored in the Bank `Domain` column (exact-match filter).
 - **Enrichment always writes `Status = Available`, `Relationship = New`.** Relationship is
   never LLM-guessed (guardrail).
-- **Slack ↔ Notion identity is matched by email.** `/sponsor me` and the stale-DM job map a
-  Slack user to a Pipeline `DRI` (a Notion person) by comparing email addresses
-  (`notion.users.list` ↔ Slack `users.info` / `users.lookupByEmail`). This needs the Slack
-  scopes **`users:read`** and **`users:read.email`**, and the Notion integration must be able
-  to see member emails. Users whose emails don't match are logged and skipped, never guessed.
+- **Slack ↔ Notion identity (`identity.ts`): email primary, conservative name fallback.**
+  DRI is a native Notion *person* (unlike per-risk, which stores Slack IDs in text and
+  name-matches typed names), so email is the natural strong join key. When email is
+  unavailable (Notion integration lacks the "read user emails" capability, or Slack/Notion
+  emails differ), we fall back to the same conservative name matcher per-risk uses (exact
+  normalized name / unique token-subset / unique surname+first-initial) — ambiguous is left
+  unresolved, never guessed. Needs Slack scopes **`users:read`** + **`users:read.email`**;
+  enable the Notion integration's **read-user-emails** capability for the primary path.
 - **Config now accepts `NOTION_TOKEN` *or* `NOTION_API_KEY`**, and `SLACK_APP_TOKEN` is
   optional (only the Socket-Mode app needs it) — so the cron job entrypoints can import
   `config` in a minimal env. Jobs need only `SLACK_BOT_TOKEN` + `NOTION_API_KEY`.

@@ -1,7 +1,7 @@
 import { Client } from '@notionhq/client';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
-import { BankRowInput, PipelineRow, Stage } from './types.js';
+import { BankRowInput, NotionUser, PipelineRow, Stage } from './types.js';
 
 /**
  * Notion access layer for the Sponsorship CRM (Prospect Bank + Pipeline).
@@ -122,6 +122,7 @@ export class SponsorNotion {
       Channel: { select: { name: c.channel } },
       Category: { multi_select: c.categories.map((name) => ({ name })) },
       'Fit reason': { rich_text: [{ text: { content: c.fitReason } }] },
+      'Needs Review': { checkbox: input.needsReview },
       Notes: { rich_text: [{ text: { content: buildNotes(input) } }] },
     };
 
@@ -204,18 +205,26 @@ export class SponsorNotion {
     logger.info(`Logged touch on ${row.company} (${row.id}).`);
   }
 
-  /** Map of Notion user ID → lowercased email, for bridging to Slack identities. */
-  async listUserEmailMap(): Promise<Map<string, string>> {
-    const map = new Map<string, string>();
+  /**
+   * List workspace users (id + display name + email) for bridging Notion DRI persons
+   * to Slack identities. Email may be null if the integration lacks the "read user
+   * emails" capability — the identity resolver falls back to name matching then.
+   */
+  async listNotionUsers(): Promise<NotionUser[]> {
+    const users: NotionUser[] = [];
     let cursor: string | undefined;
     do {
       const response: any = await this.client.users.list({ start_cursor: cursor, page_size: 100 });
       for (const user of response.results ?? []) {
-        const email = user?.person?.email;
-        if (user?.id && typeof email === 'string') map.set(user.id, email.toLowerCase());
+        if (user?.type === 'bot' || !user?.id) continue;
+        users.push({
+          id: user.id,
+          name: typeof user.name === 'string' ? user.name : '',
+          email: typeof user?.person?.email === 'string' ? user.person.email : null,
+        });
       }
       cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
     } while (cursor);
-    return map;
+    return users;
   }
 }
