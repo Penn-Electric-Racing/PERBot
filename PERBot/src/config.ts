@@ -11,6 +11,15 @@ function required(name: string): string {
   return value;
 }
 
+/** Require at least one of several env var names (accepts either naming convention). */
+function requireAny(names: string[]): string {
+  for (const name of names) {
+    const value = process.env[name]?.trim();
+    if (value) return value;
+  }
+  throw new Error(`Missing required environment variable: one of ${names.join(' / ')}`);
+}
+
 function optionalNumber(name: string, fallback: number): number {
   const value = process.env[name]?.trim();
   if (!value) return fallback;
@@ -34,12 +43,15 @@ function optionalList(name: string): string[] {
 export const config = {
   slack: {
     botToken: required('SLACK_BOT_TOKEN'),
-    appToken: required('SLACK_APP_TOKEN'),
+    // Only Socket Mode (the main app) needs the app token; scheduled jobs that import
+    // config don't. app.start() will surface a clear error if it's missing at runtime.
+    appToken: process.env.SLACK_APP_TOKEN?.trim() || '',
     botUserId: process.env.SLACK_BOT_USER_ID?.trim() || '',
     reindexAllowedUserIds: optionalList('SLACK_REINDEX_ALLOWED_USER_IDS'),
   },
   notion: {
-    token: required('NOTION_TOKEN'),
+    // Accept either name — the main app used NOTION_TOKEN; PER's other jobs use NOTION_API_KEY.
+    token: requireAny(['NOTION_TOKEN', 'NOTION_API_KEY']),
     apiVersion: optionalString('NOTION_API_VERSION', '2026-03-11'),
     allowedPageIds: optionalList('NOTION_ALLOWED_PAGE_IDS'),
   },
@@ -53,6 +65,18 @@ export const config = {
     // llama-3.3-70b-versatile is decommissioned by Groq Aug 16 2026 → openai/gpt-oss-120b
     // (a reasoning model; call sites run it at reasoning_effort: 'low' for these bounded tasks).
     model: optionalString('GROQ_MODEL', 'openai/gpt-oss-120b'),
+  },
+  hunter: {
+    // Contact/email enrichment + verification. Free tier = 50 credits/mo.
+    apiKey: process.env.HUNTER_API_KEY?.trim() || '',
+  },
+  sponsorship: {
+    // Notion data-source IDs for the Sponsorship CRM (see CLAUDE.md "Notion IDs").
+    bankDataSourceId: optionalString('SPONSOR_BANK_DS_ID', 'fd42b16b-2833-42c3-b72d-f6322145ed4e'),
+    pipelineDataSourceId: optionalString('SPONSOR_PIPELINE_DS_ID', '64bb332e-543c-4286-9e67-c3bda963cfdd'),
+    // Won-deal win posts land here; also the season goal for the running % line.
+    winPostChannel: optionalString('SPONSOR_WIN_CHANNEL', 'operations'),
+    seasonGoalUsd: optionalNumber('SPONSOR_SEASON_GOAL_USD', 35000),
   },
   github: {
     token: process.env.GITHUB_TOKEN?.trim() || '',
@@ -80,4 +104,8 @@ export function hasOpenAI(): boolean {
 
 export function hasGroq(): boolean {
   return Boolean(config.groq.apiKey);
+}
+
+export function hasHunter(): boolean {
+  return Boolean(config.hunter.apiKey);
 }

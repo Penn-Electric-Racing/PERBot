@@ -1,0 +1,36 @@
+name: Sponsorship — Win Post
+
+# Polls the Pipeline for newly-Won deals and posts once to #operations. There is no
+# Notion webhook in this repo, so we poll hourly; a per-deal marker in the channel
+# makes re-runs idempotent (only un-announced Won deals are posted).
+on:
+  schedule:
+    - cron: '0 * * * *' # hourly
+  workflow_dispatch:
+
+jobs:
+  win-post:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: sponsor-win-post
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: PERBot/package-lock.json
+
+      - name: Install dependencies
+        working-directory: PERBot
+        run: npm ci
+
+      - name: Post any new sponsor wins
+        working-directory: PERBot
+        run: npm run job:sponsor-win
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          SPONSOR_WIN_CHANNEL: ${{ vars.SPONSOR_WIN_CHANNEL || 'operations' }}

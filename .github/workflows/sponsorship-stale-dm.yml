@@ -1,0 +1,42 @@
+name: Sponsorship — Wednesday Stale DM
+
+# Wednesday ~9am ET: DM each DRI only their own overdue deals. Two cron triggers cover
+# the EDT/EST offset; the script's isWednesdayET() time-check + a per-user daily marker
+# make double-fires safe. Silence is valid — members with nothing overdue get no DM.
+on:
+  schedule:
+    - cron: '0 13 * * 3' # 9am EDT
+    - cron: '0 14 * * 3' # 9am EST
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Run even if today is not Wednesday'
+        type: boolean
+        default: false
+
+jobs:
+  stale-dm:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: sponsor-stale-dm
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: PERBot/package-lock.json
+
+      - name: Install dependencies
+        working-directory: PERBot
+        run: npm ci
+
+      - name: DM members their overdue deals
+        working-directory: PERBot
+        run: npm run job:sponsor-stale
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          FORCE_STALE_DM: ${{ inputs.force }}

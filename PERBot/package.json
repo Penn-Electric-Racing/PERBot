@@ -9,6 +9,9 @@
     "start:cloud": "node scripts-run-cloud.mjs",
     "build": "tsc -p tsconfig.json",
     "index": "tsx src/indexer.ts",
+    "enrich": "tsx src/sponsorship/enrichCli.ts",
+    "job:sponsor-win": "tsx src/sponsorship/jobs/winPost.ts",
+    "job:sponsor-stale": "tsx src/sponsorship/jobs/staleDm.ts",
     "check": "tsc --noEmit"
   },
   "dependencies": {
