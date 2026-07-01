@@ -50,6 +50,9 @@ export const config = {
   },
   groq: {
     apiKey: process.env.GROQ_API_KEY?.trim() || '',
+    // llama-3.3-70b-versatile is decommissioned by Groq Aug 16 2026 → openai/gpt-oss-120b
+    // (a reasoning model; call sites run it at reasoning_effort: 'low' for these bounded tasks).
+    model: optionalString('GROQ_MODEL', 'openai/gpt-oss-120b'),
   },
   github: {
     token: process.env.GITHUB_TOKEN?.trim() || '',

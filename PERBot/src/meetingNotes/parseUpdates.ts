@@ -12,7 +12,10 @@
  */
 
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const GROQ_MODEL = 'llama-3.3-70b-versatile';
+// Read from GROQ_MODEL directly (like GROQ_API_KEY below) to keep this GitHub Actions entrypoint
+// decoupled from the app config, which require()s Slack/Notion env vars this job doesn't have.
+// llama-3.3-70b-versatile is decommissioned by Groq Aug 16 2026 → openai/gpt-oss-120b.
+const GROQ_MODEL = process.env.GROQ_MODEL?.trim() || 'openai/gpt-oss-120b';
 
 export interface ParsedUpdate {
   logisticalUpdates: string;
@@ -204,6 +207,8 @@ ${freeformText}`;
         model: GROQ_MODEL,
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.2,
+        // gpt-oss-120b is a reasoning model; keep reasoning minimal for this bounded bucketing task.
+        reasoning_effort: 'low',
         response_format: { type: 'json_object' },
       }),
     });
