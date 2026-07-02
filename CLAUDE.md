@@ -198,7 +198,7 @@ formulas. Won deals + `Relationship` make the Pipeline double as the **sponsor d
     `electric@engineering.upenn.edu` (Gmail connector) matches an inbound reply to its Pipeline deal by
     **Contact email contains `@<sender-domain>`**, then via the Notion API stamps `Last contact`, sets
     `Stage = In talks`, and ticks the **Reply pending** checkbox.
-  - **PERBot half** (`jobs/replyDm.ts`, cron `*/15`): finds deals with `Reply pending = true`, DMs the
+  - **PERBot half** (`jobs/replyDm.ts`, cron hourly): finds deals with `Reply pending = true`, DMs the
     DRI(s) to follow up, and clears the flag (clearing = idempotency). See "Setup" for the flow's HTTP bodies.
 
 ## As-built notes (sponsorship module — read before extending)
