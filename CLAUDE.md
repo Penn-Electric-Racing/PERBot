@@ -139,13 +139,16 @@ formulas. Won deals + `Relationship` make the Pipeline double as the **sponsor d
 
 **Slack (`/sponsor`) — three commands, no drafting command:**
 - `/sponsor add [company|url]` — runs enrichment, drops a deduped researched row into the Bank (Available).
-  - **Directed add:** `/sponsor add <company> for <your ask> @person` — when you already know the ask
-    and owner. The ask becomes the `Suggested angle` verbatim **and** steers the LLM's Tier/Type/Category;
-    each `@mention` is resolved to a Notion person and the lead is **graduated straight to a Pipeline deal**
-    (Stage `Prospect`, DRI = the mention, Bank row → `Graduated`/`Claimed`, next action seeded +7 days).
-    Both `for <ask>` and `@person` are optional and independent. Parsing lives in `slack.ts:parseAdd`
-    (mentions anywhere; ask after a natural " for "). Directed add against an already-banked domain is
-    reported, not double-graduated.
+  - **Directed add:** `/sponsor add <company> for <ask> contact: <name> <email> @person` — when you
+    already know the ask, contact, and/or owner. The ask becomes the `Suggested angle` verbatim **and**
+    steers the LLM's Tier/Type/Category; a `contact:` you type is written as the contact (verificationStatus
+    `provided`) and **replaces the Hunter lookup** — a human-typed contact isn't LLM-invented, so it's
+    allowed by the no-fabricated-contacts guardrail; each `@mention` is resolved to a Notion person and the
+    lead is **graduated straight to a Pipeline deal** (Stage `Prospect`, DRI = the mention, Bank row →
+    `Graduated`/`Claimed`, next action seeded +7 days). All three of `for <ask>`, `contact: …`, and
+    `@person` are optional and independent. Parsing lives in `slack.ts:parseAdd` (mentions anywhere; ask
+    after " for "; contact after "contact:"; Slack's `<url>`/`<mailto:>` wrappers are unwrapped first).
+    A directed add against an already-banked domain is reported, not double-graduated.
 - `/sponsor log [company] [note]` — manual touch logger; stamps `Last contact` + appends note on the
   Pipeline row. Covers phone/in-person/off-domain touches the email flow can't see.
 - `/sponsor me` — returns the caller's own active deals + next actions (pull view).

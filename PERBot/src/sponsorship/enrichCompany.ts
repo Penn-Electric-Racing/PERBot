@@ -24,6 +24,12 @@ export interface EnrichOptions {
   assigneeLabels?: string[];
   /** Mentions that couldn't be resolved to a Notion user (reported, not assigned). */
   unresolvedAssignees?: string[];
+  /**
+   * A human-provided contact (name and/or email). Used INSTEAD of Hunter when present —
+   * a contact the requester types is not LLM-invented, so it doesn't violate the
+   * no-fabricated-contacts guardrail. Stored with verificationStatus 'provided'.
+   */
+  manualContact?: { name?: string; email?: string };
 }
 
 /**
@@ -124,9 +130,26 @@ export async function enrichCompany(
   const classification = await classifyCompanyFit(company, canonical, companyText, opts.knownAsk);
   if (opts.knownAsk) classification.suggestedAngle = opts.knownAsk;
 
-  // Step 5 — contact from Hunter (reuse the name-resolution call if we made one).
-  const contact = preResolvedContact ?? (await findContactByDomain(hostname));
-  const { needsReview, reason } = computeReview(contact);
+  // Step 5 — contact. A requester-provided contact is authoritative (not LLM-invented),
+  // so it replaces the Hunter lookup; otherwise fall back to Hunter.
+  let contact: HunterContact | null;
+  let review: { needsReview: boolean; reason?: string };
+  const manual = opts.manualContact;
+  if (manual && (manual.name || manual.email)) {
+    contact = {
+      name: manual.name ?? '',
+      email: manual.email ?? '',
+      verificationStatus: 'provided',
+      confidence: 100,
+    };
+    review = manual.email
+      ? { needsReview: false }
+      : { needsReview: true, reason: 'contact name provided but no email yet' };
+  } else {
+    contact = preResolvedContact ?? (await findContactByDomain(hostname));
+    review = computeReview(contact);
+  }
+  const { needsReview, reason } = review;
 
   // Step 6 — write the Bank row. A directed add with an assignee is Graduated + Claimed;
   // a plain add is Available / New.
