@@ -3,7 +3,7 @@ import { daysUntil, todayIsoET } from '../dates.js';
 import { fetchSlackDirectory, notionUserToSlackId } from '../identity.js';
 import { SponsorNotion } from '../notion.js';
 import { NotionUser, PipelineRow } from '../types.js';
-import { channelHasMarker, makeSlackClient } from './shared.js';
+import { alreadyPosted, makeSlackClient, metadataFor, WinMeta } from './shared.js';
 
 /**
  * Wednesday 9 AM personalized stale DM: reads the Pipeline and DMs each member ONLY
@@ -54,7 +54,9 @@ export async function runStaleDm(force = process.env.FORCE_STALE_DM?.toLowerCase
   const notionUsers = await notion.listNotionUsers();
   const notionUserById = new Map<string, NotionUser>(notionUsers.map((u) => [u.id, u]));
   const slackDir = await fetchSlackDirectory(client);
-  const marker = `sponsor-stale:${todayIsoET()}`;
+  const today = todayIsoET();
+  const legacyMarker = `sponsor-stale:${today}`;
+  const meta: WinMeta = { eventType: 'sponsor_stale', key: 'date', value: today };
 
   for (const [notionId, deals] of byUser) {
     const notionUser = notionUserById.get(notionId);
@@ -73,7 +75,7 @@ export async function runStaleDm(force = process.env.FORCE_STALE_DM?.toLowerCase
     const dmChannel: string = dm.channel?.id;
     if (!dmChannel) continue;
 
-    if (await channelHasMarker(client, dmChannel, marker)) {
+    if (await alreadyPosted(client, dmChannel, meta, legacyMarker)) {
       logger.info(`Stale DM: already sent to ${notionUser.name || slackUserId} today — skipping.`);
       continue;
     }
@@ -83,9 +85,9 @@ export async function runStaleDm(force = process.env.FORCE_STALE_DM?.toLowerCase
       .map(overdueLine);
     const text =
       `:wave: You have *${deals.length}* sponsorship deal(s) with an overdue next action:\n` +
-      `${lines.join('\n')}\n\n_Update them in Notion or log a touch with_ \`/sponsor log\`. ${marker}`;
+      `${lines.join('\n')}\n\n_Update them in Notion or log a touch with_ \`/sponsor log\`.`;
 
-    await client.chat.postMessage({ channel: dmChannel, text, unfurl_links: false });
+    await client.chat.postMessage({ channel: dmChannel, text, unfurl_links: false, metadata: metadataFor(meta) });
     logger.info(`Stale DM: sent ${deals.length} overdue deal(s) to ${notionUser.name || slackUserId}.`);
   }
 }
