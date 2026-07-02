@@ -230,9 +230,11 @@ Deltas from the spec above, discovered while building against the live Notion sc
 - **Config now accepts `NOTION_TOKEN` *or* `NOTION_API_KEY`**, and `SLACK_APP_TOKEN` is
   optional (only the Socket-Mode app needs it) — so the cron job entrypoints can import
   `config` in a minimal env. Jobs need only `SLACK_BOT_TOKEN` + `NOTION_API_KEY`.
-- **Win post is polled hourly**, not event-driven (no Notion webhook in this repo). It is
-  idempotent via a `sponsor-won:<pageId>` marker in the channel; the stale DM uses a
-  `sponsor-stale:<date>` per-user marker. Both jobs guard with markers + a time/stage gate.
+- **Win post is polled hourly**, not event-driven (no Notion webhook in this repo). Idempotency
+  uses an **invisible Slack message-metadata marker** (`event_type: sponsor_win`, payload `deal_id`;
+  stale DM uses `sponsor_stale` + `date`) checked via `conversations.history` with
+  `include_all_metadata` (`shared.ts:alreadyPosted`). A legacy in-text `sponsor-won:<id>` marker is
+  still honored so pre-metadata posts aren't re-announced. Both jobs also guard with a time/stage gate.
 
 ## Setup (click-by-click — do these once)
 

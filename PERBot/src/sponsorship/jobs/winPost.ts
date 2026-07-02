@@ -3,7 +3,7 @@ import { config } from '../../config.js';
 import { logger } from '../../utils/logger.js';
 import { SponsorNotion } from '../notion.js';
 import { PipelineRow } from '../types.js';
-import { channelHasMarker, makeSlackClient, resolveChannelId } from './shared.js';
+import { alreadyPosted, makeSlackClient, metadataFor, resolveChannelId, WinMeta } from './shared.js';
 
 /**
  * Win post: when a Pipeline deal reaches Stage = Won, post ONCE to #operations with
@@ -15,8 +15,13 @@ import { channelHasMarker, makeSlackClient, resolveChannelId } from './shared.js
  * whichever runs first wins and the other skips — no duplicate.
  */
 
+/** Legacy in-text marker (still checked so old posts aren't re-announced). */
 export function winMarker(deal: PipelineRow): string {
   return `sponsor-won:${deal.id}`;
+}
+
+function winMeta(deal: PipelineRow): WinMeta {
+  return { eventType: 'sponsor_win', key: 'deal_id', value: deal.id };
 }
 
 function fmtUsd(n: number): string {
@@ -35,17 +40,16 @@ export async function announceWinIfNew(
   deal: PipelineRow,
   totalUsd: number
 ): Promise<boolean> {
-  const marker = winMarker(deal);
-  if (await channelHasMarker(client, channelId, marker)) return false; // already announced
+  const meta = winMeta(deal);
+  if (await alreadyPosted(client, channelId, meta, winMarker(deal))) return false; // already announced
 
   const goal = config.sponsorship.seasonGoalUsd;
   const pct = goal > 0 ? Math.round((totalUsd / goal) * 100) : 0;
   const text =
     `:tada: *New sponsor won: ${deal.company || 'a new sponsor'}!*\n` +
-    `We're now at *${fmtUsd(totalUsd)} / ${fmtUsd(goal)}* (${pct}%) toward the season goal. ` +
-    `Nice work! ${marker}`;
+    `We're now at *${fmtUsd(totalUsd)} / ${fmtUsd(goal)}* (${pct}%) toward the season goal. Nice work!`;
 
-  await client.chat.postMessage({ channel: channelId, text, unfurl_links: false });
+  await client.chat.postMessage({ channel: channelId, text, unfurl_links: false, metadata: metadataFor(meta) });
   logger.info(`Win post: announced ${deal.company} (${deal.id}).`);
   return true;
 }
