@@ -97,6 +97,29 @@ export function indexNotionUsers(users: NotionUser[]): Indexed[] {
   return users.map((u) => indexEntry(u.id, [u.name], u.email));
 }
 
+/**
+ * Resolve typed @handles / names to Slack user IDs via the directory. Needed because
+ * Slack slash commands send @mentions as plain text ("@arjunsh") unless the command has
+ * link-escaping enabled. Usernames are unique, so a handle match is safe; ambiguous
+ * display-name matches are left unresolved (never guessed).
+ */
+export async function resolveSlackHandles(
+  client: WebClient,
+  handles: string[]
+): Promise<{ ids: string[]; unresolved: string[] }> {
+  const ids: string[] = [];
+  const unresolved: string[] = [];
+  if (handles.length === 0) return { ids, unresolved };
+
+  const dir = await fetchSlackDirectory(client);
+  for (const handle of handles) {
+    const match = matchByName(handle, dir);
+    if (match) ids.push(match.id);
+    else unresolved.push(handle);
+  }
+  return { ids, unresolved };
+}
+
 /** Notion DRI person → Slack user ID (email first, then conservative name match). */
 export async function notionUserToSlackId(
   client: WebClient,

@@ -154,9 +154,11 @@ formulas. Won deals + `Relationship` make the Pipeline double as the **sponsor d
   `Claimed`. This is the "own it myself" path — no mention needed, it uses the caller's Slack identity.
   A directed `/sponsor add` against an already-banked domain now does the same graduation inline (instead
   of just reporting "already in Bank"). Both no-op with a link if the lead is already a deal.
-  - **Mentions must be real Slack mentions** (`<@U…>`, i.e. picked from the @ menu). Plain-text `@handle`
-    is detected, stripped so it can't pollute the contact field, and the user is warned to use the menu or
-    `/sponsor claim`.
+  - **Assignee mentions.** Slack slash commands send `@Name` as plain text (`@handle`), NOT a real
+    `<@U…>` mention, unless the command has "Escape channels, users, and links" enabled. So the assignee
+    resolver (`identity.ts:resolveSlackHandles`) handles BOTH: real `<@U…>` mentions AND plain-text
+    `@handles`/names, looked up in the Slack directory (usernames are unique → safe; ambiguous display
+    names left unresolved). Enabling link-escaping on the command is optional but cleaner.
   - **Forgiving parser** (`slack.ts:parseAdd`): handles natural phrasing, not just rigid keywords —
     `Jane Street, DRI is @X contact is Steph, s@jane.com` parses to company `Jane Street`, DRI `@X`,
     contact `Steph <s@jane.com>`. Company = the lead text before the first metadata boundary
