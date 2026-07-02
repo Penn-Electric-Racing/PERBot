@@ -18,13 +18,40 @@ const notion = new SponsorNotion();
 const USAGE = [
   '*`/sponsor` commands:*',
   '• `/sponsor add <company or url>` — research a company into the Prospect Bank',
-  '• `/sponsor log <company> <note>` — log a manual touch on a deal',
+  '• `/sponsor add <company> for <your ask> @person` — research + assign a deal to someone',
+  '• `/sponsor log <company> - <note>` — log a manual touch on a deal',
   '• `/sponsor me` — show your active deals + next actions',
 ].join('\n');
 
+/** Slack encodes mentions in command text as `<@U012ABC>` or `<@U012ABC|handle>`. */
+const MENTION_RE = /<@([A-Z0-9]+)(?:\|[^>]+)?>/g;
+
+/**
+ * Parse a `/sponsor add` argument into company, known ask, and assignee Slack IDs.
+ * Mentions may appear anywhere; the ask follows a natural " for " separator.
+ *   "jlcpcb.com for board manufacturing, reduced cost @arjun"
+ *     → { company: "jlcpcb.com", knownAsk: "board manufacturing, reduced cost", ids: [arjun] }
+ */
+function parseAdd(arg: string): { company: string; knownAsk: string; assigneeSlackIds: string[] } {
+  const assigneeSlackIds: string[] = [];
+  const withoutMentions = arg.replace(MENTION_RE, (_m, id: string) => {
+    assigneeSlackIds.push(id);
+    return ' ';
+  });
+  const text = withoutMentions.replace(/\s+/g, ' ').trim();
+
+  const forMatch = text.match(/^(.*?)\s+for\s+(.+)$/i);
+  const company = (forMatch ? forMatch[1] : text).trim();
+  const knownAsk = forMatch ? forMatch[2]!.trim() : '';
+  return { company, knownAsk, assigneeSlackIds: [...new Set(assigneeSlackIds)] };
+}
+
 function formatAddResult(result: EnrichResult): string {
   if (result.deduped) {
-    return `↩︎ *${result.company}* is already in the Bank — skipped. <${result.bankPageUrl}|Open row>`;
+    const base = `↩︎ *${result.company}* is already in the Bank — skipped. <${result.bankPageUrl}|Open row>`;
+    return result.assignment?.assignees.length || result.assignment?.unresolved.length
+      ? `${base}\n• ⚠️ Assignment skipped (already a lead). Claim/assign it in Notion, or \`/sponsor log\` once it's a deal.`
+      : base;
   }
 
   const c = result.classification;
@@ -41,20 +68,57 @@ function formatAddResult(result: EnrichResult): string {
   if (c.suggestedAngle) lines.push(`• *Angle:* ${c.suggestedAngle}`);
   lines.push(`• *Contact:* ${contactLine}`);
   if (result.needsReview) lines.push(`• ⚠️ *Needs review:* ${result.reviewReason}`);
+  if (result.assignment?.dealUrl) {
+    lines.push(`• *Assigned:* ${result.assignment.assignees.join(', ')} → <${result.assignment.dealUrl}|Pipeline deal> (Prospect)`);
+  }
+  if (result.assignment?.unresolved.length) {
+    lines.push(`• ⚠️ Couldn't match ${result.assignment.unresolved.join(', ')} to a Notion user — assign the DRI in Notion.`);
+  }
   return lines.join('\n');
 }
 
-async function handleAdd(respond: RespondFn, arg: string): Promise<void> {
-  if (!arg.trim()) {
+/** Resolve assignee Slack IDs → Notion user IDs (email-first, name fallback). */
+async function resolveAssignees(
+  client: WebClient,
+  slackIds: string[]
+): Promise<{ notionIds: string[]; labels: string[]; unresolved: string[] }> {
+  const notionIds: string[] = [];
+  const labels: string[] = [];
+  const unresolved: string[] = [];
+  if (slackIds.length === 0) return { notionIds, labels, unresolved };
+
+  const index = indexNotionUsers(await notion.listNotionUsers());
+  for (const slackId of slackIds) {
+    const notionId = await slackUserToNotionId(client, slackId, index);
+    if (notionId) {
+      notionIds.push(notionId);
+      labels.push(`<@${slackId}>`);
+    } else {
+      unresolved.push(`<@${slackId}>`);
+    }
+  }
+  return { notionIds, labels, unresolved };
+}
+
+async function handleAdd(client: WebClient, respond: RespondFn, arg: string): Promise<void> {
+  const { company, knownAsk, assigneeSlackIds } = parseAdd(arg);
+  if (!company) {
     await respond({
       response_type: 'ephemeral',
-      text: 'Usage: `/sponsor add <company or url>`\nExample: `/sponsor add https://www.altium.com`',
+      text: 'Usage: `/sponsor add <company or url> [for <your ask>] [@person]`\nExample: `/sponsor add jlcpcb.com for reduced-cost PCB fab @you`',
     });
     return;
   }
 
   try {
-    const result = await enrichCompany(arg);
+    const { notionIds, labels, unresolved } = await resolveAssignees(client, assigneeSlackIds);
+    const result = await enrichCompany(company, {
+      notion,
+      knownAsk: knownAsk || undefined,
+      assigneeNotionIds: notionIds,
+      assigneeLabels: labels,
+      unresolvedAssignees: unresolved,
+    });
     await respond({ response_type: 'ephemeral', text: formatAddResult(result) });
   } catch (err) {
     if (err instanceof DomainResolutionError) {
@@ -157,7 +221,7 @@ export function registerSponsorCommands(app: App): void {
         case 'add':
           // Enrichment is slow (fetch + LLM + Hunter); ack fast, then post via response_url.
           await ack({ response_type: 'ephemeral', text: `:hourglass_flowing_sand: Researching *${arg || '…'}*` });
-          await handleAdd(respond, arg);
+          await handleAdd(client, respond, arg);
           break;
 
         case 'log':

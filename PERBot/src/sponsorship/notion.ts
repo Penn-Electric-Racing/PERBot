@@ -1,7 +1,7 @@
 import { Client } from '@notionhq/client';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
-import { BankRowInput, NotionUser, PipelineRow, Stage } from './types.js';
+import { BankRowInput, NotionUser, PipelineDealInput, PipelineRow, Stage } from './types.js';
 
 /**
  * Notion access layer for the Sponsorship CRM (Prospect Bank + Pipeline).
@@ -115,7 +115,7 @@ export class SponsorNotion {
     const properties: Record<string, any> = {
       Company: { title: [{ text: { content: input.company.slice(0, 200) } }] },
       Domain: { url: input.domain },
-      Status: { select: { name: 'Available' } },
+      Status: { select: { name: input.status ?? 'Available' } },
       Relationship: { select: { name: 'New' } },
       Tier: { select: { name: c.tier } },
       Type: { select: { name: c.type } },
@@ -135,6 +135,9 @@ export class SponsorNotion {
       }
       properties['Contact email'] = { email: input.contact.email };
     }
+    if (input.claimedByNotionIds?.length) {
+      properties['Claimed by'] = { people: input.claimedByNotionIds.map((id) => ({ id })) };
+    }
 
     const result: any = await this.client.pages.create({
       parent: { type: 'data_source_id', data_source_id: config.sponsorship.bankDataSourceId },
@@ -146,6 +149,40 @@ export class SponsorNotion {
   }
 
   // --- Pipeline ---------------------------------------------------------------
+
+  /**
+   * Open a Pipeline deal at Stage = Prospect, owned by the given DRI(s), linked to its
+   * Bank row via the (dual) Bank source relation. Carries Type/Category/contact across
+   * from enrichment. Source defaults to Cold; a next action + due date seed the nudge.
+   */
+  async createPipelineDeal(input: PipelineDealInput): Promise<BankPageRef> {
+    const properties: Record<string, any> = {
+      Company: { title: [{ text: { content: input.company.slice(0, 200) } }] },
+      Stage: { select: { name: 'Prospect' } },
+      Relationship: { select: { name: 'New' } },
+      Source: { select: { name: 'Cold' } },
+      Type: { select: { name: input.type } },
+      Category: { multi_select: input.categories.map((name) => ({ name })) },
+      DRI: { people: input.driNotionIds.map((id) => ({ id })) },
+      'Bank source': { relation: [{ id: input.bankPageId }] },
+      'Next action': { rich_text: [{ text: { content: input.nextAction.slice(0, 200) } }] },
+      'Next action date': { date: { start: input.nextActionDateIso } },
+    };
+    if (input.contact) {
+      if (input.contact.name) {
+        properties['Contact name'] = { rich_text: [{ text: { content: input.contact.name } }] };
+      }
+      properties['Contact email'] = { email: input.contact.email };
+    }
+
+    const result: any = await this.client.pages.create({
+      parent: { type: 'data_source_id', data_source_id: config.sponsorship.pipelineDataSourceId },
+      properties: properties as any,
+    });
+
+    logger.info(`Opened Pipeline deal for ${input.company} (DRI ${input.driNotionIds.join(', ')}): ${result.url}`);
+    return { id: result.id, url: result.url };
+  }
 
   /** Query the Pipeline data source with an optional filter, following pagination. */
   private async queryPipeline(filter?: unknown): Promise<PipelineRow[]> {

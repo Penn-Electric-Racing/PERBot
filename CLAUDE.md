@@ -139,6 +139,13 @@ formulas. Won deals + `Relationship` make the Pipeline double as the **sponsor d
 
 **Slack (`/sponsor`) — three commands, no drafting command:**
 - `/sponsor add [company|url]` — runs enrichment, drops a deduped researched row into the Bank (Available).
+  - **Directed add:** `/sponsor add <company> for <your ask> @person` — when you already know the ask
+    and owner. The ask becomes the `Suggested angle` verbatim **and** steers the LLM's Tier/Type/Category;
+    each `@mention` is resolved to a Notion person and the lead is **graduated straight to a Pipeline deal**
+    (Stage `Prospect`, DRI = the mention, Bank row → `Graduated`/`Claimed`, next action seeded +7 days).
+    Both `for <ask>` and `@person` are optional and independent. Parsing lives in `slack.ts:parseAdd`
+    (mentions anywhere; ask after a natural " for "). Directed add against an already-banked domain is
+    reported, not double-graduated.
 - `/sponsor log [company] [note]` — manual touch logger; stamps `Last contact` + appends note on the
   Pipeline row. Covers phone/in-person/off-domain touches the email flow can't see.
 - `/sponsor me` — returns the caller's own active deals + next actions (pull view).

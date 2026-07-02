@@ -55,9 +55,16 @@ Base your answer only on the provided company text. Be conservative; prefer "Gen
 export async function classifyCompanyFit(
   company: string,
   domain: string,
-  companyText: string
+  companyText: string,
+  knownAsk?: string
 ): Promise<CompanyClassification> {
   const groq = getSponsorGroqClient();
+
+  // When the caller already knows the ask (directed add), steer tier/type/category to
+  // reflect it. The ask itself is written verbatim as the angle by the caller, not here.
+  const askHint = knownAsk
+    ? `\n\nThe team already knows its specific ask for this company: "${knownAsk}". Make "tier", "type", and "category" consistent with pursuing that ask (e.g. a discount/free product ask → "In-Kind").`
+    : '';
 
   const response = await groq.chat.completions.create({
     model: config.groq.model,
@@ -69,7 +76,7 @@ export async function classifyCompanyFit(
       { role: 'system', content: SYSTEM_PROMPT },
       {
         role: 'user',
-        content: `Company: ${company}\nDomain: ${domain}\n\nCompany website text:\n${companyText}`,
+        content: `Company: ${company}\nDomain: ${domain}\n\nCompany website text:\n${companyText}${askHint}`,
       },
     ],
   });
