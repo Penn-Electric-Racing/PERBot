@@ -275,3 +275,29 @@ Deltas from the spec above, discovered while building against the live Notion sc
 - In Slack: `/sponsor add altium.com`, then `/sponsor me`.
 - Trigger the jobs manually from the **Actions** tab (`workflow_dispatch`); the stale DM has a
   `force` input to run off-Wednesday.
+
+**5. Phase-3 Power Automate flow ("Sponsor reply capture")** — the email half of reply-capture.
+Uses the same Notion integration token PERBot uses; the PERBot `job:sponsor-reply` cron does the DRI DM.
+- **Trigger:** Gmail → *When a new email arrives (V3)* on `electric@engineering.upenn.edu`, folder Inbox.
+- **Compose `SenderDomain`:** `toLower(last(split(trim(replace(replace(triggerOutputs()?['body/From'],'>',''),'<','')),'@')))`
+- **Compose `Today`:** `formatDateTime(convertTimeZone(utcNow(),'UTC','Eastern Standard Time'),'yyyy-MM-dd')`
+- **HTTP — Query Notion** (POST `https://api.notion.com/v1/data_sources/64bb332e-543c-4286-9e67-c3bda963cfdd/query`,
+  headers `Authorization: Bearer <NOTION_API_KEY>`, `Notion-Version: 2025-09-03`, `Content-Type: application/json`):
+  ```json
+  { "filter": { "and": [
+    { "property": "Contact email", "email": { "contains": "@<SenderDomain>" } },
+    { "property": "Stage", "select": { "does_not_equal": "Won" } },
+    { "property": "Stage", "select": { "does_not_equal": "Lost" } }
+  ] }, "page_size": 1 }
+  ```
+- **Condition:** `length(body('Query_Notion')?['results']) > 0`. If yes →
+- **HTTP — Update page** (PATCH `https://api.notion.com/v1/pages/<first result id>`, same headers):
+  ```json
+  { "properties": {
+    "Last contact": { "date": { "start": "<Today>" } },
+    "Stage": { "select": { "name": "In talks" } },
+    "Reply pending": { "checkbox": true }
+  } }
+  ```
+- Notes: mark the HTTP inputs **secure**; if `Notion-Version: 2025-09-03` errors, use `2026-03-11`.
+  Only the first active deal per sender domain is matched (page_size 1). Deals need a `Contact email`.
