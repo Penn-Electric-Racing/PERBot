@@ -157,12 +157,18 @@ formulas. Won deals + `Relationship` make the Pipeline double as the **sponsor d
   - **Mentions must be real Slack mentions** (`<@U…>`, i.e. picked from the @ menu). Plain-text `@handle`
     is detected, stripped so it can't pollute the contact field, and the user is warned to use the menu or
     `/sponsor claim`.
+  - **Forgiving parser** (`slack.ts:parseAdd`): handles natural phrasing, not just rigid keywords —
+    `Jane Street, DRI is @X contact is Steph, s@jane.com` parses to company `Jane Street`, DRI `@X`,
+    contact `Steph <s@jane.com>`. Company = the lead text before the first metadata boundary
+    (comma / `for` / `contact` / `dri` / `owner`); mentions, emails, `for <ask>`, and `contact <is|:> …`
+    are extracted from anywhere in the string.
 - `/sponsor log [company] [note]` — manual touch logger; stamps `Last contact` + appends note on the
   Pipeline row. Covers phone/in-person/off-domain touches the email flow can't see.
 - `/sponsor won <company> <amount> [note]` — marks the deal `Stage = Won`, writes `Received ($)` (and
   `Deal value` if blank), stamps `Last contact`, and **posts the win to #operations immediately** (reusing
   the win-post `sponsor-won:<id>` marker so the hourly job won't double-post). Amount accepts `$5,000`,
-  `5000`, `5k`.
+  `5000`, `5k`, **or a discount** — `38% of $9k` / `38% discount on cells worth $9000` computes `$3,420`
+  and shows the derivation in the confirmation (`parseWon`).
 - `/sponsor stage <company> <stage>` — moves a deal to any stage (`Prospect`/`Contacted`/`In talks`/`Won`/
   `Lost`) + stamps `Last contact`. For `Won` it nudges you to use `/sponsor won` to also record the amount.
 - `/sponsor me` — returns the caller's own active deals + next actions (pull view).

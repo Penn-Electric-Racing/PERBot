@@ -65,50 +65,56 @@ export interface ParsedAdd {
   contactEmail: string;
 }
 
+// Words that mark the end of the company name and the start of metadata. Lets people
+// write naturally ("Jane Street, DRI is @X contact is Y") instead of a rigid grammar.
+const FIELD_BOUNDARY = /,|\bfor\b|\bcontact\b|\bdri\b|\bowner\b|\bassign(?:ed)?\b/i;
+
+/** The leading company name = text up to the first metadata boundary (comma/keyword). */
+function leadingCompany(text: string): string {
+  const b = text.match(FIELD_BOUNDARY);
+  return (b ? text.slice(0, b.index) : text)
+    .replace(/[,\s]+$/g, '') // trailing space/comma first…
+    .replace(/^["']+|["']+$/g, '') // …then surrounding quotes
+    .trim();
+}
+
 /**
- * Parse a `/sponsor add` argument into company, known ask, assignees, and an optional
- * human-provided contact. Mentions may appear anywhere; the ask follows " for "; a typed
- * contact follows "contact:". Order is flexible:
- *   "jlcpcb.com for reduced-cost fab contact: Chloe Wang chloe@jlcpcb.com @arjun"
- *     → company "jlcpcb.com", ask "reduced-cost fab", contact {Chloe Wang, chloe@jlcpcb.com}, [arjun]
+ * Forgiving parser for `/sponsor add`. Handles both the structured form
+ * (`jlcpcb.com for reduced-cost fab contact: Chloe Wang chloe@jlcpcb.com @arjun`) and
+ * natural phrasing (`Jane Street, DRI is @Arjun contact is Stephanie, s@jane.com`).
+ * Mentions, emails, the `for <ask>`, and `contact <is|:> <name>` may appear anywhere;
+ * the company is whatever leads before the first metadata boundary.
  */
 export function parseAdd(arg: string): ParsedAdd {
+  // 1. Real Slack mentions anywhere → assignees (DRI).
   const assigneeSlackIds: string[] = [];
-  const withoutMentions = unwrapSlackLinks(arg).replace(MENTION_RE, (_m, id: string) => {
+  let work = unwrapSlackLinks(arg).replace(MENTION_RE, (_m, id: string) => {
     assigneeSlackIds.push(id);
     return ' ';
   });
-  // Strip plain-text @handles before parsing so they don't pollute company/contact.
-  const { handles: plainHandles, cleaned } = extractPlainHandles(withoutMentions);
-  let text = cleaned;
 
+  // 2. Plain-text @handles (typed, not real mentions) → reported + removed.
+  const { handles: plainHandles, cleaned } = extractPlainHandles(work);
+  work = cleaned;
+
+  // 3. Email anywhere → the contact email.
+  const emailMatch = work.match(EMAIL_RE);
+  const contactEmail = emailMatch ? emailMatch[0] : '';
+  if (emailMatch) work = work.replace(emailMatch[0], ' ');
+  work = work.replace(/\s+/g, ' ').trim();
+
+  // 4. Known ask: text after "for", up to the next metadata word.
   let knownAsk = '';
+  const forMatch = work.match(/\bfor\s+(.+?)(?=,?\s*\b(?:contact|dri|owner|assign)\b|$)/i);
+  if (forMatch) knownAsk = forMatch[1]!.replace(/[,\s]+$/g, '').trim();
+
+  // 5. Contact name: after "contact is / contact: / contact =", up to the next word.
   let contactName = '';
-  let contactEmail = '';
+  const contactMatch = work.match(/\bcontact(?:\s+is|\s*[:=])\s*(.+?)(?=,?\s*\b(?:for|dri|owner|assign)\b|$)/i);
+  if (contactMatch) contactName = contactMatch[1]!.replace(/[<>]/g, '').replace(/[,\s]+$/g, '').trim();
 
-  // Pull out the "contact:" clause (runs to end of string / until a trailing " for …").
-  const contactSplit = text.split(/\bcontact:\s*/i);
-  if (contactSplit.length > 1) {
-    text = contactSplit[0]!.trim();
-    let contactRaw = contactSplit.slice(1).join(' ').trim();
-    // Handle "contact: … for <ask>" ordering by peeling a trailing ask off the contact.
-    const forInContact = contactRaw.match(/^(.*?)\s+for\s+(.+)$/i);
-    if (forInContact) {
-      contactRaw = forInContact[1]!.trim();
-      knownAsk = forInContact[2]!.trim();
-    }
-    const email = contactRaw.match(EMAIL_RE);
-    if (email) {
-      contactEmail = email[0];
-      contactRaw = contactRaw.replace(email[0], '').trim();
-    }
-    contactName = contactRaw.replace(/[<>,]/g, ' ').replace(/\s+/g, ' ').trim();
-  }
-
-  // Split the remaining text (before any contact clause) on the first " for ".
-  const forMatch = text.match(/^(.*?)\s+for\s+(.+)$/i);
-  const company = (forMatch ? forMatch[1] : text).trim();
-  if (forMatch && !knownAsk) knownAsk = forMatch[2]!.trim();
+  // 6. Company = the leading chunk before any metadata boundary.
+  const company = leadingCompany(work);
 
   return { company, knownAsk, assigneeSlackIds: [...new Set(assigneeSlackIds)], plainHandles, contactName, contactEmail };
 }
@@ -302,13 +308,43 @@ async function handleLog(respond: RespondFn, arg: string): Promise<void> {
 
 // --- /sponsor won -------------------------------------------------------------
 
-/** Parse "Jane Street $5,000 cash donation" → { company, amountUsd, note }. Supports "5k". */
-function parseWon(arg: string): { company: string; amountUsd: number; note: string } | null {
-  const m = arg.trim().match(/^(.+?)\s+\$?([\d,]+(?:\.\d+)?)(k)?\b\s*(?:[-–—:]\s*)?(.*)$/i);
+/** Turn a "5,000" / "9k" style token into a number. */
+function dollars(raw: string, kSuffix?: string): number {
+  const n = parseFloat(raw.replace(/,/g, ''));
+  return kSuffix ? n * 1000 : n;
+}
+
+/**
+ * Parse the amount for `/sponsor won`. Two forms:
+ *   • plain amount — "$5,000", "5000", "5k"
+ *   • computed discount — "38% of $9k", "38% off 9000", "38% discount on $9,000"
+ *     → the value saved (0.38 × 9000 = $3,420), returned with how it was derived.
+ * Returns the company, the resolved USD amount, an optional note, and `computed`.
+ */
+function parseWon(arg: string): { company: string; amountUsd: number; note: string; computed?: string } | null {
+  const t = arg.trim();
+
+  // Percentage/discount form. `[^%$\d]*?` lets filler words sit between the % and the base
+  // ("38% discount on cells worth $9000").
+  const pct = t.match(
+    /^(.+?)\s+(\d+(?:\.\d+)?)\s*%[^%$\d]*?\$?\s?([\d,]+(?:\.\d+)?)(k)?\b\s*(?:[-–—:]\s*)?(.*)$/i
+  );
+  if (pct) {
+    const company = leadingCompany(pct[1]!);
+    const percent = parseFloat(pct[2]!);
+    const base = dollars(pct[3]!, pct[4]);
+    const amountUsd = Math.round((percent / 100) * base * 100) / 100;
+    const note = (pct[5] ?? '').trim();
+    if (company && amountUsd > 0) {
+      return { company, amountUsd, note, computed: `${percent}% of ${fmtMoney(base)}` };
+    }
+  }
+
+  // Plain amount form.
+  const m = t.match(/^(.+?)\s+\$?([\d,]+(?:\.\d+)?)(k)?\b\s*(?:[-–—:]\s*)?(.*)$/i);
   if (!m) return null;
-  const company = m[1]!.trim();
-  let amount = parseFloat(m[2]!.replace(/,/g, ''));
-  if (m[3]) amount *= 1000;
+  const company = leadingCompany(m[1]!);
+  const amount = dollars(m[2]!, m[3]);
   const note = (m[4] ?? '').trim();
   if (!company || !Number.isFinite(amount) || amount <= 0) return null;
   return { company, amountUsd: amount, note };
@@ -319,7 +355,7 @@ async function handleWon(client: WebClient, respond: RespondFn, arg: string): Pr
   if (!parsed) {
     await respond({
       response_type: 'ephemeral',
-      text: 'Usage: `/sponsor won <company> <amount> [note]`\nExample: `/sponsor won Jane Street $5000 cash donation`',
+      text: 'Usage: `/sponsor won <company> <amount> [note]`\nAmount can be a number (`$5,000`, `5k`) or a discount (`38% of $9k` → $3,420).\nExamples: `/sponsor won Jane Street $5000 cash` · `/sponsor won Melasta 38% of $9000 cell discount`',
     });
     return;
   }
@@ -345,9 +381,10 @@ async function handleWon(client: WebClient, respond: RespondFn, arg: string): Pr
     logger.error('/sponsor won: announcement failed (deal still marked Won)', err);
   }
 
+  const computedNote = parsed.computed ? ` _(${parsed.computed})_` : '';
   await respond({
     response_type: 'ephemeral',
-    text: `🎉 Marked <${deal.url}|${deal.company}> *Won* at ${fmtMoney(parsed.amountUsd)}${announcedSuffix}.`,
+    text: `🎉 Marked <${deal.url}|${deal.company}> *Won* at ${fmtMoney(parsed.amountUsd)}${computedNote}${announcedSuffix}.`,
   });
 }
 
@@ -396,7 +433,7 @@ function parseClaim(arg: string): { company: string; assigneeSlackIds: string[];
     return ' ';
   });
   const { handles: plainHandles, cleaned } = extractPlainHandles(withoutMentions);
-  return { company: cleaned, assigneeSlackIds: [...new Set(assigneeSlackIds)], plainHandles };
+  return { company: leadingCompany(cleaned), assigneeSlackIds: [...new Set(assigneeSlackIds)], plainHandles };
 }
 
 /**
