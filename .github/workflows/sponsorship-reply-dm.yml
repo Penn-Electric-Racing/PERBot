@@ -1,11 +1,11 @@
 name: Sponsorship — Reply DM
 
 # Phase-3 hybrid: a Power Automate flow flags a deal "Reply pending" when a sponsor
-# replies; this job DMs the deal's DRI to follow up, then clears the flag. Polled every
-# 15 min (the flag + clear make it idempotent). Bump the interval down if quota matters.
+# replies; this job DMs the deal's DRI to follow up, then clears the flag. Polled hourly
+# (the flag + clear make it idempotent) to stay within GitHub Actions minutes.
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '0 * * * *'
   workflow_dispatch:
 
 jobs:
