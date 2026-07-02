@@ -1,0 +1,35 @@
+name: Sponsorship — Reply DM
+
+# Phase-3 hybrid: a Power Automate flow flags a deal "Reply pending" when a sponsor
+# replies; this job DMs the deal's DRI to follow up, then clears the flag. Polled every
+# 15 min (the flag + clear make it idempotent). Bump the interval down if quota matters.
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+jobs:
+  reply-dm:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: sponsor-reply-dm
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: PERBot/package-lock.json
+
+      - name: Install dependencies
+        working-directory: PERBot
+        run: npm ci
+
+      - name: DM DRIs of deals with pending replies
+        working-directory: PERBot
+        run: npm run job:sponsor-reply
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}

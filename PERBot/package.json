@@ -12,6 +12,7 @@
     "enrich": "tsx src/sponsorship/enrichCli.ts",
     "job:sponsor-win": "tsx src/sponsorship/jobs/winPost.ts",
     "job:sponsor-stale": "tsx src/sponsorship/jobs/staleDm.ts",
+    "job:sponsor-reply": "tsx src/sponsorship/jobs/replyDm.ts",
     "check": "tsc --noEmit"
   },
   "dependencies": {

@@ -288,6 +288,19 @@ export class SponsorNotion {
     return this.queryPipeline({ property: 'Company', title: { contains: name } });
   }
 
+  /** Deals flagged Reply pending by the Phase-3 flow — awaiting a DRI DM. */
+  async queryReplyPending(): Promise<PipelineRow[]> {
+    return this.queryPipeline({ property: 'Reply pending', checkbox: { equals: true } });
+  }
+
+  /** Clear the Reply pending flag once the DRI has been DM'd. */
+  async clearReplyPending(pageId: string): Promise<void> {
+    await this.client.pages.update({
+      page_id: pageId,
+      properties: { 'Reply pending': { checkbox: false } } as any,
+    });
+  }
+
   /**
    * Log a manual touch: stamp Last contact = `dateIso` and prepend a dated note.
    * Notes is capped so it can't grow unbounded across many touches.

@@ -182,6 +182,7 @@ formulas. Won deals + `Relationship` make the Pipeline double as the **sponsor d
 - Enrich one company: `npm run enrich -- "<company or url>"`
 - Win-post job (cron): `npm run job:sponsor-win`
 - Wednesday stale-DM job (cron): `npm run job:sponsor-stale` (set `FORCE_STALE_DM=true` to run off-day)
+- Reply-DM job (cron, Phase 3): `npm run job:sponsor-reply`
 - There is no `npm test` yet.
 
 ## Out of scope for Claude Code
@@ -191,11 +192,14 @@ formulas. Won deals + `Relationship` make the Pipeline double as the **sponsor d
   set a real prospect quota after ~10–20 closed/lost deals. Until then, drive **activity targets**, not
   conversion targets. Seeding the Bank with warm leads (vendor list, alumni employers, competitor
   sponsors) is manual Notion work.
-- **Phase 3 email reply-capture** → a Power Automate flow on `electric@engineering.upenn.edu`
-  (Google Workspace / Gmail connector, personal UPenn Premium license), domain-matched against CRM
-  sponsor rows (by sender **domain**, or the stored **Contact email** for an exact match). On a match it
-  stamps `Last contact`, DMs the DRI, and auto-advances the deal to
-  **In talks**. Built in the Power Automate UI, not this repo.
+- **Phase 3 email reply-capture — HYBRID (built).** Split so the hard part (DRI→Slack identity) stays in
+  PERBot where the resolver lives:
+  - **Power Automate half** (built in the Power Automate UI, not this repo): a flow on
+    `electric@engineering.upenn.edu` (Gmail connector) matches an inbound reply to its Pipeline deal by
+    **Contact email contains `@<sender-domain>`**, then via the Notion API stamps `Last contact`, sets
+    `Stage = In talks`, and ticks the **Reply pending** checkbox.
+  - **PERBot half** (`jobs/replyDm.ts`, cron `*/15`): finds deals with `Reply pending = true`, DMs the
+    DRI(s) to follow up, and clears the flag (clearing = idempotency). See "Setup" for the flow's HTTP bodies.
 
 ## As-built notes (sponsorship module — read before extending)
 
@@ -234,10 +238,15 @@ Deltas from the spec above, discovered while building against the live Notion sc
   one!"), resolving each Notion DRI → Slack via `winPost.ts:resolveDriMentions` (Slack mention, or the
   Notion display name if there's no Slack match). Directories are fetched once per run.
 - **Win post is polled hourly**, not event-driven (no Notion webhook in this repo). Idempotency
-  uses an **invisible Slack message-metadata marker** (`event_type: sponsor_win`, payload `deal_id`;
-  stale DM uses `sponsor_stale` + `date`) checked via `conversations.history` with
-  `include_all_metadata` (`shared.ts:alreadyPosted`). A legacy in-text `sponsor-won:<id>` marker is
-  still honored so pre-metadata posts aren't re-announced. Both jobs also guard with a time/stage gate.
+  uses an **invisible Slack message-metadata marker** (`event_type: sponsor_win`, payload `deal_id`)
+  checked via `conversations.history` `include_all_metadata` (`shared.ts:alreadyPosted`); a legacy in-text
+  `sponsor-won:<id>` marker is still honored. The win post is to a **channel** (#operations), where the
+  bot has `channels:history`.
+- **All DM jobs post straight to the user ID** (`chat.postMessage({ channel: <Uxxxx> })`), which Slack
+  auto-opens and which needs only **`chat:write`** — NOT `im:write`/`im:history` (the bot lacks those, and
+  `conversations.open`/DM-history reads would fail). Consequently DM jobs can't read DM history for a
+  marker, so their idempotency is elsewhere: **reply DM** clears the Notion `Reply pending` flag after
+  sending; **stale DM** uses a Wednesday-**9am-ET** time gate so only the DST-correct cron fires the work.
 
 ## Setup (click-by-click — do these once)
 
