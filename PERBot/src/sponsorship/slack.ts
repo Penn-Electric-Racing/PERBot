@@ -4,9 +4,9 @@ import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 import { isoDaysFromNowET, todayIsoET } from './dates.js';
 import { DomainResolutionError, enrichCompany } from './enrichCompany.js';
-import { indexNotionUsers, resolveSlackHandles, slackUserToNotionId } from './identity.js';
+import { fetchSlackDirectory, indexNotionUsers, resolveSlackHandles, slackUserToNotionId } from './identity.js';
 import { resolveChannelId } from './jobs/shared.js';
-import { announceWinIfNew, totalRaised } from './jobs/winPost.js';
+import { announceWinIfNew, resolveDriMentions, totalRaised } from './jobs/winPost.js';
 import { SponsorNotion } from './notion.js';
 import { EnrichResult, PipelineRow, STAGES, Stage } from './types.js';
 
@@ -378,7 +378,9 @@ async function handleWon(client: WebClient, respond: RespondFn, arg: string): Pr
       // Read-after-write guard: make sure this deal's amount is in the running total.
       let total = totalRaised(won);
       if (!won.some((d) => d.id === deal.id)) total += parsed.amountUsd;
-      const posted = await announceWinIfNew(client, channelId, { ...deal, received: parsed.amountUsd }, total);
+      const notionUsersById = new Map((await notion.listNotionUsers()).map((u) => [u.id, u]));
+      const dri = await resolveDriMentions(client, deal.driUserIds, notionUsersById, await fetchSlackDirectory(client));
+      const posted = await announceWinIfNew(client, channelId, { ...deal, received: parsed.amountUsd }, total, dri);
       if (posted) announcedSuffix = ` and posted it to #${config.sponsorship.winPostChannel}`;
     }
   } catch (err) {
