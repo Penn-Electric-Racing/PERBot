@@ -2,9 +2,29 @@ import { logger } from '../utils/logger.js';
 import { classifyCompanyFit } from './classify.js';
 import { extractHostname, looksLikeDomain, toCanonicalUrl } from './domain.js';
 import { fetchCompanyText } from './homepage.js';
+import { isoDaysFromNowET } from './dates.js';
 import { findContactByDomain, resolveByCompany } from './hunter.js';
 import { SponsorNotion } from './notion.js';
-import { EnrichResult, HunterContact } from './types.js';
+import { AssignmentInfo, EnrichResult, HunterContact } from './types.js';
+
+/** Days out to seed a newly-assigned deal's first next-action (feeds the stale DM). */
+const FIRST_OUTREACH_DAYS = 7;
+
+/**
+ * Options for a "directed add": the caller already knows the ask and/or who should own
+ * it. Slack-side code resolves @mentions to Notion user IDs before calling us.
+ */
+export interface EnrichOptions {
+  notion?: SponsorNotion;
+  /** The team's known ask — becomes the Suggested angle verbatim + a classifier hint. */
+  knownAsk?: string;
+  /** Notion user IDs to own the deal. Non-empty → open a Pipeline deal + graduate the row. */
+  assigneeNotionIds?: string[];
+  /** Display labels for the assignees, for the confirmation message. */
+  assigneeLabels?: string[];
+  /** Mentions that couldn't be resolved to a Notion user (reported, not assigned). */
+  unresolvedAssignees?: string[];
+}
 
 /**
  * The enrichCompany pipeline (see CLAUDE.md "Sponsorship module — architecture"):
@@ -14,7 +34,9 @@ import { EnrichResult, HunterContact } from './types.js';
  *   4. Groq → structured JSON classification (forced schema, validated).
  *   5. Hunter → contact + verified email + confidence (only source of contact data).
  *   6. Create the Bank row: Status=Available, Relationship=New; flag Needs Review
- *      (in Notes) when the contact is missing/low-confidence/unverified.
+ *      when the contact is missing/low-confidence/unverified.
+ *   7. Directed add only — if an assignee was given, open a Pipeline deal (Prospect,
+ *      DRI=assignee) and mark the Bank row Graduated/Claimed.
  */
 
 export class DomainResolutionError extends Error {}
@@ -50,9 +72,16 @@ function displayNameFromInput(input: string, hostname: string): string {
 
 export async function enrichCompany(
   input: string,
-  deps: { notion?: SponsorNotion } = {}
+  opts: EnrichOptions = {}
 ): Promise<EnrichResult> {
-  const notion = deps.notion ?? new SponsorNotion();
+  const notion = opts.notion ?? new SponsorNotion();
+  const assigneeNotionIds = opts.assigneeNotionIds ?? [];
+  const assigned = assigneeNotionIds.length > 0;
+  const assignmentBase: AssignmentInfo | undefined =
+    assigned || opts.unresolvedAssignees?.length
+      ? { assignees: opts.assigneeLabels ?? [], unresolved: opts.unresolvedAssignees ?? [] }
+      : undefined;
+
   const raw = input.trim();
   if (!raw) throw new DomainResolutionError('No company or URL provided.');
 
@@ -82,20 +111,25 @@ export async function enrichCompany(
   const existing = await notion.findBankRowByDomain(canonical);
   if (existing) {
     logger.info(`Skipping enrichment for ${canonical} — already in Bank (${existing.url}).`);
-    return { deduped: true, company, domain: canonical, bankPageUrl: existing.url };
+    // Directed add against an existing lead: don't silently double-graduate. Report it
+    // and let the caller assign/claim in Notion (or via the existing deal).
+    return { deduped: true, company, domain: canonical, bankPageUrl: existing.url, assignment: assignmentBase };
   }
 
   // Step 3 — homepage/about text (deterministic grounding for the classifier).
   const companyText = await fetchCompanyText(hostname);
 
-  // Step 4 — structured classification (Groq, forced schema, validated).
-  const classification = await classifyCompanyFit(company, canonical, companyText);
+  // Step 4 — structured classification (Groq, forced schema, validated). A known ask
+  // steers tier/type/category and is written verbatim as the angle (the team's words).
+  const classification = await classifyCompanyFit(company, canonical, companyText, opts.knownAsk);
+  if (opts.knownAsk) classification.suggestedAngle = opts.knownAsk;
 
   // Step 5 — contact from Hunter (reuse the name-resolution call if we made one).
   const contact = preResolvedContact ?? (await findContactByDomain(hostname));
   const { needsReview, reason } = computeReview(contact);
 
-  // Step 6 — write the Bank row (Available / New).
+  // Step 6 — write the Bank row. A directed add with an assignee is Graduated + Claimed;
+  // a plain add is Available / New.
   const page = await notion.createBankRow({
     company,
     domain: canonical,
@@ -103,7 +137,25 @@ export async function enrichCompany(
     contact,
     needsReview,
     reviewReason: reason,
+    status: assigned ? 'Graduated' : 'Available',
+    claimedByNotionIds: assigned ? assigneeNotionIds : undefined,
   });
+
+  // Step 7 — directed add: open the Pipeline deal (Prospect) owned by the DRI(s).
+  let assignment = assignmentBase;
+  if (assigned) {
+    const deal = await notion.createPipelineDeal({
+      bankPageId: page.id,
+      company,
+      driNotionIds: assigneeNotionIds,
+      type: classification.type,
+      categories: classification.categories,
+      contact,
+      nextAction: `Send first outreach${opts.knownAsk ? ` — ${opts.knownAsk}` : ''}`,
+      nextActionDateIso: isoDaysFromNowET(FIRST_OUTREACH_DAYS),
+    });
+    assignment = { ...assignmentBase!, dealUrl: deal.url };
+  }
 
   return {
     deduped: false,
@@ -114,5 +166,6 @@ export async function enrichCompany(
     contact,
     needsReview,
     reviewReason: reason,
+    assignment,
   };
 }

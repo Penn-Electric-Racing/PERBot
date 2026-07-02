@@ -40,8 +40,9 @@ export const CATEGORIES = [
 ] as const;
 export type Category = (typeof CATEGORIES)[number];
 
-/** Bank Status / Relationship — enrichment always writes Available / New (see guardrails). */
+/** Bank Status / Relationship — plain enrichment writes Available / New (see guardrails). */
 export const BANK_STATUSES = ['Available', 'Claimed', 'Graduated', 'Dead'] as const;
+export type BankStatus = (typeof BANK_STATUSES)[number];
 export const RELATIONSHIPS = ['New', 'Returning', 'Lapsed'] as const;
 
 /** Pipeline Stage — the 5-stage model. */
@@ -105,6 +106,34 @@ export interface BankRowInput {
   /** True when Hunter confidence is low or the email is unverified → surfaced in Notes. */
   needsReview: boolean;
   reviewReason?: string;
+  /** Defaults to 'Available'. A directed add with an assignee writes 'Graduated'. */
+  status?: BankStatus;
+  /** Notion user IDs to set on 'Claimed by' (directed add). */
+  claimedByNotionIds?: string[];
+}
+
+/** Everything needed to open one Pipeline deal (directed add / graduation). */
+export interface PipelineDealInput {
+  bankPageId: string;
+  company: string;
+  driNotionIds: string[];
+  type: SponsorType;
+  categories: Category[];
+  contact: HunterContact | null;
+  /** Free-text next step (e.g. "Send first outreach — reduced-cost PCB fab"). */
+  nextAction: string;
+  /** ISO date the next action is due (feeds the Wednesday stale DM). */
+  nextActionDateIso: string;
+}
+
+/** Assignment outcome attached to an EnrichResult when a directed add ran. */
+export interface AssignmentInfo {
+  /** URL of the created Pipeline deal, if one was opened. */
+  dealUrl?: string;
+  /** Display labels of the assigned DRIs. */
+  assignees: string[];
+  /** Mentions we couldn't resolve to a Notion user (assignment skipped for them). */
+  unresolved: string[];
 }
 
 /**
@@ -120,6 +149,7 @@ export type EnrichResult =
       domain: string;
       /** URL of the pre-existing Bank page. */
       bankPageUrl: string;
+      assignment?: AssignmentInfo;
     }
   | {
       deduped: false;
@@ -131,4 +161,5 @@ export type EnrichResult =
       contact: HunterContact | null;
       needsReview: boolean;
       reviewReason?: string;
+      assignment?: AssignmentInfo;
     };
