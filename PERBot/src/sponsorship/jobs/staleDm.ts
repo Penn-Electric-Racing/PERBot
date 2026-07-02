@@ -3,19 +3,23 @@ import { daysUntil, todayIsoET } from '../dates.js';
 import { fetchSlackDirectory, notionUserToSlackId } from '../identity.js';
 import { SponsorNotion } from '../notion.js';
 import { NotionUser, PipelineRow } from '../types.js';
-import { alreadyPosted, makeSlackClient, metadataFor, WinMeta } from './shared.js';
+import { makeSlackClient } from './shared.js';
 
 /**
  * Wednesday 9 AM personalized stale DM: reads the Pipeline and DMs each member ONLY
  * their own deals whose Next action date is overdue. No DM if a member has nothing
  * overdue (silence is valid). Timed for weekly check-ins.
  *
- * Idempotency: time-check (Wednesday ET unless FORCE_STALE_DM) + per-user marker in
- * the DM so a double-fire doesn't re-DM.
+ * DMs post straight to the user ID (needs only `chat:write`, not `im:write`). Idempotency
+ * is a time gate: only the 9am-ET hour runs the work, so the two DST cron triggers (9am
+ * EDT / 9am EST) don't both fire — only the one that lands on 9am ET does.
  */
 
-function isWednesdayET(): boolean {
-  return new Date().toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/New_York' }) === 'Wednesday';
+function isWednesday9amET(): boolean {
+  const now = new Date();
+  const weekday = now.toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/New_York' });
+  const hour = Number(now.toLocaleString('en-US', { hour: '2-digit', hour12: false, timeZone: 'America/New_York' }));
+  return weekday === 'Wednesday' && hour === 9;
 }
 
 function overdueLine(row: PipelineRow): string {
@@ -26,8 +30,8 @@ function overdueLine(row: PipelineRow): string {
 }
 
 export async function runStaleDm(force = process.env.FORCE_STALE_DM?.toLowerCase() === 'true'): Promise<void> {
-  if (!force && !isWednesdayET()) {
-    logger.info('Stale DM: not Wednesday (ET) and not forced — skipping.');
+  if (!force && !isWednesday9amET()) {
+    logger.info('Stale DM: not Wednesday 9am (ET) and not forced — skipping.');
     return;
   }
 
@@ -54,9 +58,6 @@ export async function runStaleDm(force = process.env.FORCE_STALE_DM?.toLowerCase
   const notionUsers = await notion.listNotionUsers();
   const notionUserById = new Map<string, NotionUser>(notionUsers.map((u) => [u.id, u]));
   const slackDir = await fetchSlackDirectory(client);
-  const today = todayIsoET();
-  const legacyMarker = `sponsor-stale:${today}`;
-  const meta: WinMeta = { eventType: 'sponsor_stale', key: 'date', value: today };
 
   for (const [notionId, deals] of byUser) {
     const notionUser = notionUserById.get(notionId);
@@ -71,15 +72,6 @@ export async function runStaleDm(force = process.env.FORCE_STALE_DM?.toLowerCase
       continue;
     }
 
-    const dm: any = await client.conversations.open({ users: slackUserId });
-    const dmChannel: string = dm.channel?.id;
-    if (!dmChannel) continue;
-
-    if (await alreadyPosted(client, dmChannel, meta, legacyMarker)) {
-      logger.info(`Stale DM: already sent to ${notionUser.name || slackUserId} today — skipping.`);
-      continue;
-    }
-
     const lines = deals
       .sort((a, b) => (a.nextActionDate ?? '').localeCompare(b.nextActionDate ?? ''))
       .map(overdueLine);
@@ -87,7 +79,8 @@ export async function runStaleDm(force = process.env.FORCE_STALE_DM?.toLowerCase
       `:wave: You have *${deals.length}* sponsorship deal(s) with an overdue next action:\n` +
       `${lines.join('\n')}\n\n_Update them in Notion or log a touch with_ \`/sponsor log\`.`;
 
-    await client.chat.postMessage({ channel: dmChannel, text, unfurl_links: false, metadata: metadataFor(meta) });
+    // Post straight to the user ID — Slack opens the DM (needs only chat:write).
+    await client.chat.postMessage({ channel: slackUserId, text, unfurl_links: false });
     logger.info(`Stale DM: sent ${deals.length} overdue deal(s) to ${notionUser.name || slackUserId}.`);
   }
 }
