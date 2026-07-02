@@ -151,6 +151,12 @@ formulas. Won deals + `Relationship` make the Pipeline double as the **sponsor d
     A directed add against an already-banked domain is reported, not double-graduated.
 - `/sponsor log [company] [note]` — manual touch logger; stamps `Last contact` + appends note on the
   Pipeline row. Covers phone/in-person/off-domain touches the email flow can't see.
+- `/sponsor won <company> <amount> [note]` — marks the deal `Stage = Won`, writes `Received ($)` (and
+  `Deal value` if blank), stamps `Last contact`, and **posts the win to #operations immediately** (reusing
+  the win-post `sponsor-won:<id>` marker so the hourly job won't double-post). Amount accepts `$5,000`,
+  `5000`, `5k`.
+- `/sponsor stage <company> <stage>` — moves a deal to any stage (`Prospect`/`Contacted`/`In talks`/`Won`/
+  `Lost`) + stamps `Last contact`. For `Won` it nudges you to use `/sponsor won` to also record the amount.
 - `/sponsor me` — returns the caller's own active deals + next actions (pull view).
 
 **npm scripts** (run from the `PERBot/` subdirectory — the Node project root)

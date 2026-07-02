@@ -1,3 +1,4 @@
+import type { WebClient } from '@slack/web-api';
 import { config } from '../../config.js';
 import { logger } from '../../utils/logger.js';
 import { SponsorNotion } from '../notion.js';
@@ -9,16 +10,44 @@ import { channelHasMarker, makeSlackClient, resolveChannelId } from './shared.js
  * the running total toward the season goal. Gated to Won only (no prospect/stage/touch
  * posts — that would be spam). Idempotent via a per-deal marker in the channel.
  *
- * Run on a short cron (e.g. every 15 min). Each run announces only Won deals not yet
- * announced, so re-runs and double-fires are safe.
+ * Two callers: the hourly cron (`runWinPost`) and the `/sponsor won` command (which
+ * calls `announceWinIfNew` directly for an instant post). Both use the same marker, so
+ * whichever runs first wins and the other skips — no duplicate.
  */
 
-function markerFor(deal: PipelineRow): string {
+export function winMarker(deal: PipelineRow): string {
   return `sponsor-won:${deal.id}`;
 }
 
 function fmtUsd(n: number): string {
   return `$${Math.round(n).toLocaleString('en-US')}`;
+}
+
+/** Running total from Received ($) across Won deals (falls back to Deal value). */
+export function totalRaised(won: PipelineRow[]): number {
+  return won.reduce((sum, d) => sum + (d.received ?? d.dealValue ?? 0), 0);
+}
+
+/** Announce one Won deal if it hasn't been posted to the channel yet. Returns true if posted. */
+export async function announceWinIfNew(
+  client: WebClient,
+  channelId: string,
+  deal: PipelineRow,
+  totalUsd: number
+): Promise<boolean> {
+  const marker = winMarker(deal);
+  if (await channelHasMarker(client, channelId, marker)) return false; // already announced
+
+  const goal = config.sponsorship.seasonGoalUsd;
+  const pct = goal > 0 ? Math.round((totalUsd / goal) * 100) : 0;
+  const text =
+    `:tada: *New sponsor won: ${deal.company || 'a new sponsor'}!*\n` +
+    `We're now at *${fmtUsd(totalUsd)} / ${fmtUsd(goal)}* (${pct}%) toward the season goal. ` +
+    `Nice work! ${marker}`;
+
+  await client.chat.postMessage({ channel: channelId, text, unfurl_links: false });
+  logger.info(`Win post: announced ${deal.company} (${deal.id}).`);
+  return true;
 }
 
 export async function runWinPost(): Promise<void> {
@@ -37,22 +66,9 @@ export async function runWinPost(): Promise<void> {
     return;
   }
 
-  // Running total uses Received ($) — the live counter — falling back to Deal value.
-  const goal = config.sponsorship.seasonGoalUsd;
-  const total = won.reduce((sum, d) => sum + (d.received ?? d.dealValue ?? 0), 0);
-  const pct = goal > 0 ? Math.round((total / goal) * 100) : 0;
-
+  const total = totalRaised(won);
   for (const deal of won) {
-    const marker = markerFor(deal);
-    if (await channelHasMarker(client, channelId, marker)) continue; // already announced
-
-    const text =
-      `:tada: *New sponsor won: ${deal.company || 'a new sponsor'}!*\n` +
-      `We're now at *${fmtUsd(total)} / ${fmtUsd(goal)}* (${pct}%) toward the season goal. ` +
-      `Nice work! ${marker}`;
-
-    await client.chat.postMessage({ channel: channelId, text, unfurl_links: false });
-    logger.info(`Win post: announced ${deal.company} (${deal.id}).`);
+    await announceWinIfNew(client, channelId, deal, total);
   }
 }
 

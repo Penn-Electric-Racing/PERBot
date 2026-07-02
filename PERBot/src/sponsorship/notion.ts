@@ -245,6 +245,38 @@ export class SponsorNotion {
   }
 
   /**
+   * Mark a deal Won: Stage=Won, Received ($)=amount (the live counter), and Deal value
+   * if it was blank. Stamps Last contact and prepends a dated WON note. The #operations
+   * win post is triggered separately (by the command or the hourly job).
+   */
+  async markWon(row: PipelineRow, amountUsd: number, note: string, dateIso: string): Promise<void> {
+    const properties: Record<string, any> = {
+      Stage: { select: { name: 'Won' } },
+      'Received ($)': { number: amountUsd },
+      'Last contact': { date: { start: dateIso } },
+    };
+    if (row.dealValue == null) properties['Deal value ($)'] = { number: amountUsd };
+    if (note) {
+      const merged = `${dateIso}: WON — ${note}${row.notes ? `\n${row.notes}` : ''}`;
+      properties['Notes'] = { rich_text: [{ text: { content: merged.slice(0, 1900) } }] };
+    }
+    await this.client.pages.update({ page_id: row.id, properties: properties as any });
+    logger.info(`Marked WON: ${row.company} ($${amountUsd}).`);
+  }
+
+  /** Move a deal to any Stage and stamp Last contact. */
+  async setStage(row: PipelineRow, stage: Stage, dateIso: string): Promise<void> {
+    await this.client.pages.update({
+      page_id: row.id,
+      properties: {
+        Stage: { select: { name: stage } },
+        'Last contact': { date: { start: dateIso } },
+      } as any,
+    });
+    logger.info(`Set stage ${stage}: ${row.company} (${row.id}).`);
+  }
+
+  /**
    * List workspace users (id + display name + email) for bridging Notion DRI persons
    * to Slack identities. Email may be null if the integration lacks the "read user
    * emails" capability — the identity resolver falls back to name matching then.

@@ -1,11 +1,14 @@
 import type { App, RespondFn } from '@slack/bolt';
 import type { WebClient } from '@slack/web-api';
+import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 import { todayIsoET } from './dates.js';
 import { DomainResolutionError, enrichCompany } from './enrichCompany.js';
 import { indexNotionUsers, slackUserToNotionId } from './identity.js';
+import { resolveChannelId } from './jobs/shared.js';
+import { announceWinIfNew, totalRaised } from './jobs/winPost.js';
 import { SponsorNotion } from './notion.js';
-import { EnrichResult, PipelineRow } from './types.js';
+import { EnrichResult, PipelineRow, STAGES, Stage } from './types.js';
 
 const notion = new SponsorNotion();
 
@@ -20,8 +23,14 @@ const USAGE = [
   '• `/sponsor add <company or url>` — research a company into the Prospect Bank',
   '• `/sponsor add <company> for <ask> contact: <name> <email> @person` — research + set a known contact + assign a deal',
   '• `/sponsor log <company> - <note>` — log a manual touch on a deal',
+  '• `/sponsor won <company> <amount> [note]` — mark a deal Won + post it to #operations',
+  '• `/sponsor stage <company> <stage>` — move a deal (Prospect / Contacted / In talks / Won / Lost)',
   '• `/sponsor me` — show your active deals + next actions',
 ].join('\n');
+
+function fmtMoney(n: number): string {
+  return `$${Math.round(n).toLocaleString('en-US')}`;
+}
 
 /** Slack encodes mentions in command text as `<@U012ABC>` or `<@U012ABC|handle>`. */
 const MENTION_RE = /<@([A-Z0-9]+)(?:\|[^>]+)?>/g;
@@ -223,6 +232,30 @@ function parseLog(arg: string): { company: string; note: string } | null {
   return company && note ? { company, note } : null;
 }
 
+/**
+ * Find the single Pipeline deal matching `company`. Responds and returns null on zero
+ * or multiple matches (shared by log / won / stage). Callers proceed only on one hit.
+ */
+async function resolveSingleDeal(respond: RespondFn, company: string): Promise<PipelineRow | null> {
+  const matches = await notion.findDealsByCompany(company);
+  if (matches.length === 0) {
+    await respond({
+      response_type: 'ephemeral',
+      text: `No Pipeline deal matches *${company}*. Check the name, or it may still be in the Bank (not yet a deal).`,
+    });
+    return null;
+  }
+  if (matches.length > 1) {
+    const list = matches.map((m) => `• <${m.url}|${m.company}>`).join('\n');
+    await respond({
+      response_type: 'ephemeral',
+      text: `Multiple deals match *${company}* — be more specific:\n${list}`,
+    });
+    return null;
+  }
+  return matches[0]!;
+}
+
 async function handleLog(respond: RespondFn, arg: string): Promise<void> {
   const parsed = parseLog(arg);
   if (!parsed) {
@@ -233,28 +266,100 @@ async function handleLog(respond: RespondFn, arg: string): Promise<void> {
     return;
   }
 
-  const matches = await notion.findDealsByCompany(parsed.company);
-  if (matches.length === 0) {
-    await respond({
-      response_type: 'ephemeral',
-      text: `No Pipeline deal matches *${parsed.company}*. Check the name, or it may still be in the Bank (not yet a deal).`,
-    });
-    return;
-  }
-  if (matches.length > 1) {
-    const list = matches.map((m) => `• <${m.url}|${m.company}>`).join('\n');
-    await respond({
-      response_type: 'ephemeral',
-      text: `Multiple deals match *${parsed.company}* — be more specific:\n${list}`,
-    });
-    return;
-  }
+  const deal = await resolveSingleDeal(respond, parsed.company);
+  if (!deal) return;
 
-  const deal = matches[0]!;
   await notion.logTouch(deal, parsed.note, todayIsoET());
   await respond({
     response_type: 'ephemeral',
     text: `✅ Logged a touch on <${deal.url}|${deal.company}> and stamped *Last contact* = today.`,
+  });
+}
+
+// --- /sponsor won -------------------------------------------------------------
+
+/** Parse "Jane Street $5,000 cash donation" → { company, amountUsd, note }. Supports "5k". */
+function parseWon(arg: string): { company: string; amountUsd: number; note: string } | null {
+  const m = arg.trim().match(/^(.+?)\s+\$?([\d,]+(?:\.\d+)?)(k)?\b\s*(?:[-–—:]\s*)?(.*)$/i);
+  if (!m) return null;
+  const company = m[1]!.trim();
+  let amount = parseFloat(m[2]!.replace(/,/g, ''));
+  if (m[3]) amount *= 1000;
+  const note = (m[4] ?? '').trim();
+  if (!company || !Number.isFinite(amount) || amount <= 0) return null;
+  return { company, amountUsd: amount, note };
+}
+
+async function handleWon(client: WebClient, respond: RespondFn, arg: string): Promise<void> {
+  const parsed = parseWon(arg);
+  if (!parsed) {
+    await respond({
+      response_type: 'ephemeral',
+      text: 'Usage: `/sponsor won <company> <amount> [note]`\nExample: `/sponsor won Jane Street $5000 cash donation`',
+    });
+    return;
+  }
+
+  const deal = await resolveSingleDeal(respond, parsed.company);
+  if (!deal) return;
+
+  await notion.markWon(deal, parsed.amountUsd, parsed.note, todayIsoET());
+
+  // Post to #operations immediately. Same marker as the hourly job → no double-post.
+  let announcedSuffix = '';
+  try {
+    const channelId = await resolveChannelId(client, config.sponsorship.winPostChannel);
+    if (channelId) {
+      const won = await notion.queryWonDeals();
+      // Read-after-write guard: make sure this deal's amount is in the running total.
+      let total = totalRaised(won);
+      if (!won.some((d) => d.id === deal.id)) total += parsed.amountUsd;
+      const posted = await announceWinIfNew(client, channelId, { ...deal, received: parsed.amountUsd }, total);
+      if (posted) announcedSuffix = ` and posted it to #${config.sponsorship.winPostChannel}`;
+    }
+  } catch (err) {
+    logger.error('/sponsor won: announcement failed (deal still marked Won)', err);
+  }
+
+  await respond({
+    response_type: 'ephemeral',
+    text: `🎉 Marked <${deal.url}|${deal.company}> *Won* at ${fmtMoney(parsed.amountUsd)}${announcedSuffix}.`,
+  });
+}
+
+// --- /sponsor stage -----------------------------------------------------------
+
+/** Parse "Jane Street in talks" → { company, stage }. Stage is a trailing keyword. */
+function parseStage(arg: string): { company: string; stage: Stage } | null {
+  const lower = arg.trim().toLowerCase();
+  for (const stage of STAGES) {
+    const suffix = stage.toLowerCase();
+    if (lower.endsWith(` ${suffix}`)) {
+      const company = arg.trim().slice(0, arg.trim().length - stage.length).trim().replace(/[-–—:]$/, '').trim();
+      if (company) return { company, stage };
+    }
+  }
+  return null;
+}
+
+async function handleStage(respond: RespondFn, arg: string): Promise<void> {
+  const parsed = parseStage(arg);
+  if (!parsed) {
+    await respond({
+      response_type: 'ephemeral',
+      text: `Usage: \`/sponsor stage <company> <stage>\`\nStages: ${STAGES.join(' / ')}\nExample: \`/sponsor stage Jane Street In talks\``,
+    });
+    return;
+  }
+
+  const deal = await resolveSingleDeal(respond, parsed.company);
+  if (!deal) return;
+
+  await notion.setStage(deal, parsed.stage, todayIsoET());
+  const tip = parsed.stage === 'Won' ? ' _(tip: use `/sponsor won <company> <amount>` to record the $ and post the win)_' : '';
+  await respond({
+    response_type: 'ephemeral',
+    text: `✅ Moved <${deal.url}|${deal.company}> to *${parsed.stage}*.${tip}`,
   });
 }
 
@@ -276,6 +381,16 @@ export function registerSponsorCommands(app: App): void {
         case 'log':
           await ack();
           await handleLog(respond, arg);
+          break;
+
+        case 'won':
+          await ack();
+          await handleWon(client, respond, arg);
+          break;
+
+        case 'stage':
+          await ack();
+          await handleStage(respond, arg);
           break;
 
         case 'me':
