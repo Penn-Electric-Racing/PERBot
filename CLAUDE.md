@@ -230,6 +230,9 @@ Deltas from the spec above, discovered while building against the live Notion sc
 - **Config now accepts `NOTION_TOKEN` *or* `NOTION_API_KEY`**, and `SLACK_APP_TOKEN` is
   optional (only the Socket-Mode app needs it) — so the cron job entrypoints can import
   `config` in a minimal env. Jobs need only `SLACK_BOT_TOKEN` + `NOTION_API_KEY`.
+- **Win post @-mentions the deal's DRI(s)** for a shoutout ("Huge shoutout to @X for landing this
+  one!"), resolving each Notion DRI → Slack via `winPost.ts:resolveDriMentions` (Slack mention, or the
+  Notion display name if there's no Slack match). Directories are fetched once per run.
 - **Win post is polled hourly**, not event-driven (no Notion webhook in this repo). Idempotency
   uses an **invisible Slack message-metadata marker** (`event_type: sponsor_win`, payload `deal_id`;
   stale DM uses `sponsor_stale` + `date`) checked via `conversations.history` with

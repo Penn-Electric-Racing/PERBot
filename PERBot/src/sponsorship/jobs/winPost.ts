@@ -1,8 +1,9 @@
 import type { WebClient } from '@slack/web-api';
 import { config } from '../../config.js';
 import { logger } from '../../utils/logger.js';
+import { fetchSlackDirectory, Indexed, notionUserToSlackId } from '../identity.js';
 import { SponsorNotion } from '../notion.js';
-import { PipelineRow } from '../types.js';
+import { NotionUser, PipelineRow } from '../types.js';
 import { alreadyPosted, makeSlackClient, metadataFor, resolveChannelId, WinMeta } from './shared.js';
 
 /**
@@ -33,21 +34,47 @@ export function totalRaised(won: PipelineRow[]): number {
   return won.reduce((sum, d) => sum + (d.received ?? d.dealValue ?? 0), 0);
 }
 
+/**
+ * Resolve a deal's DRI(s) to Slack @mentions for the shoutout. Falls back to the Notion
+ * display name if there's no Slack match, and drops DRIs we can't identify at all. The
+ * caller fetches the directories once and passes them in (avoids per-deal refetch).
+ */
+export async function resolveDriMentions(
+  client: WebClient,
+  driUserIds: string[],
+  notionUsersById: Map<string, NotionUser>,
+  slackDir: Indexed[]
+): Promise<string[]> {
+  const mentions: string[] = [];
+  for (const notionId of driUserIds) {
+    const user = notionUsersById.get(notionId);
+    if (!user) continue;
+    const slackId = await notionUserToSlackId(client, user, slackDir);
+    if (slackId) mentions.push(`<@${slackId}>`);
+    else if (user.name) mentions.push(user.name);
+  }
+  return mentions;
+}
+
 /** Announce one Won deal if it hasn't been posted to the channel yet. Returns true if posted. */
 export async function announceWinIfNew(
   client: WebClient,
   channelId: string,
   deal: PipelineRow,
-  totalUsd: number
+  totalUsd: number,
+  driMentions: string[] = []
 ): Promise<boolean> {
   const meta = winMeta(deal);
   if (await alreadyPosted(client, channelId, meta, winMarker(deal))) return false; // already announced
 
   const goal = config.sponsorship.seasonGoalUsd;
   const pct = goal > 0 ? Math.round((totalUsd / goal) * 100) : 0;
+  const closing = driMentions.length
+    ? `Huge shoutout to ${driMentions.join(', ')} for landing this one! 🙌`
+    : 'Nice work!';
   const text =
     `:tada: *New sponsor won: ${deal.company || 'a new sponsor'}!*\n` +
-    `We're now at *${fmtUsd(totalUsd)} / ${fmtUsd(goal)}* (${pct}%) toward the season goal. Nice work!`;
+    `We're now at *${fmtUsd(totalUsd)} / ${fmtUsd(goal)}* (${pct}%) toward the season goal. ${closing}`;
 
   await client.chat.postMessage({ channel: channelId, text, unfurl_links: false, metadata: metadataFor(meta) });
   logger.info(`Win post: announced ${deal.company} (${deal.id}).`);
@@ -70,9 +97,14 @@ export async function runWinPost(): Promise<void> {
     return;
   }
 
+  // Directories for DRI shoutouts — fetched once, reused across all deals.
+  const notionUsersById = new Map((await notion.listNotionUsers()).map((u) => [u.id, u]));
+  const slackDir = await fetchSlackDirectory(client);
+
   const total = totalRaised(won);
   for (const deal of won) {
-    await announceWinIfNew(client, channelId, deal, total);
+    const dri = await resolveDriMentions(client, deal.driUserIds, notionUsersById, slackDir);
+    await announceWinIfNew(client, channelId, deal, total, dri);
   }
 }
 
