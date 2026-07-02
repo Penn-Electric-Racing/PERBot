@@ -149,6 +149,14 @@ formulas. Won deals + `Relationship` make the Pipeline double as the **sponsor d
     `@person` are optional and independent. Parsing lives in `slack.ts:parseAdd` (mentions anywhere; ask
     after " for "; contact after "contact:"; Slack's `<url>`/`<mailto:>` wrappers are unwrapped first).
     A directed add against an already-banked domain is reported, not double-graduated.
+- `/sponsor claim <company> [@person]` — graduate an existing **Bank** lead into a Pipeline deal (Stage
+  `Prospect`, DRI = the caller by default, or the @mentioned people). Marks the Bank row `Graduated`/
+  `Claimed`. This is the "own it myself" path — no mention needed, it uses the caller's Slack identity.
+  A directed `/sponsor add` against an already-banked domain now does the same graduation inline (instead
+  of just reporting "already in Bank"). Both no-op with a link if the lead is already a deal.
+  - **Mentions must be real Slack mentions** (`<@U…>`, i.e. picked from the @ menu). Plain-text `@handle`
+    is detected, stripped so it can't pollute the contact field, and the user is warned to use the menu or
+    `/sponsor claim`.
 - `/sponsor log [company] [note]` — manual touch logger; stamps `Last contact` + appends note on the
   Pipeline row. Covers phone/in-person/off-domain touches the email flow can't see.
 - `/sponsor won <company> <amount> [note]` — marks the deal `Stage = Won`, writes `Received ($)` (and

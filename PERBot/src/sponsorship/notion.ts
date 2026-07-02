@@ -1,7 +1,17 @@
 import { Client } from '@notionhq/client';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
-import { BankRowInput, NotionUser, PipelineDealInput, PipelineRow, Stage } from './types.js';
+import {
+  BankLeadRow,
+  BankRowInput,
+  BankStatus,
+  Category,
+  NotionUser,
+  PipelineDealInput,
+  PipelineRow,
+  SponsorType,
+  Stage,
+} from './types.js';
 
 /**
  * Notion access layer for the Sponsorship CRM (Prospect Bank + Pipeline).
@@ -57,6 +67,35 @@ function readDate(prop: any): string | null {
 function readPeopleIds(prop: any): string[] {
   return (prop?.people ?? []).map((p: any) => p?.id).filter((id: any): id is string => typeof id === 'string');
 }
+function readMultiSelect(prop: any): string[] {
+  return (prop?.multi_select ?? []).map((o: any) => o?.name).filter((n: any): n is string => typeof n === 'string');
+}
+function readEmail(prop: any): string {
+  return typeof prop?.email === 'string' ? prop.email : '';
+}
+function readRelationCount(prop: any): number {
+  return (prop?.relation ?? []).length;
+}
+
+function parseBankRow(page: any): BankLeadRow {
+  const p = page?.properties ?? {};
+  const contactName = readRichText(p['Contact name']);
+  const contactEmail = readEmail(p['Contact email']);
+  const categories = readMultiSelect(p['Category']) as Category[];
+  return {
+    id: page.id,
+    url: page.url,
+    company: readTitle(p['Company']),
+    status: readSelect(p['Status']),
+    type: (readSelect(p['Type']) as SponsorType) ?? 'Cash',
+    categories: categories.length ? categories : ['General'],
+    contact:
+      contactName || contactEmail
+        ? { name: contactName, email: contactEmail, verificationStatus: 'from bank', confidence: 0 }
+        : null,
+    hasPipelineDeal: readRelationCount(p['Pipeline deal']) > 0,
+  };
+}
 
 function parsePipelineRow(page: any): PipelineRow {
   const p = page?.properties ?? {};
@@ -92,10 +131,10 @@ export class SponsorNotion {
 
   /**
    * Dedupe key: look up an existing Bank row by its canonical Domain URL. Returns the
-   * page ref if one exists, else null. The caller passes an already-normalized
-   * `https://<domain>` string so this is an exact-match filter.
+   * parsed lead (so a directed add can graduate it) if one exists, else null. The caller
+   * passes an already-normalized `https://<domain>` string so this is an exact match.
    */
-  async findBankRowByDomain(canonicalDomain: string): Promise<BankPageRef | null> {
+  async findBankRowByDomain(canonicalDomain: string): Promise<BankLeadRow | null> {
     const response: any = await this.client.dataSources.query({
       data_source_id: config.sponsorship.bankDataSourceId,
       filter: { property: 'Domain', url: { equals: canonicalDomain } },
@@ -103,7 +142,7 @@ export class SponsorNotion {
     });
 
     const hit = (response.results ?? [])[0];
-    return hit ? { id: hit.id, url: hit.url } : null;
+    return hit ? parseBankRow(hit) : null;
   }
 
   /**
@@ -148,6 +187,28 @@ export class SponsorNotion {
 
     logger.info(`Created Bank row for ${input.company} (${input.domain}): ${result.url}`);
     return { id: result.id, url: result.url };
+  }
+
+  /** Find Bank leads whose Company title contains `name` (for `/sponsor claim`). */
+  async findBankRowsByCompany(name: string): Promise<BankLeadRow[]> {
+    const response: any = await this.client.dataSources.query({
+      data_source_id: config.sponsorship.bankDataSourceId,
+      filter: { property: 'Company', title: { contains: name } },
+      page_size: 25,
+    });
+    return (response.results ?? []).map(parseBankRow);
+  }
+
+  /** Mark a Bank lead claimed/graduated and set its owner(s). */
+  async markBankClaimed(pageId: string, notionIds: string[], status: BankStatus): Promise<void> {
+    await this.client.pages.update({
+      page_id: pageId,
+      properties: {
+        Status: { select: { name: status } },
+        'Claimed by': { people: notionIds.map((id) => ({ id })) },
+      } as any,
+    });
+    logger.info(`Bank lead ${pageId} → ${status}, claimed by ${notionIds.join(', ')}.`);
   }
 
   // --- Pipeline ---------------------------------------------------------------
