@@ -4,7 +4,7 @@ import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 import { isoDaysFromNowET, todayIsoET } from './dates.js';
 import { DomainResolutionError, enrichCompany } from './enrichCompany.js';
-import { indexNotionUsers, slackUserToNotionId } from './identity.js';
+import { indexNotionUsers, resolveSlackHandles, slackUserToNotionId } from './identity.js';
 import { resolveChannelId } from './jobs/shared.js';
 import { announceWinIfNew, totalRaised } from './jobs/winPost.js';
 import { SponsorNotion } from './notion.js';
@@ -160,18 +160,26 @@ function formatAddResult(result: EnrichResult): string {
   return lines.join('\n');
 }
 
-/** Resolve assignee Slack IDs → Notion user IDs (email-first, name fallback). */
+/**
+ * Resolve assignees → Notion user IDs. Takes real-mention Slack IDs AND plain-text
+ * @handles (Slack sends blue-chip mentions as plain text unless the command escapes
+ * links); handles are looked up in the Slack directory first. Email-first, name fallback.
+ */
 async function resolveAssignees(
   client: WebClient,
-  slackIds: string[]
+  slackIds: string[],
+  plainHandles: string[] = []
 ): Promise<{ notionIds: string[]; labels: string[]; unresolved: string[] }> {
+  const { ids: handleIds, unresolved: handleUnresolved } = await resolveSlackHandles(client, plainHandles);
+  const allSlackIds = [...new Set([...slackIds, ...handleIds])];
+
   const notionIds: string[] = [];
   const labels: string[] = [];
-  const unresolved: string[] = [];
-  if (slackIds.length === 0) return { notionIds, labels, unresolved };
+  const unresolved: string[] = handleUnresolved.map((h) => `@${h}`);
+  if (allSlackIds.length === 0) return { notionIds, labels, unresolved };
 
   const index = indexNotionUsers(await notion.listNotionUsers());
-  for (const slackId of slackIds) {
+  for (const slackId of allSlackIds) {
     const notionId = await slackUserToNotionId(client, slackId, index);
     if (notionId) {
       notionIds.push(notionId);
@@ -194,7 +202,7 @@ async function handleAdd(client: WebClient, respond: RespondFn, arg: string): Pr
   }
 
   try {
-    const { notionIds, labels, unresolved } = await resolveAssignees(client, assigneeSlackIds);
+    const { notionIds, labels, unresolved } = await resolveAssignees(client, assigneeSlackIds, plainHandles);
     const result = await enrichCompany(company, {
       notion,
       knownAsk: knownAsk || undefined,
@@ -203,11 +211,7 @@ async function handleAdd(client: WebClient, respond: RespondFn, arg: string): Pr
       unresolvedAssignees: unresolved,
       manualContact: contactName || contactEmail ? { name: contactName, email: contactEmail } : undefined,
     });
-    let text = formatAddResult(result);
-    if (plainHandles.length && notionIds.length === 0) {
-      text += `\n• ⚠️ Saw \`@${plainHandles.join('`, `@')}\` as plain text — to assign someone, pick them from Slack's *@ menu* (blue chip) so it's a real mention, or use \`/sponsor claim ${company}\`.`;
-    }
-    await respond({ response_type: 'ephemeral', text });
+    await respond({ response_type: 'ephemeral', text: formatAddResult(result) });
   } catch (err) {
     if (err instanceof DomainResolutionError) {
       await respond({ response_type: 'ephemeral', text: `✗ ${err.message}` });
@@ -478,9 +482,11 @@ async function handleClaim(
     return;
   }
 
-  // Default owner = the caller; explicit @mentions override.
-  const slackIds = assigneeSlackIds.length ? assigneeSlackIds : [callerSlackId];
-  const { notionIds, labels, unresolved } = await resolveAssignees(client, slackIds);
+  // Default owner = the caller; an explicit @mention or @handle assigns someone else.
+  const hasExplicit = assigneeSlackIds.length > 0 || plainHandles.length > 0;
+  const { notionIds, labels, unresolved } = hasExplicit
+    ? await resolveAssignees(client, assigneeSlackIds, plainHandles)
+    : await resolveAssignees(client, [callerSlackId]);
   if (notionIds.length === 0) {
     await respond({
       response_type: 'ephemeral',
@@ -502,13 +508,9 @@ async function handleClaim(
   await notion.markBankClaimed(bank.id, notionIds, 'Graduated');
 
   const unresolvedNote = unresolved.length ? ` (couldn't match ${unresolved.join(', ')})` : '';
-  const plainWarn =
-    plainHandles.length && assigneeSlackIds.length === 0
-      ? `\n• ⚠️ Ignored plain-text \`@${plainHandles.join('`, `@')}\` — to assign someone else, @-mention them from Slack's menu.`
-      : '';
   await respond({
     response_type: 'ephemeral',
-    text: `✅ Claimed *${bank.company}* → <${deal.url}|Pipeline deal> (Prospect), owned by ${labels.join(', ')}.${unresolvedNote}${plainWarn}`,
+    text: `✅ Claimed *${bank.company}* → <${deal.url}|Pipeline deal> (Prospect), owned by ${labels.join(', ')}.${unresolvedNote}`,
   });
 }
 
