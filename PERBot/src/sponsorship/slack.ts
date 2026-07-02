@@ -2,7 +2,7 @@ import type { App, RespondFn } from '@slack/bolt';
 import type { WebClient } from '@slack/web-api';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
-import { todayIsoET } from './dates.js';
+import { isoDaysFromNowET, todayIsoET } from './dates.js';
 import { DomainResolutionError, enrichCompany } from './enrichCompany.js';
 import { indexNotionUsers, slackUserToNotionId } from './identity.js';
 import { resolveChannelId } from './jobs/shared.js';
@@ -22,6 +22,7 @@ const USAGE = [
   '*`/sponsor` commands:*',
   '• `/sponsor add <company or url>` — research a company into the Prospect Bank',
   '• `/sponsor add <company> for <ask> contact: <name> <email> @person` — research + set a known contact + assign a deal',
+  '• `/sponsor claim <company> [@person]` — take an existing Bank lead as a deal you own',
   '• `/sponsor log <company> - <note>` — log a manual touch on a deal',
   '• `/sponsor won <company> <amount> [note]` — mark a deal Won + post it to #operations',
   '• `/sponsor stage <company> <stage>` — move a deal (Prospect / Contacted / In talks / Won / Lost)',
@@ -43,10 +44,23 @@ function unwrapSlackLinks(text: string): string {
     .replace(/<(https?:\/\/[^|>]+)(?:\|[^>]*)?>/gi, '$1');
 }
 
+// A plain-text "@handle" (NOT a real Slack mention) — anchored to whitespace/start so it
+// never matches the "@" inside an email. Real mentions are `<@U…>` (see MENTION_RE).
+const PLAIN_HANDLE_RE = /(^|\s)@([a-z0-9._-]+)/gi;
+
+/** Pull out plain-text @handles (typed, not picked from the menu) and remove them. */
+function extractPlainHandles(text: string): { handles: string[]; cleaned: string } {
+  const handles = [...text.matchAll(PLAIN_HANDLE_RE)].map((m) => m[2]!);
+  const cleaned = text.replace(PLAIN_HANDLE_RE, '$1').replace(/\s+/g, ' ').trim();
+  return { handles, cleaned };
+}
+
 export interface ParsedAdd {
   company: string;
   knownAsk: string;
   assigneeSlackIds: string[];
+  /** Plain-text @handles that weren't real mentions — reported so the user can fix them. */
+  plainHandles: string[];
   contactName: string;
   contactEmail: string;
 }
@@ -60,11 +74,13 @@ export interface ParsedAdd {
  */
 export function parseAdd(arg: string): ParsedAdd {
   const assigneeSlackIds: string[] = [];
-  let text = unwrapSlackLinks(arg).replace(MENTION_RE, (_m, id: string) => {
+  const withoutMentions = unwrapSlackLinks(arg).replace(MENTION_RE, (_m, id: string) => {
     assigneeSlackIds.push(id);
     return ' ';
   });
-  text = text.replace(/\s+/g, ' ').trim();
+  // Strip plain-text @handles before parsing so they don't pollute company/contact.
+  const { handles: plainHandles, cleaned } = extractPlainHandles(withoutMentions);
+  let text = cleaned;
 
   let knownAsk = '';
   let contactName = '';
@@ -94,14 +110,18 @@ export function parseAdd(arg: string): ParsedAdd {
   const company = (forMatch ? forMatch[1] : text).trim();
   if (forMatch && !knownAsk) knownAsk = forMatch[2]!.trim();
 
-  return { company, knownAsk, assigneeSlackIds: [...new Set(assigneeSlackIds)], contactName, contactEmail };
+  return { company, knownAsk, assigneeSlackIds: [...new Set(assigneeSlackIds)], plainHandles, contactName, contactEmail };
 }
 
 function formatAddResult(result: EnrichResult): string {
   if (result.deduped) {
-    const base = `↩︎ *${result.company}* is already in the Bank — skipped. <${result.bankPageUrl}|Open row>`;
+    if (result.assignment?.dealUrl) {
+      // Was already in the Bank, but we graduated it to a deal for the assignee.
+      return `✅ *${result.company}* was already in the Bank — claimed it for ${result.assignment.assignees.join(', ')} → <${result.assignment.dealUrl}|Pipeline deal> (Prospect).`;
+    }
+    const base = `↩︎ *${result.company}* is already in the Bank. <${result.bankPageUrl}|Open row>`;
     return result.assignment?.assignees.length || result.assignment?.unresolved.length
-      ? `${base}\n• ⚠️ Assignment skipped (already a lead). Claim/assign it in Notion, or \`/sponsor log\` once it's a deal.`
+      ? `${base}\n• It's already an active deal — use \`/sponsor me\`, or \`/sponsor stage\` / \`/sponsor won\` to update it.`
       : base;
   }
 
@@ -158,7 +178,7 @@ async function resolveAssignees(
 }
 
 async function handleAdd(client: WebClient, respond: RespondFn, arg: string): Promise<void> {
-  const { company, knownAsk, assigneeSlackIds, contactName, contactEmail } = parseAdd(arg);
+  const { company, knownAsk, assigneeSlackIds, plainHandles, contactName, contactEmail } = parseAdd(arg);
   if (!company) {
     await respond({
       response_type: 'ephemeral',
@@ -177,7 +197,11 @@ async function handleAdd(client: WebClient, respond: RespondFn, arg: string): Pr
       unresolvedAssignees: unresolved,
       manualContact: contactName || contactEmail ? { name: contactName, email: contactEmail } : undefined,
     });
-    await respond({ response_type: 'ephemeral', text: formatAddResult(result) });
+    let text = formatAddResult(result);
+    if (plainHandles.length && notionIds.length === 0) {
+      text += `\n• ⚠️ Saw \`@${plainHandles.join('`, `@')}\` as plain text — to assign someone, pick them from Slack's *@ menu* (blue chip) so it's a real mention, or use \`/sponsor claim ${company}\`.`;
+    }
+    await respond({ response_type: 'ephemeral', text });
   } catch (err) {
     if (err instanceof DomainResolutionError) {
       await respond({ response_type: 'ephemeral', text: `✗ ${err.message}` });
@@ -363,6 +387,94 @@ async function handleStage(respond: RespondFn, arg: string): Promise<void> {
   });
 }
 
+// --- /sponsor claim -----------------------------------------------------------
+
+function parseClaim(arg: string): { company: string; assigneeSlackIds: string[]; plainHandles: string[] } {
+  const assigneeSlackIds: string[] = [];
+  const withoutMentions = unwrapSlackLinks(arg).replace(MENTION_RE, (_m, id: string) => {
+    assigneeSlackIds.push(id);
+    return ' ';
+  });
+  const { handles: plainHandles, cleaned } = extractPlainHandles(withoutMentions);
+  return { company: cleaned, assigneeSlackIds: [...new Set(assigneeSlackIds)], plainHandles };
+}
+
+/**
+ * Claim an existing Bank lead → graduate it to a Pipeline deal. No mention needed: it
+ * defaults to the caller (using their own Slack identity), so it's the clean "own it
+ * myself" button. An explicit @mention assigns someone else instead.
+ */
+async function handleClaim(
+  client: WebClient,
+  respond: RespondFn,
+  callerSlackId: string,
+  arg: string
+): Promise<void> {
+  const { company, assigneeSlackIds, plainHandles } = parseClaim(arg);
+  if (!company) {
+    await respond({
+      response_type: 'ephemeral',
+      text: 'Usage: `/sponsor claim <company> [@person]`\nExample: `/sponsor claim Jane Street` (claims it for you) or `/sponsor claim Jane Street @teammate`',
+    });
+    return;
+  }
+
+  const rows = await notion.findBankRowsByCompany(company);
+  if (rows.length === 0) {
+    await respond({
+      response_type: 'ephemeral',
+      text: `No Bank lead matches *${company}*. Add it first with \`/sponsor add ${company}\`.`,
+    });
+    return;
+  }
+  if (rows.length > 1) {
+    const list = rows.map((r) => `• <${r.url}|${r.company}>`).join('\n');
+    await respond({ response_type: 'ephemeral', text: `Multiple Bank leads match *${company}* — be more specific:\n${list}` });
+    return;
+  }
+  const bank = rows[0]!;
+
+  if (bank.hasPipelineDeal || bank.status === 'Graduated') {
+    const deals = await notion.findDealsByCompany(bank.company);
+    const link = deals[0] ? ` <${deals[0].url}|Open deal>` : '';
+    await respond({ response_type: 'ephemeral', text: `↩︎ *${bank.company}* is already an active deal.${link}` });
+    return;
+  }
+
+  // Default owner = the caller; explicit @mentions override.
+  const slackIds = assigneeSlackIds.length ? assigneeSlackIds : [callerSlackId];
+  const { notionIds, labels, unresolved } = await resolveAssignees(client, slackIds);
+  if (notionIds.length === 0) {
+    await respond({
+      response_type: 'ephemeral',
+      text: `✗ Couldn't match ${[...labels, ...unresolved].join(', ') || 'you'} to a Notion user (by email or name). Ask an admin to check Notion access.`,
+    });
+    return;
+  }
+
+  const deal = await notion.createPipelineDeal({
+    bankPageId: bank.id,
+    company: bank.company,
+    driNotionIds: notionIds,
+    type: bank.type,
+    categories: bank.categories,
+    contact: bank.contact,
+    nextAction: 'Send first outreach',
+    nextActionDateIso: isoDaysFromNowET(7),
+  });
+  await notion.markBankClaimed(bank.id, notionIds, 'Graduated');
+
+  const unresolvedNote = unresolved.length ? ` (couldn't match ${unresolved.join(', ')})` : '';
+  const plainWarn =
+    plainHandles.length && assigneeSlackIds.length === 0
+      ? `\n• ⚠️ Ignored plain-text \`@${plainHandles.join('`, `@')}\` — to assign someone else, @-mention them from Slack's menu.`
+      : '';
+  await respond({
+    response_type: 'ephemeral',
+    text: `✅ Claimed *${bank.company}* → <${deal.url}|Pipeline deal> (Prospect), owned by ${labels.join(', ')}.${unresolvedNote}${plainWarn}`,
+  });
+}
+
 export function registerSponsorCommands(app: App): void {
   app.command('/sponsor', async ({ ack, command, respond, client }) => {
     const trimmed = command.text.trim();
@@ -376,6 +488,11 @@ export function registerSponsorCommands(app: App): void {
           // Enrichment is slow (fetch + LLM + Hunter); ack fast, then post via response_url.
           await ack({ response_type: 'ephemeral', text: `:hourglass_flowing_sand: Researching *${arg || '…'}*` });
           await handleAdd(client, respond, arg);
+          break;
+
+        case 'claim':
+          await ack();
+          await handleClaim(client, respond, command.user_id, arg);
           break;
 
         case 'log':

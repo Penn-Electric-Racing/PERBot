@@ -70,6 +70,19 @@ export interface NotionUser {
   email: string | null;
 }
 
+/** A parsed Prospect Bank row (the subset needed to claim/graduate it). */
+export interface BankLeadRow {
+  id: string;
+  url: string;
+  company: string;
+  status: string | null;
+  type: SponsorType;
+  categories: Category[];
+  contact: HunterContact | null;
+  /** True if it already has a linked Pipeline deal (already graduated). */
+  hasPipelineDeal: boolean;
+}
+
 /** A parsed Pipeline deal row (subset of properties the commands + jobs use). */
 export interface PipelineRow {
   id: string;

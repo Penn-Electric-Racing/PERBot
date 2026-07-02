@@ -117,9 +117,32 @@ export async function enrichCompany(
   const existing = await notion.findBankRowByDomain(canonical);
   if (existing) {
     logger.info(`Skipping enrichment for ${canonical} — already in Bank (${existing.url}).`);
-    // Directed add against an existing lead: don't silently double-graduate. Report it
-    // and let the caller assign/claim in Notion (or via the existing deal).
-    return { deduped: true, company, domain: canonical, bankPageUrl: existing.url, assignment: assignmentBase };
+    const displayCompany = existing.company || company;
+
+    // Directed add against an existing lead: graduate it to a deal now (unless it's
+    // already a deal). This is the same graduation `/sponsor claim` does.
+    if (assigned && !existing.hasPipelineDeal && existing.status !== 'Graduated') {
+      const deal = await notion.createPipelineDeal({
+        bankPageId: existing.id,
+        company: displayCompany,
+        driNotionIds: assigneeNotionIds,
+        type: existing.type,
+        categories: existing.categories,
+        contact: existing.contact,
+        nextAction: `Send first outreach${opts.knownAsk ? ` — ${opts.knownAsk}` : ''}`,
+        nextActionDateIso: isoDaysFromNowET(FIRST_OUTREACH_DAYS),
+      });
+      await notion.markBankClaimed(existing.id, assigneeNotionIds, 'Graduated');
+      return {
+        deduped: true,
+        company: displayCompany,
+        domain: canonical,
+        bankPageUrl: existing.url,
+        assignment: { ...assignmentBase!, dealUrl: deal.url },
+      };
+    }
+
+    return { deduped: true, company: displayCompany, domain: canonical, bankPageUrl: existing.url, assignment: assignmentBase };
   }
 
   // Step 3 — homepage/about text (deterministic grounding for the classifier).
