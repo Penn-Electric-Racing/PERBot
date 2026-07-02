@@ -8,7 +8,7 @@ import { alreadyPosted, makeSlackClient, metadataFor, resolveChannelId, WinMeta 
 
 /**
  * Win post: when a Pipeline deal reaches Stage = Won, post ONCE to #operations with
- * the running total toward the season goal. Gated to Won only (no prospect/stage/touch
+ * the running total toward the semester goal. Gated to Won only (no prospect/stage/touch
  * posts — that would be spam). Idempotent via a per-deal marker in the channel.
  *
  * Two callers: the hourly cron (`runWinPost`) and the `/sponsor won` command (which
@@ -67,14 +67,14 @@ export async function announceWinIfNew(
   const meta = winMeta(deal);
   if (await alreadyPosted(client, channelId, meta, winMarker(deal))) return false; // already announced
 
-  const goal = config.sponsorship.seasonGoalUsd;
+  const goal = config.sponsorship.semesterGoalUsd;
   const pct = goal > 0 ? Math.round((totalUsd / goal) * 100) : 0;
   const closing = driMentions.length
     ? `Huge shoutout to ${driMentions.join(', ')} for landing this one! 🙌`
     : 'Nice work!';
   const text =
     `:tada: *New sponsor won: ${deal.company || 'a new sponsor'}!*\n` +
-    `We're now at *${fmtUsd(totalUsd)} / ${fmtUsd(goal)}* (${pct}%) toward the season goal. ${closing}`;
+    `We're now at *${fmtUsd(totalUsd)} / ${fmtUsd(goal)}* (${pct}%) toward the semester goal. ${closing}`;
 
   await client.chat.postMessage({ channel: channelId, text, unfurl_links: false, metadata: metadataFor(meta) });
   logger.info(`Win post: announced ${deal.company} (${deal.id}).`);

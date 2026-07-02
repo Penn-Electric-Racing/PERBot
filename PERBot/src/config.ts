@@ -80,9 +80,9 @@ export const config = {
     // Notion data-source IDs for the Sponsorship CRM (see CLAUDE.md "Notion IDs").
     bankDataSourceId: optionalString('SPONSOR_BANK_DS_ID', 'fd42b16b-2833-42c3-b72d-f6322145ed4e'),
     pipelineDataSourceId: optionalString('SPONSOR_PIPELINE_DS_ID', '64bb332e-543c-4286-9e67-c3bda963cfdd'),
-    // Won-deal win posts land here; also the season goal for the running % line.
+    // Won-deal win posts land here; also the semester goal for the running % line.
     winPostChannel: optionalString('SPONSOR_WIN_CHANNEL', 'operations'),
-    seasonGoalUsd: optionalNumber('SPONSOR_SEASON_GOAL_USD', 35000),
+    semesterGoalUsd: optionalNumber('SPONSOR_SEMESTER_GOAL_USD', 35000),
   },
   github: {
     token: process.env.GITHUB_TOKEN?.trim() || '',
