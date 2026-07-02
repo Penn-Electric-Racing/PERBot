@@ -22,10 +22,12 @@ export interface BankPageRef {
 function buildNotes(input: BankRowInput): string {
   const lines: string[] = ['Auto-enriched by /sponsor.'];
   if (input.contact) {
-    lines.push(
-      `Contact from Hunter: ${input.contact.name || '(no name)'} <${input.contact.email}> ` +
-        `(${input.contact.verificationStatus}, confidence ${input.contact.confidence}).`
-    );
+    const c = input.contact;
+    const source =
+      c.verificationStatus === 'provided'
+        ? 'provided by requester'
+        : `Hunter: ${c.verificationStatus}, confidence ${c.confidence}`;
+    lines.push(`Contact (${source}): ${c.name || '(no name)'} <${c.email || 'no email'}>.`);
   } else {
     lines.push('No contact found via Hunter.');
   }

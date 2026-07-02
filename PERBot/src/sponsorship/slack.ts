@@ -18,32 +18,74 @@ const notion = new SponsorNotion();
 const USAGE = [
   '*`/sponsor` commands:*',
   '• `/sponsor add <company or url>` — research a company into the Prospect Bank',
-  '• `/sponsor add <company> for <your ask> @person` — research + assign a deal to someone',
+  '• `/sponsor add <company> for <ask> contact: <name> <email> @person` — research + set a known contact + assign a deal',
   '• `/sponsor log <company> - <note>` — log a manual touch on a deal',
   '• `/sponsor me` — show your active deals + next actions',
 ].join('\n');
 
 /** Slack encodes mentions in command text as `<@U012ABC>` or `<@U012ABC|handle>`. */
 const MENTION_RE = /<@([A-Z0-9]+)(?:\|[^>]+)?>/g;
+const EMAIL_RE = /[^\s<>]+@[^\s<>]+\.[^\s<>]+/;
+
+/** Slack auto-links URLs/emails in slash-command text — strip the `<…|…>` wrappers. */
+function unwrapSlackLinks(text: string): string {
+  return text
+    .replace(/<mailto:([^|>]+)(?:\|[^>]*)?>/gi, '$1')
+    .replace(/<(https?:\/\/[^|>]+)(?:\|[^>]*)?>/gi, '$1');
+}
+
+export interface ParsedAdd {
+  company: string;
+  knownAsk: string;
+  assigneeSlackIds: string[];
+  contactName: string;
+  contactEmail: string;
+}
 
 /**
- * Parse a `/sponsor add` argument into company, known ask, and assignee Slack IDs.
- * Mentions may appear anywhere; the ask follows a natural " for " separator.
- *   "jlcpcb.com for board manufacturing, reduced cost @arjun"
- *     → { company: "jlcpcb.com", knownAsk: "board manufacturing, reduced cost", ids: [arjun] }
+ * Parse a `/sponsor add` argument into company, known ask, assignees, and an optional
+ * human-provided contact. Mentions may appear anywhere; the ask follows " for "; a typed
+ * contact follows "contact:". Order is flexible:
+ *   "jlcpcb.com for reduced-cost fab contact: Chloe Wang chloe@jlcpcb.com @arjun"
+ *     → company "jlcpcb.com", ask "reduced-cost fab", contact {Chloe Wang, chloe@jlcpcb.com}, [arjun]
  */
-function parseAdd(arg: string): { company: string; knownAsk: string; assigneeSlackIds: string[] } {
+export function parseAdd(arg: string): ParsedAdd {
   const assigneeSlackIds: string[] = [];
-  const withoutMentions = arg.replace(MENTION_RE, (_m, id: string) => {
+  let text = unwrapSlackLinks(arg).replace(MENTION_RE, (_m, id: string) => {
     assigneeSlackIds.push(id);
     return ' ';
   });
-  const text = withoutMentions.replace(/\s+/g, ' ').trim();
+  text = text.replace(/\s+/g, ' ').trim();
 
+  let knownAsk = '';
+  let contactName = '';
+  let contactEmail = '';
+
+  // Pull out the "contact:" clause (runs to end of string / until a trailing " for …").
+  const contactSplit = text.split(/\bcontact:\s*/i);
+  if (contactSplit.length > 1) {
+    text = contactSplit[0]!.trim();
+    let contactRaw = contactSplit.slice(1).join(' ').trim();
+    // Handle "contact: … for <ask>" ordering by peeling a trailing ask off the contact.
+    const forInContact = contactRaw.match(/^(.*?)\s+for\s+(.+)$/i);
+    if (forInContact) {
+      contactRaw = forInContact[1]!.trim();
+      knownAsk = forInContact[2]!.trim();
+    }
+    const email = contactRaw.match(EMAIL_RE);
+    if (email) {
+      contactEmail = email[0];
+      contactRaw = contactRaw.replace(email[0], '').trim();
+    }
+    contactName = contactRaw.replace(/[<>,]/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  // Split the remaining text (before any contact clause) on the first " for ".
   const forMatch = text.match(/^(.*?)\s+for\s+(.+)$/i);
   const company = (forMatch ? forMatch[1] : text).trim();
-  const knownAsk = forMatch ? forMatch[2]!.trim() : '';
-  return { company, knownAsk, assigneeSlackIds: [...new Set(assigneeSlackIds)] };
+  if (forMatch && !knownAsk) knownAsk = forMatch[2]!.trim();
+
+  return { company, knownAsk, assigneeSlackIds: [...new Set(assigneeSlackIds)], contactName, contactEmail };
 }
 
 function formatAddResult(result: EnrichResult): string {
@@ -55,9 +97,15 @@ function formatAddResult(result: EnrichResult): string {
   }
 
   const c = result.classification;
-  const contactLine = result.contact
-    ? `${result.contact.name || '(no name)'} <${result.contact.email}> — ${result.contact.verificationStatus}, confidence ${result.contact.confidence}`
-    : '_none found_';
+  let contactLine = '_none found_';
+  if (result.contact) {
+    const ct = result.contact;
+    const meta =
+      ct.verificationStatus === 'provided'
+        ? 'provided by you'
+        : `${ct.verificationStatus}, confidence ${ct.confidence}`;
+    contactLine = `${ct.name || '(no name)'} <${ct.email || 'no email'}> — ${meta}`;
+  }
 
   const lines = [
     `✅ Added *${result.company}* to the Prospect Bank. <${result.bankPageUrl}|Open row>`,
@@ -101,11 +149,11 @@ async function resolveAssignees(
 }
 
 async function handleAdd(client: WebClient, respond: RespondFn, arg: string): Promise<void> {
-  const { company, knownAsk, assigneeSlackIds } = parseAdd(arg);
+  const { company, knownAsk, assigneeSlackIds, contactName, contactEmail } = parseAdd(arg);
   if (!company) {
     await respond({
       response_type: 'ephemeral',
-      text: 'Usage: `/sponsor add <company or url> [for <your ask>] [@person]`\nExample: `/sponsor add jlcpcb.com for reduced-cost PCB fab @you`',
+      text: 'Usage: `/sponsor add <company or url> [for <your ask>] [contact: <name> <email>] [@person]`\nExample: `/sponsor add Jane Street for cash sponsorship contact: Stephanie Grassulo sgrassulo@janestreet.com @you`',
     });
     return;
   }
@@ -118,6 +166,7 @@ async function handleAdd(client: WebClient, respond: RespondFn, arg: string): Pr
       assigneeNotionIds: notionIds,
       assigneeLabels: labels,
       unresolvedAssignees: unresolved,
+      manualContact: contactName || contactEmail ? { name: contactName, email: contactEmail } : undefined,
     });
     await respond({ response_type: 'ephemeral', text: formatAddResult(result) });
   } catch (err) {
