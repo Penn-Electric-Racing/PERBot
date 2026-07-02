@@ -82,7 +82,7 @@ export const config = {
     pipelineDataSourceId: optionalString('SPONSOR_PIPELINE_DS_ID', '64bb332e-543c-4286-9e67-c3bda963cfdd'),
     // Won-deal win posts land here; also the semester goal for the running % line.
     winPostChannel: optionalString('SPONSOR_WIN_CHANNEL', 'operations'),
-    semesterGoalUsd: optionalNumber('SPONSOR_SEMESTER_GOAL_USD', 35000),
+    semesterGoalUsd: optionalNumber('SPONSOR_SEMESTER_GOAL_USD', 50000),
   },
   github: {
     token: process.env.GITHUB_TOKEN?.trim() || '',
