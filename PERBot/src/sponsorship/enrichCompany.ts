@@ -149,7 +149,7 @@ export async function enrichCompany(
   const companyText = await fetchCompanyText(hostname);
 
   // Step 4 — structured classification (Groq, forced schema, validated). A known ask
-  // steers tier/type/category and is written verbatim as the angle (the team's words).
+  // steers type/category + the value/need scores and is written verbatim as the angle.
   const classification = await classifyCompanyFit(company, canonical, companyText, opts.knownAsk);
   if (opts.knownAsk) classification.suggestedAngle = opts.knownAsk;
 

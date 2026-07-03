@@ -7,6 +7,13 @@
  * drift here silently drops values on write. Update these if the Notion options change.
  */
 
+import type { SponsorScores } from './scoring.js';
+
+/**
+ * Tier is no longer a stored/LLM value — it's a Notion formula derived from Priority
+ * (see scoring.ts + the `Tier` formula on the Prospect Bank). These labels are the
+ * formula's possible outputs, kept here for reference only.
+ */
 export const TIERS = ['Tier 1', 'Tier 2', 'Tier 3'] as const;
 export type Tier = (typeof TIERS)[number];
 
@@ -57,10 +64,18 @@ export type Stage = (typeof STAGES)[number];
 export interface CompanyClassification {
   fitReason: string;
   suggestedAngle: string;
-  tier: Tier;
   categories: Category[];
   type: SponsorType;
   channel: Channel;
+  /**
+   * The three AI-seeded priority sub-scores (0–3 each). Feed the Notion matrix
+   * formulas (see scoring.ts). The two human sub-scores — Contact strength and
+   * Sponsors other teams — are NOT here: the LLM never guesses who we know or a
+   * team's rival ties (guardrail), so those stay blank until a human sets them.
+   */
+  marketFit: number;
+  valueBand: number;
+  categoryNeed: number;
 }
 
 /** A Notion workspace user, for bridging DRI persons to Slack identities. */
@@ -70,7 +85,7 @@ export interface NotionUser {
   email: string | null;
 }
 
-/** A parsed Prospect Bank row (the subset needed to claim/graduate it). */
+/** A parsed Prospect Bank row (the subset needed to claim/graduate + rank it). */
 export interface BankLeadRow {
   id: string;
   url: string;
@@ -81,6 +96,8 @@ export interface BankLeadRow {
   contact: HunterContact | null;
   /** True if it already has a linked Pipeline deal (already graduated). */
   hasPipelineDeal: boolean;
+  /** The five priority sub-scores (0–3, null when unscored) — see scoring.ts. */
+  scores: SponsorScores;
 }
 
 /** A parsed Pipeline deal row (subset of properties the commands + jobs use). */

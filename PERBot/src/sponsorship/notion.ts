@@ -1,6 +1,7 @@
 import { Client } from '@notionhq/client';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
+import type { SponsorScores } from './scoring.js';
 import {
   BankLeadRow,
   BankRowInput,
@@ -94,6 +95,13 @@ function parseBankRow(page: any): BankLeadRow {
         ? { name: contactName, email: contactEmail, verificationStatus: 'from bank', confidence: 0 }
         : null,
     hasPipelineDeal: readRelationCount(p['Pipeline deal']) > 0,
+    scores: {
+      contactStrength: readNumber(p['Contact strength']),
+      marketFit: readNumber(p['Market fit']),
+      sponsorsOtherTeams: readNumber(p['Sponsors other teams']),
+      valueBand: readNumber(p['Value band']),
+      categoryNeed: readNumber(p['Category need']),
+    },
   };
 }
 
@@ -158,7 +166,12 @@ export class SponsorNotion {
       Domain: { url: input.domain },
       Status: { select: { name: input.status ?? 'Available' } },
       Relationship: { select: { name: 'New' } },
-      Tier: { select: { name: c.tier } },
+      // Tier is no longer written — it's a Notion formula derived from Priority.
+      // We seed the three AI sub-scores; Contact strength + Sponsors other teams are
+      // left blank for a human to fill (guardrail: the LLM never guesses those).
+      'Market fit': { number: c.marketFit },
+      'Value band': { number: c.valueBand },
+      'Category need': { number: c.categoryNeed },
       Type: { select: { name: c.type } },
       Channel: { select: { name: c.channel } },
       Category: { multi_select: c.categories.map((name) => ({ name })) },
@@ -197,6 +210,57 @@ export class SponsorNotion {
       page_size: 25,
     });
     return (response.results ?? []).map(parseBankRow);
+  }
+
+  /**
+   * Rankable prospects for `/sponsor rank`: every live Bank lead (excludes Dead and
+   * already-Graduated rows), optionally filtered to one Category. Returns them parsed
+   * with their sub-scores; the caller computes Priority + sorts (the Priority formula
+   * isn't queryable/sortable via the API — see scoring.ts). Follows pagination.
+   */
+  async queryRankableProspects(category?: Category): Promise<BankLeadRow[]> {
+    const conditions: any[] = [
+      { property: 'Status', select: { does_not_equal: 'Dead' } },
+      { property: 'Status', select: { does_not_equal: 'Graduated' } },
+    ];
+    if (category) conditions.push({ property: 'Category', multi_select: { contains: category } });
+
+    const rows: BankLeadRow[] = [];
+    let cursor: string | undefined;
+    do {
+      const response: any = await this.client.dataSources.query({
+        data_source_id: config.sponsorship.bankDataSourceId,
+        filter: { and: conditions },
+        start_cursor: cursor,
+        page_size: 100,
+      });
+      for (const page of response.results ?? []) rows.push(parseBankRow(page));
+      cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
+    } while (cursor);
+    return rows;
+  }
+
+  /**
+   * Set one or more priority sub-scores on a Bank row (powers `/sponsor score`).
+   * Only the provided sub-scores are written; the rest are left untouched. The
+   * Fit/Impact/Priority/Quadrant/Tier formulas recompute automatically in Notion.
+   */
+  async updateBankScores(pageId: string, scores: Partial<SponsorScores>): Promise<void> {
+    const colByKey: Record<keyof SponsorScores, string> = {
+      contactStrength: 'Contact strength',
+      marketFit: 'Market fit',
+      sponsorsOtherTeams: 'Sponsors other teams',
+      valueBand: 'Value band',
+      categoryNeed: 'Category need',
+    };
+    const properties: Record<string, any> = {};
+    for (const key of Object.keys(colByKey) as (keyof SponsorScores)[]) {
+      const value = scores[key];
+      if (typeof value === 'number') properties[colByKey[key]] = { number: value };
+    }
+    if (Object.keys(properties).length === 0) return;
+    await this.client.pages.update({ page_id: pageId, properties: properties as any });
+    logger.info(`Updated scores on Bank row ${pageId}: ${Object.keys(properties).join(', ')}.`);
   }
 
   /** Mark a Bank lead claimed/graduated and set its owner(s). */

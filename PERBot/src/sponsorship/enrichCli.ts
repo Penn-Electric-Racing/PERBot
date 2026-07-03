@@ -33,8 +33,9 @@ async function main(): Promise<void> {
     console.log(`\n✅  Added to the Prospect Bank`);
     console.log(`   Company:  ${result.company}`);
     console.log(`   Domain:   ${result.domain}`);
-    console.log(`   Tier:     ${c.tier}   Type: ${c.type}   Channel: ${c.channel}`);
+    console.log(`   Type:     ${c.type}   Channel: ${c.channel}`);
     console.log(`   Category: ${c.categories.join(', ')}`);
+    console.log(`   Scores:   market ${c.marketFit}/3 · value ${c.valueBand}/3 · need ${c.categoryNeed}/3 (AI) — set Contact strength + Sponsors other teams in Notion`);
     console.log(`   Fit:      ${c.fitReason}`);
     console.log(`   Angle:    ${c.suggestedAngle || '(none)'}`);
     console.log(`   Contact:  ${contact}`);
