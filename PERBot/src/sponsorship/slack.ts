@@ -8,13 +8,15 @@ import { fetchSlackDirectory, indexNotionUsers, resolveSlackHandles, slackUserTo
 import { resolveChannelId } from './jobs/shared.js';
 import { announceWinIfNew, resolveDriMentions, totalRaised } from './jobs/winPost.js';
 import { SponsorNotion } from './notion.js';
-import { EnrichResult, PipelineRow, STAGES, Stage } from './types.js';
+import { fitScore, impactScore, priorityScore, quadrant, SponsorScores } from './scoring.js';
+import { CATEGORIES, Category, EnrichResult, PipelineRow, STAGES, Stage } from './types.js';
 
 const notion = new SponsorNotion();
 
 /**
  * Slack surface for the sponsorship module: the `/sponsor` command with three
- * subcommands (add / log / me). Registered from app.ts via registerSponsorCommands.
+ * subcommands (add / claim / log / won / stage / score / rank / me). Registered from
+ * app.ts via registerSponsorCommands.
  * No drafting command exists (guardrail: no AI-written outreach).
  */
 
@@ -26,6 +28,8 @@ const USAGE = [
   '• `/sponsor log <company> - <note>` — log a manual touch on a deal',
   '• `/sponsor won <company> <amount> [note]` — mark a deal Won + post it to #operations',
   '• `/sponsor stage <company> <stage>` — move a deal (Prospect / Contacted / In talks / Won / Lost)',
+  '• `/sponsor score <company> contact:<0-3> teams:<0-3>` — set a prospect’s human scores (also `market:`/`value:`/`need:`)',
+  '• `/sponsor rank [category]` — top prospects by Priority (Fit × Impact), with their quadrant',
   '• `/sponsor me` — show your active deals + next actions',
 ].join('\n');
 
@@ -142,11 +146,15 @@ function formatAddResult(result: EnrichResult): string {
     contactLine = `${ct.name || '(no name)'} <${ct.email || 'no email'}> — ${meta}`;
   }
 
+  // AI seeds three sub-scores; the two human sub-scores are still blank, so this
+  // Priority is provisional (Fit counts Market fit only until someone scores contact).
+  const seeded = { contactStrength: null, sponsorsOtherTeams: null, marketFit: c.marketFit, valueBand: c.valueBand, categoryNeed: c.categoryNeed };
   const lines = [
     `✅ Added *${result.company}* to the Prospect Bank. <${result.bankPageUrl}|Open row>`,
-    `• *Tier:* ${c.tier}   *Type:* ${c.type}   *Channel:* ${c.channel}`,
-    `• *Category:* ${c.categories.join(', ')}`,
-    `• *Fit:* ${c.fitReason}`,
+    `• *Type:* ${c.type}   *Channel:* ${c.channel}   *Category:* ${c.categories.join(', ')}`,
+    `• *Scores (AI):* market ${c.marketFit}/3 · value ${c.valueBand}/3 · need ${c.categoryNeed}/3  →  *Priority so far:* ${priorityScore(seeded)}`,
+    `• _Set *Contact strength* + *Sponsors other teams* (0–3) in Notion to finish the score._`,
+    `• *Why:* ${c.fitReason}`,
   ];
   if (c.suggestedAngle) lines.push(`• *Angle:* ${c.suggestedAngle}`);
   lines.push(`• *Contact:* ${contactLine}`);
@@ -253,6 +261,136 @@ async function handleMe(client: WebClient, respond: RespondFn, slackUserId: stri
 
   const text = [`*Your active deals (${deals.length}):*`, ...deals.map(formatDealLine)].join('\n');
   await respond({ response_type: 'ephemeral', text });
+}
+
+// --- /sponsor score ----------------------------------------------------------
+
+/** Short keys people type → the sub-score they set. */
+const SCORE_ALIASES: Record<string, keyof SponsorScores> = {
+  contact: 'contactStrength',
+  teams: 'sponsorsOtherTeams',
+  sponsors: 'sponsorsOtherTeams',
+  market: 'marketFit',
+  value: 'valueBand',
+  need: 'categoryNeed',
+};
+
+// `key[: ]value` where value is a single digit 0–3, e.g. "contact:2" or "teams 3".
+const SCORE_PAIR_RE = /\b(contact|teams|sponsors|market|value|need)\b\s*[:=]?\s*([0-3])\b/gi;
+
+export interface ParsedScore {
+  company: string;
+  updates: Partial<SponsorScores>;
+}
+
+/** Parse "JLCPCB contact:2 teams:3" → { company, updates }. Company = text before the first score pair. */
+export function parseScore(arg: string): ParsedScore {
+  const updates: Partial<SponsorScores> = {};
+  let firstIdx = arg.length;
+  for (const m of arg.matchAll(SCORE_PAIR_RE)) {
+    updates[SCORE_ALIASES[m[1]!.toLowerCase()]!] = Number(m[2]);
+    if (m.index != null && m.index < firstIdx) firstIdx = m.index;
+  }
+  const company = arg
+    .slice(0, firstIdx)
+    .replace(/[,\s]+$/g, '')
+    .replace(/^["']+|["']+$/g, '')
+    .trim();
+  return { company, updates };
+}
+
+/** Human-friendly label for a sub-score key, for the confirmation message. */
+const SCORE_LABELS: Record<keyof SponsorScores, string> = {
+  contactStrength: 'contact',
+  marketFit: 'market',
+  sponsorsOtherTeams: 'teams',
+  valueBand: 'value',
+  categoryNeed: 'need',
+};
+
+async function handleScore(respond: RespondFn, arg: string): Promise<void> {
+  const { company, updates } = parseScore(arg);
+  const keys = Object.keys(updates) as (keyof SponsorScores)[];
+  if (!company || keys.length === 0) {
+    await respond({
+      response_type: 'ephemeral',
+      text:
+        'Usage: `/sponsor score <company> contact:<0-3> teams:<0-3>` (also `market:` `value:` `need:`)\n' +
+        'Example: `/sponsor score JLCPCB contact:2 teams:3` — sets the two human scores and recomputes Priority.',
+    });
+    return;
+  }
+
+  const rows = await notion.findBankRowsByCompany(company);
+  if (rows.length === 0) {
+    await respond({ response_type: 'ephemeral', text: `No Bank prospect matches *${company}*. Add it with \`/sponsor add\` first.` });
+    return;
+  }
+
+  // Disambiguate multiple matches: prefer an exact (case-insensitive) title match.
+  let row = rows[0]!;
+  if (rows.length > 1) {
+    const exact = rows.find((r) => r.company.toLowerCase() === company.toLowerCase());
+    if (exact) {
+      row = exact;
+    } else {
+      const list = rows.slice(0, 8).map((r) => `• <${r.url}|${r.company}>`).join('\n');
+      await respond({ response_type: 'ephemeral', text: `*${company}* matches several prospects — be more specific:\n${list}` });
+      return;
+    }
+  }
+
+  await notion.updateBankScores(row.id, updates);
+  const merged = { ...row.scores, ...updates };
+  const setStr = keys.map((k) => `${SCORE_LABELS[k]} ${updates[k]}/3`).join(' · ');
+  await respond({
+    response_type: 'ephemeral',
+    text:
+      `✅ Scored *${row.company}* — set ${setStr}.\n` +
+      `• *Fit:* ${fitScore(merged)}/9 · *Impact:* ${impactScore(merged)}/6  →  *Priority:* ${priorityScore(merged)} ${quadrant(merged)}  <${row.url}|Open row>`,
+  });
+}
+
+// --- /sponsor rank -----------------------------------------------------------
+
+/** Match a free-text arg to a Category (exact, then substring). */
+function resolveCategory(arg: string): { category?: Category; unmatched?: string } {
+  const q = arg.trim().toLowerCase();
+  if (!q) return {};
+  const hit =
+    CATEGORIES.find((c) => c.toLowerCase() === q) ?? CATEGORIES.find((c) => c.toLowerCase().includes(q));
+  return hit ? { category: hit } : { unmatched: arg.trim() };
+}
+
+const RANK_LIMIT = 10;
+
+async function handleRank(respond: RespondFn, arg: string): Promise<void> {
+  const { category, unmatched } = resolveCategory(arg);
+  const rows = await notion.queryRankableProspects(category);
+
+  if (rows.length === 0) {
+    const scope = category ? ` in *${category}*` : '';
+    await respond({ response_type: 'ephemeral', text: `No live prospects${scope} to rank yet. Add some with \`/sponsor add\`.` });
+    return;
+  }
+
+  // Highest Priority first; tie-break on Fit so a warmer lead edges out a colder one.
+  const ranked = rows
+    .map((r) => ({ r, priority: priorityScore(r.scores), fit: fitScore(r.scores), impact: impactScore(r.scores) }))
+    .sort((a, b) => b.priority - a.priority || b.fit - a.fit)
+    .slice(0, RANK_LIMIT);
+
+  const header = category ? `*Top prospects — ${category}* (by Priority = Fit × Impact)` : '*Top prospects* (by Priority = Fit × Impact)';
+  const lines = ranked.map(({ r, priority, fit, impact }, i) => {
+    const provisional = r.scores.contactStrength == null || r.scores.sponsorsOtherTeams == null ? ' _(unscored)_' : '';
+    return `${i + 1}. <${r.url}|${r.company || 'Untitled'}> — *${priority}* ${quadrant(r.scores)}  ·  fit ${fit}/9 · impact ${impact}/6${provisional}`;
+  });
+  if (unmatched) lines.unshift(`_(couldn't match category "${unmatched}" — ranking all categories)_`);
+  const hint = ranked.some((x) => x.priority === 0)
+    ? '\n_Rows show low/zero Priority until their Contact strength + Sponsors other teams are scored in Notion._'
+    : '';
+
+  await respond({ response_type: 'ephemeral', text: [header, ...lines].join('\n') + hint });
 }
 
 // --- /sponsor log ------------------------------------------------------------
@@ -549,6 +687,16 @@ export function registerSponsorCommands(app: App): void {
         case 'stage':
           await ack();
           await handleStage(respond, arg);
+          break;
+
+        case 'score':
+          await ack();
+          await handleScore(respond, arg);
+          break;
+
+        case 'rank':
+          await ack();
+          await handleRank(respond, arg);
           break;
 
         case 'me':
