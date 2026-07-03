@@ -4,3 +4,6 @@ data/
 .env
 *.tmp
 .DS_Store
+
+# Internal working notes for Claude Code — kept local, not published to the public repo.
+CLAUDE.md
