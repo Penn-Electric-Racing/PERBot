@@ -3,21 +3,23 @@ import type { WebClient } from '@slack/web-api';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 import { isoDaysFromNowET, todayIsoET } from './dates.js';
+import { draftOutreachEmail } from './emailDraft.js';
 import { DomainResolutionError, enrichCompany } from './enrichCompany.js';
 import { fetchSlackDirectory, indexNotionUsers, resolveSlackHandles, slackUserToNotionId } from './identity.js';
 import { resolveChannelId } from './jobs/shared.js';
 import { announceWinIfNew, resolveDriMentions, totalRaised } from './jobs/winPost.js';
 import { SponsorNotion } from './notion.js';
 import { fitScore, impactScore, priorityScore, quadrant, SponsorScores } from './scoring.js';
-import { CATEGORIES, Category, EnrichResult, PipelineRow, STAGES, Stage } from './types.js';
+import { BankLeadRow, CATEGORIES, Category, EnrichResult, PipelineRow, STAGES, Stage } from './types.js';
 
 const notion = new SponsorNotion();
 
 /**
- * Slack surface for the sponsorship module: the `/sponsor` command with three
- * subcommands (add / claim / log / won / stage / score / rank / me). Registered from
+ * Slack surface for the sponsorship module: the `/sponsor` command
+ * (add / claim / email / log / won / stage / score / rank / me). Registered from
  * app.ts via registerSponsorCommands.
- * No drafting command exists (guardrail: no AI-written outreach).
+ * Drafting guardrail: `/sponsor email` fills the team's own template; the LLM writes
+ * only the fit paragraph, the draft is never auto-sent, and a human reviews it first.
  */
 
 const USAGE = [
@@ -25,6 +27,7 @@ const USAGE = [
   '• `/sponsor add <company or url>` — research a company into the Prospect Bank',
   '• `/sponsor add <company> for <ask> contact: <name> <email> @person` — research + set a known contact + assign a deal',
   '• `/sponsor claim <company> [@person]` — take an existing Bank lead as a deal you own',
+  '• `/sponsor email <company>` — draft outreach from the team template + an AI fit paragraph (review before sending)',
   '• `/sponsor log <company> - <note>` — log a manual touch on a deal',
   '• `/sponsor won <company> <amount> [note]` — mark a deal Won + post it to #operations',
   '• `/sponsor stage <company> <stage>` — move a deal (Prospect / Contacted / In talks / Won / Lost)',
@@ -261,6 +264,78 @@ async function handleMe(client: WebClient, respond: RespondFn, slackUserId: stri
 
   const text = [`*Your active deals (${deals.length}):*`, ...deals.map(formatDealLine)].join('\n');
   await respond({ response_type: 'ephemeral', text });
+}
+
+// --- /sponsor email ------------------------------------------------------------
+
+/**
+ * Find the single Bank prospect matching `company` (exact title wins when several
+ * match). Responds itself and returns null on zero or ambiguous matches.
+ */
+async function resolveSingleBankRow(respond: RespondFn, company: string): Promise<BankLeadRow | null> {
+  const rows = await notion.findBankRowsByCompany(company);
+  if (rows.length === 0) {
+    await respond({
+      response_type: 'ephemeral',
+      text: `No Bank prospect matches *${company}*. Add it with \`/sponsor add ${company}\` first.`,
+    });
+    return null;
+  }
+  if (rows.length > 1) {
+    const exact = rows.find((r) => r.company.toLowerCase() === company.toLowerCase());
+    if (exact) return exact;
+    const list = rows.slice(0, 8).map((r) => `• <${r.url}|${r.company}>`).join('\n');
+    await respond({ response_type: 'ephemeral', text: `*${company}* matches several prospects — be more specific:\n${list}` });
+    return null;
+  }
+  return rows[0]!;
+}
+
+// Slack rejects messages much past 4000 chars; leave headroom for the header lines.
+const EMAIL_SLACK_PREVIEW_CHARS = 3400;
+
+async function handleEmail(
+  client: WebClient,
+  respond: RespondFn,
+  callerSlackId: string,
+  arg: string
+): Promise<void> {
+  const company = leadingCompany(unwrapSlackLinks(arg));
+  if (!company) {
+    await respond({
+      response_type: 'ephemeral',
+      text: 'Usage: `/sponsor email <company>`\nDrafts outreach from the team template with a company-specific fit paragraph, saves it on the prospect’s Bank page, and gives you the text to copy. Review before sending.',
+    });
+    return;
+  }
+
+  const row = await resolveSingleBankRow(respond, company);
+  if (!row) return;
+
+  // The sender is the caller: their real name fills [NAME] and the signature.
+  let senderName = '';
+  try {
+    const info = await client.users.info({ user: callerSlackId });
+    senderName = info.user?.profile?.real_name || info.user?.real_name || '';
+  } catch (err) {
+    logger.warn('/sponsor email: users.info failed; leaving the [NAME] placeholder', err);
+  }
+
+  const result = await draftOutreachEmail({ notion, row, senderName });
+
+  const preview =
+    result.emailText.length > EMAIL_SLACK_PREVIEW_CHARS
+      ? `${result.emailText.slice(0, EMAIL_SLACK_PREVIEW_CHARS)}\n… (truncated — full draft is in Notion)`
+      : result.emailText;
+  const lines = [
+    `📧 Drafted outreach for *${result.company}* → <${result.draftUrl}|Open draft in Notion>`,
+    result.grounded
+      ? ''
+      : "⚠️ Couldn't fetch their homepage — the fit paragraph leans on stored research only, so read it extra carefully.",
+    '_AI-assisted draft: the fit paragraph is generated. Review it (and make it yours) before sending._',
+    '```' + preview + '```',
+  ].filter(Boolean);
+  await respond({ response_type: 'ephemeral', text: lines.join('\n') });
 }
 
 // --- /sponsor score ----------------------------------------------------------
@@ -672,6 +747,14 @@ export function registerSponsorCommands(app: App): void {
         case 'claim':
           await ack();
           await handleClaim(client, respond, command.user_id, arg);
+          break;
+
+        case 'email':
+        case 'draft':
+          // Drafting is slow (template + homepage fetch + LLM + Notion writes) —
+          // ack fast, then deliver via response_url (same pattern as add).
+          await ack({ response_type: 'ephemeral', text: `:hourglass_flowing_sand: Drafting outreach for *${arg || '…'}*` });
+          await handleEmail(client, respond, command.user_id, arg);
           break;
 
         case 'log':

@@ -29,6 +29,9 @@ export interface BankPageRef {
   url: string;
 }
 
+/** Prefix identifying a generated-draft toggle on a Bank page (regeneration replaces it). */
+export const DRAFT_EMAIL_MARKER = '📧 Draft email';
+
 /** Build the Notes text, surfacing the Needs-Review flag (no dedicated Notion column exists). */
 function buildNotes(input: BankRowInput): string {
   const lines: string[] = ['Auto-enriched by /sponsor.'];
@@ -74,6 +77,9 @@ function readMultiSelect(prop: any): string[] {
 function readEmail(prop: any): string {
   return typeof prop?.email === 'string' ? prop.email : '';
 }
+function readUrl(prop: any): string {
+  return typeof prop?.url === 'string' ? prop.url : '';
+}
 function readRelationCount(prop: any): number {
   return (prop?.relation ?? []).length;
 }
@@ -90,6 +96,9 @@ function parseBankRow(page: any): BankLeadRow {
     status: readSelect(p['Status']),
     type: (readSelect(p['Type']) as SponsorType) ?? 'Cash',
     categories: categories.length ? categories : ['General'],
+    domain: readUrl(p['Domain']),
+    fitReason: readRichText(p['Fit reason']),
+    suggestedAngle: readRichText(p['Suggested angle']),
     contact:
       contactName || contactEmail
         ? { name: contactName, email: contactEmail, verificationStatus: 'from bank', confidence: 0 }
@@ -412,6 +421,84 @@ export class SponsorNotion {
       } as any,
     });
     logger.info(`Set stage ${stage}: ${row.company} (${row.id}).`);
+  }
+
+  // --- Page content (email template + drafts) ----------------------------------
+
+  /**
+   * Plain-text paragraphs of a page's body — used to read the team's outreach email
+   * template live, so ops can edit the template in Notion without a redeploy. Every
+   * block with rich text (paragraph, heading, quote…) becomes one paragraph string;
+   * formatting is intentionally dropped (the draft is a plain-text email).
+   */
+  async fetchPageParagraphs(pageId: string): Promise<string[]> {
+    const paragraphs: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const response: any = await this.client.blocks.children.list({
+        block_id: pageId,
+        start_cursor: cursor,
+        page_size: 100,
+      });
+      for (const block of response.results ?? []) {
+        const rich = block?.[block?.type]?.rich_text;
+        if (!Array.isArray(rich)) continue;
+        const text = rich.map((t: any) => t?.plain_text ?? '').join('').trim();
+        if (text) paragraphs.push(text);
+      }
+      cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
+    } while (cursor);
+    return paragraphs;
+  }
+
+  /**
+   * Write the draft email onto a Bank row's page body as a single toggle block
+   * (`📧 Draft email — …`) holding one paragraph block per email paragraph.
+   * Regenerating replaces the previous draft: any existing toggle starting with the
+   * marker is deleted first (a toggle groups the draft atomically, so deletion can't
+   * take out unrelated notes someone added to the page). Returns the toggle's block
+   * id so callers can deep-link to it (page URL + `#<id without dashes>`).
+   */
+  async writeDraftEmail(pageId: string, title: string, paragraphs: string[]): Promise<{ blockId: string }> {
+    const staleDraftIds: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const response: any = await this.client.blocks.children.list({
+        block_id: pageId,
+        start_cursor: cursor,
+        page_size: 100,
+      });
+      for (const block of response.results ?? []) {
+        const rich = block?.toggle?.rich_text;
+        if (!Array.isArray(rich)) continue;
+        const text = rich.map((t: any) => t?.plain_text ?? '').join('');
+        if (text.startsWith(DRAFT_EMAIL_MARKER)) staleDraftIds.push(block.id);
+      }
+      cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
+    } while (cursor);
+    for (const id of staleDraftIds) {
+      await this.client.blocks.delete({ block_id: id });
+    }
+
+    const result: any = await this.client.blocks.children.append({
+      block_id: pageId,
+      children: [
+        {
+          type: 'toggle',
+          toggle: {
+            rich_text: [{ type: 'text', text: { content: title.slice(0, 200) } }],
+            children: paragraphs.map((p) => ({
+              type: 'paragraph',
+              paragraph: { rich_text: [{ type: 'text', text: { content: p.slice(0, 1900) } }] },
+            })),
+          },
+        },
+      ] as any,
+    });
+
+    const blockId: string = result?.results?.[0]?.id ?? '';
+    logger.info(`Wrote draft email toggle on ${pageId} (${paragraphs.length} paragraphs).`);
+    return { blockId };
   }
 
   /**

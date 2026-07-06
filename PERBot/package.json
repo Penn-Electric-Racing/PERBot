@@ -10,6 +10,7 @@
     "build": "tsc -p tsconfig.json",
     "index": "tsx src/indexer.ts",
     "enrich": "tsx src/sponsorship/enrichCli.ts",
+    "draft": "tsx src/sponsorship/draftCli.ts",
     "job:sponsor-win": "tsx src/sponsorship/jobs/winPost.ts",
     "job:sponsor-stale": "tsx src/sponsorship/jobs/staleDm.ts",
     "job:sponsor-reply": "tsx src/sponsorship/jobs/replyDm.ts",
