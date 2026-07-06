@@ -85,7 +85,7 @@ export interface NotionUser {
   email: string | null;
 }
 
-/** A parsed Prospect Bank row (the subset needed to claim/graduate + rank it). */
+/** A parsed Prospect Bank row (the subset needed to claim/graduate/rank/draft it). */
 export interface BankLeadRow {
   id: string;
   url: string;
@@ -93,6 +93,11 @@ export interface BankLeadRow {
   status: string | null;
   type: SponsorType;
   categories: Category[];
+  /** Canonical https://<domain> from enrichment — lets /sponsor email re-ground on the homepage. */
+  domain: string;
+  /** The enrichment's stored reasoning — the seed material for the draft's fit paragraph. */
+  fitReason: string;
+  suggestedAngle: string;
   contact: HunterContact | null;
   /** True if it already has a linked Pipeline deal (already graduated). */
   hasPipelineDeal: boolean;
