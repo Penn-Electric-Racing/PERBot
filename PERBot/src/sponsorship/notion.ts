@@ -32,6 +32,11 @@ export interface BankPageRef {
 /** Prefix identifying a generated-draft toggle on a Bank page (regeneration replaces it). */
 export const DRAFT_EMAIL_MARKER = '📧 Draft email';
 
+/** Prefix identifying the specific-ask toggle on a Bank page. Set via `/sponsor ask`
+ *  (or by hand); its contents are included VERBATIM in drafted outreach — specs are
+ *  never paraphrased by the LLM. */
+export const SPECIFIC_ASK_MARKER = '🎯 Specific ask';
+
 /** Build the Notes text, surfacing the Needs-Review flag (no dedicated Notion column exists). */
 function buildNotes(input: BankRowInput): string {
   const lines: string[] = ['Auto-enriched by /sponsor.'];
@@ -449,6 +454,116 @@ export class SponsorNotion {
       cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
     } while (cursor);
     return paragraphs;
+  }
+
+  /**
+   * Recursively read a block's children as indented plain-text bullet lines
+   * (depth-capped). Notion returns only one level per children.list call, so nested
+   * bullets — sub-specs like a gear's bore diameter — require recursion or they'd be
+   * silently dropped.
+   */
+  private async readBlockLines(blockId: string, depth: number): Promise<string[]> {
+    if (depth > 3) return [];
+    const lines: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const response: any = await this.client.blocks.children.list({
+        block_id: blockId,
+        start_cursor: cursor,
+        page_size: 100,
+      });
+      for (const block of response.results ?? []) {
+        const rich = block?.[block?.type]?.rich_text;
+        if (Array.isArray(rich)) {
+          const text = rich.map((t: any) => t?.plain_text ?? '').join('').trim();
+          if (text) lines.push(`${'  '.repeat(depth)}- ${text}`);
+        }
+        if (block?.has_children) {
+          lines.push(...(await this.readBlockLines(block.id, depth + 1)));
+        }
+      }
+      cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
+    } while (cursor);
+    return lines;
+  }
+
+  /**
+   * Read the `🎯 Specific ask` toggle from a Bank row's page, if present, as verbatim
+   * bullet-line text ('' when there is no ask). Humans paste detailed multi-line specs
+   * under the toggle in Notion; `/sponsor ask` creates/replaces it from Slack.
+   */
+  async fetchAskSection(pageId: string): Promise<string> {
+    let cursor: string | undefined;
+    do {
+      const response: any = await this.client.blocks.children.list({
+        block_id: pageId,
+        start_cursor: cursor,
+        page_size: 100,
+      });
+      for (const block of response.results ?? []) {
+        const rich = block?.[block?.type]?.rich_text;
+        if (!Array.isArray(rich)) continue;
+        const text = rich.map((t: any) => t?.plain_text ?? '').join('');
+        if (text.startsWith(SPECIFIC_ASK_MARKER) && block?.has_children) {
+          return (await this.readBlockLines(block.id, 0)).join('\n');
+        }
+      }
+      cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
+    } while (cursor);
+    return '';
+  }
+
+  /**
+   * Create/replace the `🎯 Specific ask` toggle on a Bank row (powers `/sponsor ask`).
+   * Each input line becomes one bullet under the toggle; people then refine the
+   * details in Notion. Same replace-the-marker-toggle pattern as writeDraftEmail.
+   */
+  async writeAskSection(pageId: string, ask: string): Promise<{ blockId: string }> {
+    const staleIds: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const response: any = await this.client.blocks.children.list({
+        block_id: pageId,
+        start_cursor: cursor,
+        page_size: 100,
+      });
+      for (const block of response.results ?? []) {
+        const rich = block?.toggle?.rich_text;
+        if (!Array.isArray(rich)) continue;
+        const text = rich.map((t: any) => t?.plain_text ?? '').join('');
+        if (text.startsWith(SPECIFIC_ASK_MARKER)) staleIds.push(block.id);
+      }
+      cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
+    } while (cursor);
+    for (const id of staleIds) {
+      await this.client.blocks.delete({ block_id: id });
+    }
+
+    const lines = ask
+      .split('\n')
+      .map((l) => l.replace(/^\s*[-•]\s*/, '').trim())
+      .filter(Boolean);
+    const result: any = await this.client.blocks.children.append({
+      block_id: pageId,
+      children: [
+        {
+          type: 'toggle',
+          toggle: {
+            rich_text: [
+              { type: 'text', text: { content: `${SPECIFIC_ASK_MARKER} — included verbatim in drafted outreach` } },
+            ],
+            children: lines.map((l) => ({
+              type: 'bulleted_list_item',
+              bulleted_list_item: { rich_text: [{ type: 'text', text: { content: l.slice(0, 1900) } }] },
+            })),
+          },
+        },
+      ] as any,
+    });
+
+    const blockId: string = result?.results?.[0]?.id ?? '';
+    logger.info(`Wrote specific-ask toggle on ${pageId} (${lines.length} lines).`);
+    return { blockId };
   }
 
   /**
