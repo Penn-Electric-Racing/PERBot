@@ -33,6 +33,8 @@ export interface DraftEmailResult {
   /** False when the homepage couldn't be fetched — the paragraph then leans only on
    *  the stored fit reason/angle, so it deserves a closer read. */
   grounded: boolean;
+  /** True when a specific ask (🎯 toggle or inline `for …`) was included in the draft. */
+  hasAsk: boolean;
 }
 
 const PARAGRAPH_SYSTEM_PROMPT = `You write ONE short paragraph (2–3 sentences, max 450 characters) for a sponsorship outreach email from Penn Electric Racing (PER), the University of Pennsylvania's Formula SAE Electric student team, to a prospective sponsor.
@@ -50,13 +52,19 @@ Rules:
 
 /** LLM step: the fit paragraph. Falls back to a mechanical sentence built from the
  *  stored enrichment reasoning if the model returns nothing usable. */
-async function writeFitParagraph(row: BankLeadRow, companyText: string): Promise<string> {
+async function writeFitParagraph(row: BankLeadRow, companyText: string, ask: string): Promise<string> {
   const groq = getSponsorGroqClient();
 
   const knowns = [
     row.fitReason ? `Fit reason (from our research): ${row.fitReason}` : '',
     row.suggestedAngle ? `Outreach angle (from our research): ${row.suggestedAngle}` : '',
     `Engineering categories they relate to: ${row.categories.join(', ')}`,
+    // The ask steers the paragraph toward the concrete request, but the paragraph must
+    // NOT enumerate the specs — those are appended verbatim right after it (guardrail:
+    // the LLM never rewrites engineering specs — materials, tolerances, callouts).
+    ask
+      ? `Our specific ask of this company (set this request up naturally in the paragraph, e.g. what we'd like them to make or provide for us — but do NOT list the detailed specifications; they appear verbatim immediately after your paragraph):\n${ask}`
+      : '',
   ].filter(Boolean).join('\n');
 
   const response = await groq.chat.completions.create({
@@ -103,17 +111,28 @@ function fillPlaceholders(paragraph: string, row: BankLeadRow, senderName: strin
   return out;
 }
 
+/** Cap for the verbatim ask block (Notion paragraph limit is ~2000 chars/rich text). */
+const MAX_ASK_CHARS = 1800;
+
 /**
  * Assemble + persist a draft outreach email for one Bank prospect.
  * Template (live from Notion) → homepage re-fetch → LLM fit paragraph → mechanical
  * fill → written to the Bank page as a `📧 Draft email` toggle (replacing any
  * previous draft). Throws if the template page is empty/unreachable.
+ *
+ * Specific ask: an inline ask (from `/sponsor email <co> for …`) or the Bank page's
+ * `🎯 Specific ask` toggle steers the fit paragraph AND is appended VERBATIM as its
+ * own block right after it — the LLM never rewrites the specs themselves. When both
+ * exist, the inline ask steers the paragraph and the toggle supplies the verbatim
+ * block (so a quick `for gears` doesn't clobber a detailed spec).
  */
 export async function draftOutreachEmail(opts: {
   notion: SponsorNotion;
   row: BankLeadRow;
   /** Real name of the person the email is from (fills [NAME] + the signature). */
   senderName: string;
+  /** Optional inline ask, e.g. from `/sponsor email <company> for <ask>`. */
+  ask?: string;
 }): Promise<DraftEmailResult> {
   const { notion, row, senderName } = opts;
 
@@ -122,23 +141,36 @@ export async function draftOutreachEmail(opts: {
     throw new Error('The email template page is empty or unreachable — check SPONSOR_EMAIL_TEMPLATE_PAGE_ID and the integration’s access to it.');
   }
 
+  const inlineAsk = opts.ask?.trim() ?? '';
+  const storedAsk = (await notion.fetchAskSection(row.id)).slice(0, MAX_ASK_CHARS);
+  const steeringAsk = inlineAsk || storedAsk;
+  // The verbatim block prefers the stored spec; a lone inline ask becomes a one-liner.
+  const askBlock = storedAsk || (inlineAsk ? `- ${inlineAsk}` : '');
+
   const hostname = row.domain.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
   const companyText = hostname ? await fetchCompanyText(hostname) : '';
-  const personalized = await writeFitParagraph(row, companyText);
+  const personalized = await writeFitParagraph(row, companyText, steeringAsk);
 
   // Splice the generated paragraph in: replace the [PERSONALIZED] marker paragraph,
   // or insert after the intro paragraph if the marker was removed from the template.
+  // The verbatim ask block (lead-in + spec lines) follows it immediately.
+  const generated = [personalized];
+  if (askBlock) {
+    generated.push(`To be specific, here’s what we’re hoping ${row.company} could help us with:`);
+    generated.push(askBlock);
+  }
+
   const paragraphs: string[] = [];
   let spliced = false;
   for (const para of template) {
     if (!spliced && para.includes(PERSONALIZED_MARKER)) {
-      paragraphs.push(personalized);
+      paragraphs.push(...generated);
       spliced = true;
     } else {
       paragraphs.push(para);
     }
   }
-  if (!spliced) paragraphs.splice(Math.min(1, paragraphs.length), 0, personalized);
+  if (!spliced) paragraphs.splice(Math.min(1, paragraphs.length), 0, ...generated);
 
   const filled = paragraphs.map((p) => fillPlaceholders(p, row, senderName));
 
@@ -153,5 +185,6 @@ export async function draftOutreachEmail(opts: {
     bankUrl: row.url,
     personalized,
     grounded: companyText.length > 0,
+    hasAsk: askBlock.length > 0,
   };
 }

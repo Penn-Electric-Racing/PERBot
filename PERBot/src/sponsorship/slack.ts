@@ -16,8 +16,8 @@ const notion = new SponsorNotion();
 
 /**
  * Slack surface for the sponsorship module: the `/sponsor` command
- * (add / claim / email / log / won / stage / score / rank / me). Registered from
- * app.ts via registerSponsorCommands.
+ * (add / claim / ask / email / log / won / stage / score / rank / me). Registered
+ * from app.ts via registerSponsorCommands.
  * Drafting guardrail: `/sponsor email` fills the team's own template; the LLM writes
  * only the fit paragraph, the draft is never auto-sent, and a human reviews it first.
  */
@@ -27,7 +27,8 @@ const USAGE = [
   '• `/sponsor add <company or url>` — research a company into the Prospect Bank',
   '• `/sponsor add <company> for <ask> contact: <name> <email> @person` — research + set a known contact + assign a deal',
   '• `/sponsor claim <company> [@person]` — take an existing Bank lead as a deal you own',
-  '• `/sponsor email <company>` — draft outreach from the team template + an AI fit paragraph (review before sending)',
+  '• `/sponsor email <company> [for <ask>]` — draft outreach from the team template + an AI fit paragraph (review before sending)',
+  '• `/sponsor ask <company> - <what we want>` — set the 🎯 specific ask a draft includes verbatim (paste detailed specs under the toggle in Notion)',
   '• `/sponsor log <company> - <note>` — log a manual touch on a deal',
   '• `/sponsor won <company> <amount> [note]` — mark a deal Won + post it to #operations',
   '• `/sponsor stage <company> <stage>` — move a deal (Prospect / Contacted / In talks / Won / Lost)',
@@ -294,17 +295,28 @@ async function resolveSingleBankRow(respond: RespondFn, company: string): Promis
 // Slack rejects messages much past 4000 chars; leave headroom for the header lines.
 const EMAIL_SLACK_PREVIEW_CHARS = 3400;
 
+/** Parse "Edgerton Gear for machining our planetary gears" → company + inline ask. */
+export function parseEmailArg(arg: string): { company: string; ask: string } {
+  const text = unwrapSlackLinks(arg).trim();
+  const m = /\s+for\s+/i.exec(text);
+  if (!m) return { company: leadingCompany(text), ask: '' };
+  return {
+    company: leadingCompany(text.slice(0, m.index)),
+    ask: text.slice(m.index + m[0].length).trim(),
+  };
+}
+
 async function handleEmail(
   client: WebClient,
   respond: RespondFn,
   callerSlackId: string,
   arg: string
 ): Promise<void> {
-  const company = leadingCompany(unwrapSlackLinks(arg));
+  const { company, ask } = parseEmailArg(arg);
   if (!company) {
     await respond({
       response_type: 'ephemeral',
-      text: 'Usage: `/sponsor email <company>`\nDrafts outreach from the team template with a company-specific fit paragraph, saves it on the prospect’s Bank page, and gives you the text to copy. Review before sending.',
+      text: 'Usage: `/sponsor email <company> [for <ask>]`\nDrafts outreach from the team template with a company-specific fit paragraph, saves it on the prospect’s Bank page, and gives you the text to copy. A 🎯 specific ask (set via `/sponsor ask` or the toggle in Notion) is included verbatim. Review before sending.',
     });
     return;
   }
@@ -321,7 +333,7 @@ async function handleEmail(
     logger.warn('/sponsor email: users.info failed; leaving the [NAME] placeholder', err);
   }
 
-  const result = await draftOutreachEmail({ notion, row, senderName });
+  const result = await draftOutreachEmail({ notion, row, senderName, ask });
 
   const preview =
     result.emailText.length > EMAIL_SLACK_PREVIEW_CHARS
@@ -332,10 +344,38 @@ async function handleEmail(
     result.grounded
       ? ''
       : "⚠️ Couldn't fetch their homepage — the fit paragraph leans on stored research only, so read it extra carefully.",
+    result.hasAsk ? '🎯 Includes the specific ask (specs copied verbatim — double-check them).' : '',
     '_AI-assisted draft: the fit paragraph is generated. Review it (and make it yours) before sending._',
     '```' + preview + '```',
   ].filter(Boolean);
   await respond({ response_type: 'ephemeral', text: lines.join('\n') });
+}
+
+// --- /sponsor ask --------------------------------------------------------------
+
+async function handleAsk(respond: RespondFn, arg: string): Promise<void> {
+  const parsed = parseLog(unwrapSlackLinks(arg));
+  if (!parsed) {
+    await respond({
+      response_type: 'ephemeral',
+      text:
+        'Usage: `/sponsor ask <company> - <what we want from them>`\n' +
+        'Example: `/sponsor ask Edgerton Gear - manufacture our planetary gearset (spur gears, 1mm module)`\n' +
+        'This creates a *🎯 Specific ask* toggle on the prospect’s Bank page — paste detailed multi-line specs under it in Notion; `/sponsor email` includes them *verbatim* in the draft.',
+    });
+    return;
+  }
+
+  const row = await resolveSingleBankRow(respond, parsed.company);
+  if (!row) return;
+
+  await notion.writeAskSection(row.id, parsed.note);
+  await respond({
+    response_type: 'ephemeral',
+    text:
+      `🎯 Set the specific ask on *${row.company}*. <${row.url}|Open row>\n` +
+      '_For detailed specs (dimensions, materials, tolerances), edit the 🎯 toggle on the page — every line under it goes into the draft verbatim. Then run `/sponsor email ' + row.company + '`._',
+  });
 }
 
 // --- /sponsor score ----------------------------------------------------------
@@ -747,6 +787,11 @@ export function registerSponsorCommands(app: App): void {
         case 'claim':
           await ack();
           await handleClaim(client, respond, command.user_id, arg);
+          break;
+
+        case 'ask':
+          await ack();
+          await handleAsk(respond, arg);
           break;
 
         case 'email':
