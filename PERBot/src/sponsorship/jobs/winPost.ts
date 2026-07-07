@@ -72,8 +72,11 @@ export async function announceWinIfNew(
   const closing = driMentions.length
     ? `Huge shoutout to ${driMentions.join(', ')} for landing this one! 🙌`
     : 'Nice work!';
+  // Headline carries the deal's own value; a $0/unrecorded deal just omits it.
+  const amount = deal.received ?? deal.dealValue ?? 0;
+  const headline = `:tada: *New sponsor won: ${deal.company || 'a new sponsor'}${amount > 0 ? ` — ${fmtUsd(amount)}` : ''}!*`;
   const text =
-    `:tada: *New sponsor won: ${deal.company || 'a new sponsor'}!*\n` +
+    `${headline}\n` +
     `We're now at *${fmtUsd(totalUsd)} / ${fmtUsd(goal)}* (${pct}%) toward the semester goal. ${closing}`;
 
   await client.chat.postMessage({ channel: channelId, text, unfurl_links: false, metadata: metadataFor(meta) });

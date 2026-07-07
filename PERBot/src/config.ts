@@ -82,7 +82,7 @@ export const config = {
     pipelineDataSourceId: optionalString('SPONSOR_PIPELINE_DS_ID', '64bb332e-543c-4286-9e67-c3bda963cfdd'),
     // Won-deal win posts land here; also the semester goal for the running % line.
     winPostChannel: optionalString('SPONSOR_WIN_CHANNEL', 'operations'),
-    semesterGoalUsd: optionalNumber('SPONSOR_SEMESTER_GOAL_USD', 50000),
+    semesterGoalUsd: optionalNumber('SPONSOR_SEMESTER_GOAL_USD', 100000),
     // The team's outreach template page ("Sponsorship Email Template" under REV12
     // Operations) — fetched live by /sponsor email so ops can edit it without a deploy.
     emailTemplatePageId: optionalString('SPONSOR_EMAIL_TEMPLATE_PAGE_ID', '393560bc-c039-8097-be19-fdc8876bef9b'),
