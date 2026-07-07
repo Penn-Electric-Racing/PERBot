@@ -12,6 +12,7 @@ import {
   PipelineRow,
   SponsorType,
   Stage,
+  WonKind,
 } from './types.js';
 
 /**
@@ -126,6 +127,7 @@ function parsePipelineRow(page: any): PipelineRow {
     url: page.url,
     company: readTitle(p['Company']),
     stage: (readSelect(p['Stage']) as Stage | null) ?? null,
+    wonKind: (readSelect(p['Won kind']) as WonKind | null) ?? null,
     driUserIds: readPeopleIds(p['DRI']),
     dealValue: readNumber(p['Deal value ($)']),
     received: readNumber(p['Received ($)']),
@@ -401,12 +403,19 @@ export class SponsorNotion {
    * if it was blank. Stamps Last contact and prepends a dated WON note. The #operations
    * win post is triggered separately (by the command or the hourly job).
    */
-  async markWon(row: PipelineRow, amountUsd: number, note: string, dateIso: string): Promise<void> {
+  async markWon(
+    row: PipelineRow,
+    amountUsd: number,
+    note: string,
+    dateIso: string,
+    kind?: WonKind
+  ): Promise<void> {
     const properties: Record<string, any> = {
       Stage: { select: { name: 'Won' } },
       'Received ($)': { number: amountUsd },
       'Last contact': { date: { start: dateIso } },
     };
+    if (kind) properties['Won kind'] = { select: { name: kind } };
     if (row.dealValue == null) properties['Deal value ($)'] = { number: amountUsd };
     if (note) {
       const merged = `${dateIso}: WON — ${note}${row.notes ? `\n${row.notes}` : ''}`;

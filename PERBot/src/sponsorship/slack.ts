@@ -10,7 +10,7 @@ import { resolveChannelId } from './jobs/shared.js';
 import { announceWinIfNew, resolveDriMentions, totalRaised } from './jobs/winPost.js';
 import { SponsorNotion } from './notion.js';
 import { fitScore, impactScore, priorityScore, quadrant, SponsorScores } from './scoring.js';
-import { BankLeadRow, CATEGORIES, Category, EnrichResult, PipelineRow, STAGES, Stage } from './types.js';
+import { BankLeadRow, CATEGORIES, Category, EnrichResult, PipelineRow, STAGES, Stage, WonKind } from './types.js';
 
 const notion = new SponsorNotion();
 
@@ -30,7 +30,7 @@ const USAGE = [
   '• `/sponsor email <company> [for <ask>]` — draft outreach from the team template + an AI fit paragraph (review before sending)',
   '• `/sponsor ask <company> - <what we want>` — set the 🎯 specific ask a draft includes verbatim (paste detailed specs under the toggle in Notion)',
   '• `/sponsor log <company> - <note>` — log a manual touch on a deal',
-  '• `/sponsor won <company> <amount> [note]` — mark a deal Won + post it to #operations',
+  '• `/sponsor won <company> <amount> [cash|in-kind|discount] [note]` — mark a deal Won + post it to #operations',
   '• `/sponsor stage <company> <stage>` — move a deal (Prospect / Contacted / In talks / Won / Lost)',
   '• `/sponsor score <company> contact:<0-3> teams:<0-3>` — set a prospect’s human scores (also `market:`/`value:`/`need:`)',
   '• `/sponsor rank [category]` — top prospects by Priority (Fit × Impact), with their quadrant',
@@ -572,13 +572,33 @@ function dollars(raw: string, kSuffix?: string): number {
 }
 
 /**
+ * Optional win-kind keyword at the start of the note — "cash [donation]",
+ * "in-kind [donation]", "[valued] discount" — mapped to the Pipeline's `Won kind`
+ * select. Word-bounded so notes like "cashed the check" aren't misread.
+ */
+const WON_KIND_RE = /^(cash|in-?\s?kind|valued\s+discount|discount)\b(?:\s+donation)?[,:–—-]?\s*/i;
+
+function extractWonKind(note: string): { kind?: WonKind; note: string } {
+  const m = note.match(WON_KIND_RE);
+  if (!m) return { note };
+  const token = m[1]!.toLowerCase().replace(/[\s-]/g, '');
+  const kind: WonKind =
+    token === 'cash' ? 'Cash donation' : token === 'inkind' ? 'In-kind donation' : 'Valued discount';
+  return { kind, note: note.slice(m[0].length).trim() };
+}
+
+/**
  * Parse the amount for `/sponsor won`. Two forms:
  *   • plain amount — "$5,000", "5000", "5k"
  *   • computed discount — "38% of $9k", "38% off 9000", "38% discount on $9,000"
  *     → the value saved (0.38 × 9000 = $3,420), returned with how it was derived.
- * Returns the company, the resolved USD amount, an optional note, and `computed`.
+ * A kind keyword after the amount ("cash" / "in-kind" / "discount") becomes `kind`;
+ * a computed discount defaults to 'Valued discount' when no kind is typed.
+ * Returns the company, the resolved USD amount, an optional note, `kind`, and `computed`.
  */
-function parseWon(arg: string): { company: string; amountUsd: number; note: string; computed?: string } | null {
+export function parseWon(
+  arg: string
+): { company: string; amountUsd: number; note: string; kind?: WonKind; computed?: string } | null {
   const t = arg.trim();
 
   // Percentage/discount form. `[^%$\d]*?` lets filler words sit between the % and the base
@@ -591,9 +611,10 @@ function parseWon(arg: string): { company: string; amountUsd: number; note: stri
     const percent = parseFloat(pct[2]!);
     const base = dollars(pct[3]!, pct[4]);
     const amountUsd = Math.round((percent / 100) * base * 100) / 100;
-    const note = (pct[5] ?? '').trim();
     if (company && amountUsd > 0) {
-      return { company, amountUsd, note, computed: `${percent}% of ${fmtMoney(base)}` };
+      const { kind, note } = extractWonKind((pct[5] ?? '').trim());
+      // A computed discount is, by definition, a valued discount unless told otherwise.
+      return { company, amountUsd, note, kind: kind ?? 'Valued discount', computed: `${percent}% of ${fmtMoney(base)}` };
     }
   }
 
@@ -602,9 +623,9 @@ function parseWon(arg: string): { company: string; amountUsd: number; note: stri
   if (!m) return null;
   const company = leadingCompany(m[1]!);
   const amount = dollars(m[2]!, m[3]);
-  const note = (m[4] ?? '').trim();
   if (!company || !Number.isFinite(amount) || amount <= 0) return null;
-  return { company, amountUsd: amount, note };
+  const { kind, note } = extractWonKind((m[4] ?? '').trim());
+  return { company, amountUsd: amount, note, kind };
 }
 
 async function handleWon(client: WebClient, respond: RespondFn, arg: string): Promise<void> {
@@ -612,7 +633,7 @@ async function handleWon(client: WebClient, respond: RespondFn, arg: string): Pr
   if (!parsed) {
     await respond({
       response_type: 'ephemeral',
-      text: 'Usage: `/sponsor won <company> <amount> [note]`\nAmount can be a number (`$5,000`, `5k`) or a discount (`38% of $9k` → $3,420).\nExamples: `/sponsor won Jane Street $5000 cash` · `/sponsor won Melasta 38% of $9000 cell discount`',
+      text: 'Usage: `/sponsor won <company> <amount> [cash|in-kind|discount] [note]`\nAmount can be a number (`$5,000`, `5k`) or a discount (`38% of $9k` → $3,420, auto-tagged Valued discount).\nExamples: `/sponsor won Jane Street $5000 cash` · `/sponsor won Altium 20k in-kind licenses` · `/sponsor won Melasta 38% of $9000 cell discount`',
     });
     return;
   }
@@ -620,7 +641,7 @@ async function handleWon(client: WebClient, respond: RespondFn, arg: string): Pr
   const deal = await resolveSingleDeal(respond, parsed.company);
   if (!deal) return;
 
-  await notion.markWon(deal, parsed.amountUsd, parsed.note, todayIsoET());
+  await notion.markWon(deal, parsed.amountUsd, parsed.note, todayIsoET(), parsed.kind);
 
   // Post to #operations immediately. Same marker as the hourly job → no double-post.
   let announcedSuffix = '';
@@ -633,7 +654,13 @@ async function handleWon(client: WebClient, respond: RespondFn, arg: string): Pr
       if (!won.some((d) => d.id === deal.id)) total += parsed.amountUsd;
       const notionUsersById = new Map((await notion.listNotionUsers()).map((u) => [u.id, u]));
       const dri = await resolveDriMentions(client, deal.driUserIds, notionUsersById, await fetchSlackDirectory(client));
-      const posted = await announceWinIfNew(client, channelId, { ...deal, received: parsed.amountUsd }, total, dri);
+      const posted = await announceWinIfNew(
+        client,
+        channelId,
+        { ...deal, received: parsed.amountUsd, wonKind: parsed.kind ?? deal.wonKind },
+        total,
+        dri
+      );
       if (posted) announcedSuffix = ` and posted it to #${config.sponsorship.winPostChannel}`;
     }
   } catch (err) {
@@ -641,9 +668,10 @@ async function handleWon(client: WebClient, respond: RespondFn, arg: string): Pr
   }
 
   const computedNote = parsed.computed ? ` _(${parsed.computed})_` : '';
+  const kindNote = parsed.kind ? ` — ${parsed.kind.toLowerCase()}` : '';
   await respond({
     response_type: 'ephemeral',
-    text: `🎉 Marked <${deal.url}|${deal.company}> *Won* at ${fmtMoney(parsed.amountUsd)}${computedNote}${announcedSuffix}.`,
+    text: `🎉 Marked <${deal.url}|${deal.company}> *Won* at ${fmtMoney(parsed.amountUsd)}${computedNote}${kindNote}${announcedSuffix}.`,
   });
 }
 

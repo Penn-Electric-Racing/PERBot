@@ -72,9 +72,10 @@ export async function announceWinIfNew(
   const closing = driMentions.length
     ? `Huge shoutout to ${driMentions.join(', ')} for landing this one! 🙌`
     : 'Nice work!';
-  // Headline carries the deal's own value; a $0/unrecorded deal just omits it.
+  // Headline carries the deal's own value and kind; unrecorded fields just drop out.
   const amount = deal.received ?? deal.dealValue ?? 0;
-  const headline = `:tada: *New sponsor won: ${deal.company || 'a new sponsor'}${amount > 0 ? ` — ${fmtUsd(amount)}` : ''}!*`;
+  const kind = deal.wonKind ? ` (${deal.wonKind.toLowerCase()})` : '';
+  const headline = `:tada: *New sponsor won: ${deal.company || 'a new sponsor'}${amount > 0 ? ` — ${fmtUsd(amount)}` : ''}${kind}!*`;
   const text =
     `${headline}\n` +
     `We're now at *${fmtUsd(totalUsd)} / ${fmtUsd(goal)}* (${pct}%) toward the semester goal. ${closing}`;
