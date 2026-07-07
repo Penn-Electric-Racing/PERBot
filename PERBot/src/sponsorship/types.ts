@@ -56,6 +56,12 @@ export const RELATIONSHIPS = ['New', 'Returning', 'Lapsed'] as const;
 export const STAGES = ['Prospect', 'Contacted', 'In talks', 'Won', 'Lost'] as const;
 export type Stage = (typeof STAGES)[number];
 
+/** How a Won deal delivered its value — set by `/sponsor won <co> <amt> [kind]` (or in
+ *  Notion), shown in the win post headline. Distinct from `Type` (what a company would
+ *  most naturally give): a discount is recorded as the value it saved us. */
+export const WON_KINDS = ['Cash donation', 'In-kind donation', 'Valued discount'] as const;
+export type WonKind = (typeof WON_KINDS)[number];
+
 /**
  * The structured JSON the LLM is forced to return. Contact data is deliberately
  * NOT part of this — the LLM never invents contacts (guardrail); those come only
@@ -111,6 +117,7 @@ export interface PipelineRow {
   url: string;
   company: string;
   stage: Stage | null;
+  wonKind: WonKind | null;
   /** Notion user IDs of the DRI(s). */
   driUserIds: string[];
   dealValue: number | null;
