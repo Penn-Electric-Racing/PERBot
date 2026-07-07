@@ -659,7 +659,8 @@ async function handleWon(client: WebClient, respond: RespondFn, arg: string): Pr
         channelId,
         { ...deal, received: parsed.amountUsd, wonKind: parsed.kind ?? deal.wonKind },
         total,
-        dri
+        dri,
+        parsed.note
       );
       if (posted) announcedSuffix = ` and posted it to #${config.sponsorship.winPostChannel}`;
     }

@@ -56,13 +56,25 @@ export async function resolveDriMentions(
   return mentions;
 }
 
-/** Announce one Won deal if it hasn't been posted to the channel yet. Returns true if posted. */
+/**
+ * The deal's WON note from Notion, for cron-detected wins (the `/sponsor won` path
+ * passes the freshly typed note directly). markWon prepends `<date>: WON — <note>`,
+ * so the first match is the latest.
+ */
+export function latestWonNote(deal: PipelineRow): string {
+  return deal.notes.match(/^\d{4}-\d{2}-\d{2}: WON — (.+)$/m)?.[1]?.trim() ?? '';
+}
+
+/** Announce one Won deal if it hasn't been posted to the channel yet. Returns true if posted.
+ *  `contextNote` adds an italic context line under the headline — for wins that don't fit
+ *  the kind tags cleanly (e.g. "Pre-existing FSAE discount"). */
 export async function announceWinIfNew(
   client: WebClient,
   channelId: string,
   deal: PipelineRow,
   totalUsd: number,
-  driMentions: string[] = []
+  driMentions: string[] = [],
+  contextNote = ''
 ): Promise<boolean> {
   const meta = winMeta(deal);
   if (await alreadyPosted(client, channelId, meta, winMarker(deal))) return false; // already announced
@@ -76,8 +88,11 @@ export async function announceWinIfNew(
   const amount = deal.received ?? deal.dealValue ?? 0;
   const kind = deal.wonKind ? ` (${deal.wonKind.toLowerCase()})` : '';
   const headline = `:tada: *New sponsor won: ${deal.company || 'a new sponsor'}${amount > 0 ? ` — ${fmtUsd(amount)}` : ''}${kind}!*`;
+  const context = contextNote.trim().replace(/\s+/g, ' ').slice(0, 200);
+  const contextLine = context ? `_${context.charAt(0).toUpperCase()}${context.slice(1)}_\n` : '';
   const text =
     `${headline}\n` +
+    contextLine +
     `We're now at *${fmtUsd(totalUsd)} / ${fmtUsd(goal)}* (${pct}%) toward the semester goal. ${closing}`;
 
   await client.chat.postMessage({ channel: channelId, text, unfurl_links: false, metadata: metadataFor(meta) });
@@ -108,7 +123,7 @@ export async function runWinPost(): Promise<void> {
   const total = totalRaised(won);
   for (const deal of won) {
     const dri = await resolveDriMentions(client, deal.driUserIds, notionUsersById, slackDir);
-    await announceWinIfNew(client, channelId, deal, total, dri);
+    await announceWinIfNew(client, channelId, deal, total, dri, latestWonNote(deal));
   }
 }
 
