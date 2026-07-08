@@ -34,7 +34,7 @@ const USAGE = [
   '• `/sponsor stage <company> <stage>` — move a deal (Prospect / Contacted / In talks / Won / Lost)',
   '• `/sponsor score <company> contact:<0-3> teams:<0-3>` — set a prospect’s human scores (also `market:`/`value:`/`need:`)',
   '• `/sponsor rank [category]` — top prospects by Priority (Fit × Impact), with their quadrant',
-  '• `/sponsor leaderboard [post]` — who’s raised what: $ won + active deals per person (`post` shares it in-channel)',
+  '• `/sponsor leaderboard` — who’s raised what: $ won + active deals per person (only you see it)',
   '• `/sponsor me` — show your active deals + next actions',
 ].join('\n');
 
@@ -725,8 +725,9 @@ export interface LeaderboardRow {
 
 /**
  * Aggregate deals per DRI. A co-owned deal credits each DRI in full (a shared win is
- * everyone's win) — the header's raised total comes from totalRaised, so co-credit
- * never inflates the real number. Lost deals count toward nothing.
+ * everyone's win) — so rows may sum past the header total, which counts each deal
+ * once via totalRaised (Received-only). Per-person $ is Received-only too, matching
+ * the counter. Lost deals count toward nothing.
  */
 export function computeLeaderboard(deals: PipelineRow[], nameById: Map<string, string>): LeaderboardRow[] {
   const rows = new Map<string, LeaderboardRow>();
@@ -738,7 +739,7 @@ export function computeLeaderboard(deals: PipelineRow[], nameById: Map<string, s
         rows.set(id, row);
       }
       if (deal.stage === 'Won') {
-        row.wonUsd += deal.received ?? deal.dealValue ?? 0;
+        row.wonUsd += deal.received ?? 0;
         row.wonCount += 1;
       } else if (deal.stage !== 'Lost') {
         row.activeCount += 1;
@@ -754,10 +755,9 @@ export function computeLeaderboard(deals: PipelineRow[], nameById: Map<string, s
 const MEDALS = ['🥇', '🥈', '🥉'] as const;
 const LEADERBOARD_LIMIT = 15;
 
-async function handleLeaderboard(respond: RespondFn, arg: string): Promise<void> {
-  // `/sponsor leaderboard post` shares it with the channel; default is only-you.
-  const inChannel = /\b(post|share|public)\b/i.test(arg);
-
+// Ephemeral-only by design (Arjun, 2026-07-08): the leaderboard is background
+// tracking anyone can pull up, never a channel post.
+async function handleLeaderboard(respond: RespondFn): Promise<void> {
   const [deals, notionUsers, prospects] = await Promise.all([
     notion.queryAllDeals(),
     notion.listNotionUsers(),
@@ -788,9 +788,10 @@ async function handleLeaderboard(respond: RespondFn, arg: string): Promise<void>
     return `${badge} *${r.name}* — ${won} · ${r.activeCount} active deal${r.activeCount === 1 ? '' : 's'}`;
   });
   if (rows.length > LEADERBOARD_LIMIT) lines.push(`_…and ${rows.length - LEADERBOARD_LIMIT} more_`);
+  lines.push('_Co-owned wins credit each DRI in full; the raised total counts each deal once (money in Received)._');
 
   await respond({
-    response_type: inChannel ? 'in_channel' : 'ephemeral',
+    response_type: 'ephemeral',
     text: [header, ...lines].join('\n') + claimHint,
   });
 }
@@ -943,7 +944,7 @@ export function registerSponsorCommands(app: App): void {
         case 'board':
         case 'top':
           await ack();
-          await handleLeaderboard(respond, arg);
+          await handleLeaderboard(respond);
           break;
 
         case 'me':
