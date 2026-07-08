@@ -349,6 +349,11 @@ export class SponsorNotion {
     return this.queryPipeline({ property: 'Stage', select: { equals: 'Won' } });
   }
 
+  /** Every Pipeline deal, all stages — feeds the leaderboard. */
+  async queryAllDeals(): Promise<PipelineRow[]> {
+    return this.queryPipeline();
+  }
+
   /** Active deals owned by a given Notion user — powers `/sponsor me`. */
   async queryActiveDealsForUser(notionUserId: string): Promise<PipelineRow[]> {
     return this.queryPipeline({
