@@ -29,9 +29,13 @@ function fmtUsd(n: number): string {
   return `$${Math.round(n).toLocaleString('en-US')}`;
 }
 
-/** Running total from Received ($) across Won deals (falls back to Deal value). */
+/**
+ * Running total = money actually in `Received ($)` across Won deals, each deal
+ * counted once. Deliberately NO Deal-value fallback: a Won deal whose money hasn't
+ * landed yet contributes nothing to the raised counter (Arjun's rule, 2026-07-08).
+ */
 export function totalRaised(won: PipelineRow[]): number {
-  return won.reduce((sum, d) => sum + (d.received ?? d.dealValue ?? 0), 0);
+  return won.reduce((sum, d) => sum + (d.received ?? 0), 0);
 }
 
 /**

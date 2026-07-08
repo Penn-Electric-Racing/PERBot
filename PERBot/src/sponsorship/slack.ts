@@ -16,8 +16,8 @@ const notion = new SponsorNotion();
 
 /**
  * Slack surface for the sponsorship module: the `/sponsor` command
- * (add / claim / ask / email / log / won / stage / score / rank / me). Registered
- * from app.ts via registerSponsorCommands.
+ * (add / claim / ask / email / log / won / stage / score / rank / leaderboard / me).
+ * Registered from app.ts via registerSponsorCommands.
  * Drafting guardrail: `/sponsor email` fills the team's own template; the LLM writes
  * only the fit paragraph, the draft is never auto-sent, and a human reviews it first.
  */
@@ -34,6 +34,7 @@ const USAGE = [
   '• `/sponsor stage <company> <stage>` — move a deal (Prospect / Contacted / In talks / Won / Lost)',
   '• `/sponsor score <company> contact:<0-3> teams:<0-3>` — set a prospect’s human scores (also `market:`/`value:`/`need:`)',
   '• `/sponsor rank [category]` — top prospects by Priority (Fit × Impact), with their quadrant',
+  '• `/sponsor leaderboard` — who’s raised what: $ won + active deals per person (only you see it)',
   '• `/sponsor me` — show your active deals + next actions',
 ].join('\n');
 
@@ -712,6 +713,89 @@ async function handleStage(respond: RespondFn, arg: string): Promise<void> {
   });
 }
 
+// --- /sponsor leaderboard -------------------------------------------------------
+
+export interface LeaderboardRow {
+  notionId: string;
+  name: string;
+  wonUsd: number;
+  wonCount: number;
+  activeCount: number;
+}
+
+/**
+ * Aggregate deals per DRI. A co-owned deal credits each DRI in full (a shared win is
+ * everyone's win) — so rows may sum past the header total, which counts each deal
+ * once via totalRaised (Received-only). Per-person $ is Received-only too, matching
+ * the counter. Lost deals count toward nothing.
+ */
+export function computeLeaderboard(deals: PipelineRow[], nameById: Map<string, string>): LeaderboardRow[] {
+  const rows = new Map<string, LeaderboardRow>();
+  for (const deal of deals) {
+    for (const id of deal.driUserIds) {
+      let row = rows.get(id);
+      if (!row) {
+        row = { notionId: id, name: nameById.get(id) || 'Unknown', wonUsd: 0, wonCount: 0, activeCount: 0 };
+        rows.set(id, row);
+      }
+      if (deal.stage === 'Won') {
+        row.wonUsd += deal.received ?? 0;
+        row.wonCount += 1;
+      } else if (deal.stage !== 'Lost') {
+        row.activeCount += 1;
+      }
+    }
+  }
+  return [...rows.values()].sort(
+    (a, b) =>
+      b.wonUsd - a.wonUsd || b.wonCount - a.wonCount || b.activeCount - a.activeCount || a.name.localeCompare(b.name)
+  );
+}
+
+const MEDALS = ['🥇', '🥈', '🥉'] as const;
+const LEADERBOARD_LIMIT = 15;
+
+// Ephemeral-only by design (Arjun, 2026-07-08): the leaderboard is background
+// tracking anyone can pull up, never a channel post.
+async function handleLeaderboard(respond: RespondFn): Promise<void> {
+  const [deals, notionUsers, prospects] = await Promise.all([
+    notion.queryAllDeals(),
+    notion.listNotionUsers(),
+    notion.queryRankableProspects(),
+  ]);
+
+  const nameById = new Map(notionUsers.map((u) => [u.id, u.name]));
+  const rows = computeLeaderboard(deals, nameById);
+  const available = prospects.filter((p) => p.status === 'Available').length;
+  const claimHint = available > 0 ? `\n_${available} researched lead${available === 1 ? '' : 's'} waiting in the Bank — \`/sponsor claim\` one!_` : '';
+
+  if (rows.length === 0) {
+    await respond({
+      response_type: 'ephemeral',
+      text: `No deals on the board yet.${claimHint || ' Add prospects with `/sponsor add`.'}`,
+    });
+    return;
+  }
+
+  const total = totalRaised(deals.filter((d) => d.stage === 'Won'));
+  const goal = config.sponsorship.semesterGoalUsd;
+  const pct = goal > 0 ? Math.round((total / goal) * 100) : 0;
+  const header = `🏆 *Sponsorship leaderboard* — *${fmtMoney(total)} / ${fmtMoney(goal)}* raised (${pct}%)`;
+
+  const lines = rows.slice(0, LEADERBOARD_LIMIT).map((r, i) => {
+    const badge = r.wonUsd > 0 && i < MEDALS.length ? MEDALS[i] : '•';
+    const won = r.wonUsd > 0 ? `*${fmtMoney(r.wonUsd)}* won (${r.wonCount} win${r.wonCount === 1 ? '' : 's'})` : 'no wins yet';
+    return `${badge} *${r.name}* — ${won} · ${r.activeCount} active deal${r.activeCount === 1 ? '' : 's'}`;
+  });
+  if (rows.length > LEADERBOARD_LIMIT) lines.push(`_…and ${rows.length - LEADERBOARD_LIMIT} more_`);
+  lines.push('_Co-owned wins credit each DRI in full; the raised total counts each deal once (money in Received)._');
+
+  await respond({
+    response_type: 'ephemeral',
+    text: [header, ...lines].join('\n') + claimHint,
+  });
+}
+
 // --- /sponsor claim -----------------------------------------------------------
 
 function parseClaim(arg: string): { company: string; assigneeSlackIds: string[]; plainHandles: string[] } {
@@ -854,6 +938,13 @@ export function registerSponsorCommands(app: App): void {
         case 'rank':
           await ack();
           await handleRank(respond, arg);
+          break;
+
+        case 'leaderboard':
+        case 'board':
+        case 'top':
+          await ack();
+          await handleLeaderboard(respond);
           break;
 
         case 'me':
