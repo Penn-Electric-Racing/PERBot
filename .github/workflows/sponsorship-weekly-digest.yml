@@ -1,0 +1,43 @@
+name: Sponsorship — Saturday Weekly Digest
+
+# Saturday ~9am ET: DM each member with live deals the team progress line, the week's
+# wins, and their own numbers + next actions. DMs only — never a channel post. Two cron
+# triggers cover the EDT/EST offset; the script's isSaturday9amET() time-check makes
+# double-fires safe. Members with no deals get no DM (silence is valid).
+on:
+  schedule:
+    - cron: '0 13 * * 6' # 9am EDT
+    - cron: '0 14 * * 6' # 9am EST
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Run even if it is not Saturday 9am ET'
+        type: boolean
+        default: false
+
+jobs:
+  weekly-digest:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: sponsor-weekly-digest
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: PERBot/package-lock.json
+
+      - name: Install dependencies
+        working-directory: PERBot
+        run: npm ci
+
+      - name: DM members the weekly digest
+        working-directory: PERBot
+        run: npm run job:sponsor-digest
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          FORCE_DIGEST: ${{ inputs.force }}

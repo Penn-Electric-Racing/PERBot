@@ -14,6 +14,7 @@
     "job:sponsor-win": "tsx src/sponsorship/jobs/winPost.ts",
     "job:sponsor-stale": "tsx src/sponsorship/jobs/staleDm.ts",
     "job:sponsor-reply": "tsx src/sponsorship/jobs/replyDm.ts",
+    "job:sponsor-digest": "tsx src/sponsorship/jobs/weeklyDigest.ts",
     "check": "tsc --noEmit"
   },
   "dependencies": {
