@@ -22,8 +22,14 @@ async function main(): Promise<void> {
   // Accept any Wednesday run between 11am-1pm ET (target is 12pm, but cron is flaky).
   assertExpectedETHourRange(11, 13);
 
-  // Idempotency: if a meeting page for today already exists, don't create another one
-  const existingPageUrl = await findExistingMeetingPageForToday();
+  // NOTES_DATE=YYYY-MM-DD overrides the page date for recovery runs after a
+  // failed Wednesday cron (noon ET anchor avoids UTC day-boundary drift).
+  const noteDate = process.env.NOTES_DATE
+    ? new Date(`${process.env.NOTES_DATE}T12:00:00-04:00`)
+    : new Date();
+
+  // Idempotency: if a meeting page for this date already exists, don't create another one
+  const existingPageUrl = await findExistingMeetingPageForToday(noteDate);
   if (existingPageUrl) {
     console.log(`⊘ Meeting page for today already exists, skipping generation: ${existingPageUrl}`);
     return;
@@ -51,7 +57,7 @@ async function main(): Promise<void> {
     }
   }
 
-  const url = await createMeetingNotesPage(new Date(), subsystemContents);
+  const url = await createMeetingNotesPage(noteDate, subsystemContents);
   console.log(`\n✓ Meeting notes created: ${url}`);
 }
 

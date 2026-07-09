@@ -2,7 +2,7 @@ import { Client } from '@notionhq/client';
 import { ParsedUpdate } from './parseUpdates.js';
 import { NOTION_PARENT_PAGE_ID } from './config.js';
 
-const notion = new Client({ auth: process.env.NOTION_API_KEY });
+const notion = new Client({ auth: process.env.NOTION_API_KEY ?? process.env.NOTION_TOKEN });
 
 export interface SubsystemContent {
   subsystem: string;
@@ -22,13 +22,25 @@ export async function createMeetingNotesPage(
 
   const children = buildPageBlocks(subsystemContents);
 
+  // Notion caps `children` at 100 blocks per request — create the page with
+  // the first batch, then append the rest in batches of 100.
+  const BATCH_SIZE = 100;
+
   const result = await notion.pages.create({
     parent: { page_id: NOTION_PARENT_PAGE_ID },
     properties: {
       title: { title: [{ text: { content: title } }] },
     },
-    children,
+    children: children.slice(0, BATCH_SIZE),
   });
+
+  const pageId = (result as { id: string }).id;
+  for (let i = BATCH_SIZE; i < children.length; i += BATCH_SIZE) {
+    await notion.blocks.children.append({
+      block_id: pageId,
+      children: children.slice(i, i + BATCH_SIZE),
+    });
+  }
 
   return (result as { url: string }).url;
 }
@@ -40,12 +52,12 @@ export async function createMeetingNotesPage(
  * when the Wednesday job might fire multiple times due to GitHub Actions cron
  * unreliability.
  */
-export async function findExistingMeetingPageForToday(): Promise<string | null> {
-  const month = new Date().toLocaleString('en-US', {
+export async function findExistingMeetingPageForToday(date: Date = new Date()): Promise<string | null> {
+  const month = date.toLocaleString('en-US', {
     month: 'numeric',
     timeZone: 'America/New_York',
   });
-  const day = new Date().toLocaleString('en-US', {
+  const day = date.toLocaleString('en-US', {
     day: 'numeric',
     timeZone: 'America/New_York',
   });
