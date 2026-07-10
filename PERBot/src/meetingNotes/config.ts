@@ -16,7 +16,7 @@ export const SUBSYSTEMS: Subsystem[] = [
   { name: 'Accumulator', slackChannel: 'accumulator' },
   { name: 'Drivetrain', slackChannel: 'drivetrain' },
   { name: 'Suspension ඞ', slackChannel: 'suspension' },
-  { name: 'Driver Interface', slackChannel: 'chassis' },
+  { name: 'Driver Interface', slackChannel: 'driver_interface' },
   { name: 'Aerodynamics', slackChannel: 'aero_composites' },
   { name: 'Vehicle Dynamics', slackChannel: 'vehicledynamics' },
 ];

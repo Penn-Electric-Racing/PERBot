@@ -23,11 +23,11 @@ manually before the Wednesday meeting.
 | `#accumulator` | Accumulator |
 | `#drivetrain` | Drivetrain |
 | `#suspension` | Suspension ඞ |
-| `#chassis` | Driver Interface |
+| `#driver_interface` | Driver Interface |
 | `#aero_composites` | Aerodynamics |
 | `#vehicledynamics` | Vehicle Dynamics |
 
-The `#chassis → Driver Interface` mapping is intentional — historical naming holdover.
+(The channel was `#chassis` until July 2026 — renamed to match the subsystem.)
 
 ## Setup (one-time)
 
