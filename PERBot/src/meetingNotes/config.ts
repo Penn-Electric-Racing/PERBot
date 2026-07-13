@@ -30,21 +30,12 @@ export const SLACK_WORKSPACE_SUBDOMAIN = 'pennelectricracing';
 /** Posted by PERBot in each subsystem channel Monday 9am ET. `{date}` is replaced at runtime. */
 export const KICKOFF_MESSAGE = `📋 *Weekly Update Thread! Week of {date}*
 
-Reply in this thread with what you've been working on. Two ways:
+Reply in this thread with what you've been working on.
 
-*Option 1 — Use section headers* (more precise placement in meeting notes):
-\`\`\`
-*Complete:*
-*Design:*
-*Manufacturing:*
-*Deadlines:*
-\`\`\`
-Recognized headers: Complete, Incomplete, Deadlines, Logistical, Design, Manufacturing, Overdue, Look-ahead
+*Option 1: Use section headers* (recognized headers: Complete, Incomplete, Deadlines, Logistical, Design, Manufacturing, Overdue, Look-ahead)
+*Option 2: Write naturally!*
 
-*Option 2 — Just write naturally.* AI will sort what you wrote into the right sections.
-
-📷 Screenshots are encouraged — attach them to whichever message they belong to. They'll link back to this thread from the Notion notes.
-
+📷 Screenshots encouraged — they'll link back to this thread from the Notion notes.
 🕛 *Snapshot Wednesday 12:00 PM ET, so please thread before then!*`;
 
 /** Signature used by `findMostRecentBotThread` to identify the kickoff message. Must appear in KICKOFF_MESSAGE. */
