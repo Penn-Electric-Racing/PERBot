@@ -99,7 +99,7 @@ OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 
 ## Cloud deployment (recommended: Render background worker)
 
-Because PERBot uses Slack **Socket Mode**, it does **not** need a public Slack request URL. The cleanest cloud deployment is a **background worker** that maintains the outbound WebSocket connection to Slack. Render background workers are a good fit for this pattern. Slack’s Socket Mode docs explain that Socket Mode uses a WebSocket connection instead of a public HTTP Request URL, and Render’s worker docs describe long-running processes that do not receive inbound traffic. citeturn393795search2turn393795search3
+Because PERBot uses Slack **Socket Mode**, it does **not** need a public Slack request URL. The cleanest cloud deployment is a **background worker** that maintains the outbound WebSocket connection to Slack. Render background workers are a good fit for this pattern. Slack’s Socket Mode docs explain that Socket Mode uses a WebSocket connection instead of a public HTTP Request URL, and Render’s worker docs describe long-running processes that do not receive inbound traffic.
 
 ### Included deployment files
 - `render.yaml` — one-click-ish Render worker blueprint
