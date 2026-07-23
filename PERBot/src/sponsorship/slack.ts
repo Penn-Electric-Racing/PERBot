@@ -3,6 +3,7 @@ import type { WebClient } from '@slack/web-api';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 import { isoDaysFromNowET, todayIsoET } from './dates.js';
+import { findMatchingProspects, scoutCompanies } from './discovery.js';
 import { draftOutreachEmail } from './emailDraft.js';
 import { DomainResolutionError, enrichCompany } from './enrichCompany.js';
 import { fetchSlackDirectory, indexNotionUsers, resolveSlackHandles, slackUserToNotionId } from './identity.js';
@@ -16,7 +17,8 @@ const notion = new SponsorNotion();
 
 /**
  * Slack surface for the sponsorship module: the `/sponsor` command
- * (add / claim / ask / email / log / won / stage / score / rank / leaderboard / me).
+ * (add / claim / ask / email / find / scout / log / won / stage / score / rank /
+ * leaderboard / me).
  * Registered from app.ts via registerSponsorCommands.
  * Drafting guardrail: `/sponsor email` fills the team's own template; the LLM writes
  * only the fit paragraph, the draft is never auto-sent, and a human reviews it first.
@@ -34,6 +36,8 @@ const USAGE = [
   '• `/sponsor stage <company> <stage>` — move a deal (Prospect / Contacted / In talks / Won / Lost)',
   '• `/sponsor score <company> contact:<0-3> teams:<0-3>` — set a prospect’s human scores (also `market:`/`value:`/`need:`)',
   '• `/sponsor rank [category]` — top prospects by Priority (Fit × Impact), with their quadrant',
+  '• `/sponsor find <what we need>` — search the *unclaimed* Bank for leads matching a need (e.g. `find cooling jackets for our motor`)',
+  '• `/sponsor scout <what we need>` — hunt for *new* companies not in the Bank yet (AI-suggested, homepage-checked; add keepers with `/sponsor add`)',
   '• `/sponsor leaderboard` — who’s raised what: $ won + active deals per person (only you see it)',
   '• `/sponsor me` — show your active deals + next actions',
 ].join('\n');
@@ -509,6 +513,101 @@ async function handleRank(respond: RespondFn, arg: string): Promise<void> {
   await respond({ response_type: 'ephemeral', text: [header, ...lines].join('\n') + hint });
 }
 
+// --- /sponsor find -----------------------------------------------------------
+
+/**
+ * Free-text need → matching UNCLAIMED Bank leads (Status = Available), ranked by
+ * the LLM with a one-line why each. Read-only; claiming is a separate human step.
+ */
+async function handleFind(respond: RespondFn, arg: string): Promise<void> {
+  const need = arg.trim();
+  if (!need) {
+    await respond({
+      response_type: 'ephemeral',
+      text:
+        'Usage: `/sponsor find <what we need>`\n' +
+        'Searches the *unclaimed* Prospect Bank for leads that could supply or fund a need, best fit first.\n' +
+        'Example: `/sponsor find water cooling jackets for our drivetrain motors`',
+    });
+    return;
+  }
+
+  const rows = (await notion.queryRankableProspects()).filter((r) => r.status === 'Available');
+  if (rows.length === 0) {
+    await respond({ response_type: 'ephemeral', text: 'The Bank has no unclaimed leads to search. Add some with `/sponsor add` or `/sponsor scout`.' });
+    return;
+  }
+
+  const matches = await findMatchingProspects(need, rows);
+  if (matches.length === 0) {
+    await respond({
+      response_type: 'ephemeral',
+      text: `No unclaimed Bank lead looks like a fit for *${need}* (searched ${rows.length}).\n_Try \`/sponsor scout ${need}\` to hunt for new companies._`,
+    });
+    return;
+  }
+
+  const lines = matches.map(({ row, why }, i) => {
+    return `${i + 1}. <${row.url}|${row.company}> — ${why} _(priority ${priorityScore(row.scores)} ${quadrant(row.scores)})_`;
+  });
+  await respond({
+    response_type: 'ephemeral',
+    text:
+      `*Unclaimed leads matching “${need}”* (searched ${rows.length}):\n` +
+      lines.join('\n') +
+      '\n_Take one with `/sponsor claim <company>` — or `/sponsor scout` to find companies not in the Bank yet._',
+  });
+}
+
+// --- /sponsor scout ----------------------------------------------------------
+
+/**
+ * Free-text need → NEW candidate companies (not in the Bank), AI-suggested and then
+ * grounded against their live homepages. Read-only: writes nothing to Notion and
+ * spends no Hunter credits — a human adds keepers via `/sponsor add <domain>`.
+ */
+async function handleScout(respond: RespondFn, arg: string): Promise<void> {
+  const need = arg.trim();
+  if (!need) {
+    await respond({
+      response_type: 'ephemeral',
+      text:
+        'Usage: `/sponsor scout <what we need>`\n' +
+        'Suggests *new* companies for a need (not yet in the Bank), each checked against its live website.\n' +
+        'Example: `/sponsor scout wire EDM job shops that export from China`\n' +
+        '_Nothing is written anywhere — add the ones you like with `/sponsor add <domain>`._',
+    });
+    return;
+  }
+
+  const known = await notion.queryAllBankDomains();
+  const { candidates, rejectedCount } = await scoutCompanies(need, known);
+
+  if (candidates.length === 0) {
+    const dropped = rejectedCount > 0 ? ` (${rejectedCount} suggestion${rejectedCount === 1 ? '' : 's'} failed the homepage check)` : '';
+    await respond({
+      response_type: 'ephemeral',
+      text: `Couldn't scout any new companies for *${need}*${dropped}. Try rephrasing the need, or ask around — warm intros beat cold lists anyway.`,
+    });
+    return;
+  }
+
+  const lines = candidates.map((c) => {
+    const badge = c.verdict === 'confirmed' ? '✓' : '⚠️';
+    const note = c.verdict === 'unverified' ? ' _(site unreachable — verify before adding)_' : '';
+    return `${badge} *${c.company}* (<https://${c.hostname}|${c.hostname}>) — ${c.why}${note}\n    ↳ \`/sponsor add ${c.hostname}\``;
+  });
+  const droppedLine = rejectedCount > 0 ? `\n_${rejectedCount} suggestion${rejectedCount === 1 ? '' : 's'} dropped — homepage didn't match the claim._` : '';
+  await respond({
+    response_type: 'ephemeral',
+    text:
+      `*New sponsor candidates for “${need}”* — ✓ homepage-checked, not yet in the Bank:\n` +
+      lines.join('\n') +
+      droppedLine +
+      '\n_Nothing was added to Notion. `/sponsor add <domain>` researches one properly (contact via Hunter) and banks it._',
+  });
+}
+
 // --- /sponsor log ------------------------------------------------------------
 
 /** Parse "Acme Corp - called, they're interested" → { company, note }. */
@@ -938,6 +1037,19 @@ export function registerSponsorCommands(app: App): void {
         case 'rank':
           await ack();
           await handleRank(respond, arg);
+          break;
+
+        case 'find':
+          // One LLM pass over the whole unclaimed Bank — ack fast, respond via response_url.
+          await ack({ response_type: 'ephemeral', text: `:mag: Searching the Bank for *${arg || '…'}*` });
+          await handleFind(respond, arg);
+          break;
+
+        case 'scout':
+        case 'discover':
+          // Slowest command (generate + N homepage fetches + verify) — can take a minute.
+          await ack({ response_type: 'ephemeral', text: `:compass: Scouting new companies for *${arg || '…'}* — this can take a minute.` });
+          await handleScout(respond, arg);
           break;
 
         case 'leaderboard':
