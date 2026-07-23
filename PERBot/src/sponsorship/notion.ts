@@ -1,6 +1,7 @@
 import { Client } from '@notionhq/client';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
+import { extractHostname } from './domain.js';
 import type { SponsorScores } from './scoring.js';
 import {
   BankLeadRow,
@@ -254,6 +255,30 @@ export class SponsorNotion {
       cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
     } while (cursor);
     return rows;
+  }
+
+  /**
+   * Every hostname already in the Bank (ALL statuses, including Dead/Graduated) —
+   * the skip-list for `/sponsor scout`, so it never re-suggests a company the team
+   * already researched, claimed, or wrote off. Bare lowercase hostnames.
+   */
+  async queryAllBankDomains(): Promise<Set<string>> {
+    const hostnames = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      const response: any = await this.client.dataSources.query({
+        data_source_id: config.sponsorship.bankDataSourceId,
+        start_cursor: cursor,
+        page_size: 100,
+      });
+      for (const page of response.results ?? []) {
+        const domain = readUrl(page?.properties?.['Domain']);
+        const host = domain ? extractHostname(domain) : null;
+        if (host) hostnames.add(host);
+      }
+      cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
+    } while (cursor);
+    return hostnames;
   }
 
   /**
