@@ -12,9 +12,9 @@ import { OpsTask, OpsTasksNotion } from './notion.js';
  * "carried N wks" tag on anything assigned before the most recent Saturday. Members
  * with nothing open get nothing (silence is valid).
  *
- * Why "everything open" rather than "assigned this week": the per-page Week filter is
- * set by hand when the meeting page is duplicated. If it is ever forgotten, a Week-based
- * query goes silent; a Status-based one keeps working and is the honest picture anyway.
+ * Why "everything open" rather than "assigned this week": a Status-based query can't go
+ * silent if a meeting page is created late or a task never gets linked to a meeting, and
+ * it is the honest picture anyway.
  *
  * Idempotency: two DST cron triggers, and only the one landing on 10am ET does the work
  * (same pattern as the sponsorship digest). DMs post straight to the user ID.

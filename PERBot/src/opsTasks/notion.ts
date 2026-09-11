@@ -22,7 +22,11 @@ export interface OpsTask {
   status: string;
   /** YYYY-MM-DD or null when the member left Due blank. */
   due: string | null;
-  /** YYYY-MM-DD Saturday the task was assigned at (filled from the page's view filter). */
+  /**
+   * YYYY-MM-DD the task was assigned at. Prefers the "Meeting date" rollup (from the
+   * Meeting relation set automatically inside a meeting page), then the legacy hand-set
+   * Week date, then the row's Created time — so carried-week counts never go blank.
+   */
   week: string | null;
   owners: OpsTaskOwner[];
 }
@@ -33,6 +37,23 @@ function readTitle(prop: any): string {
 function readDate(prop: any): string | null {
   const start = prop?.date?.start;
   return typeof start === 'string' ? start.slice(0, 10) : null;
+}
+/** A date rollup ("show original") arrives as rollup.date or rollup.array[0].date. */
+function readRollupDate(prop: any): string | null {
+  const r = prop?.rollup;
+  if (!r) return null;
+  if (r.type === 'date') return readDate(r);
+  if (r.type === 'array') {
+    for (const item of r.array ?? []) {
+      const d = readDate(item);
+      if (d) return d;
+    }
+  }
+  return null;
+}
+function readCreated(page: any): string | null {
+  const t = page?.created_time;
+  return typeof t === 'string' ? t.slice(0, 10) : null;
 }
 function readOwners(prop: any): OpsTaskOwner[] {
   return (prop?.people ?? [])
@@ -53,7 +74,7 @@ export function parseOpsTask(page: any): OpsTask {
     title: readTitle(p['Task']),
     status: p['Status']?.status?.name ?? '',
     due: readDate(p['Due']),
-    week: readDate(p['Week']),
+    week: readRollupDate(p['Meeting date']) ?? readDate(p['Week']) ?? readCreated(page),
     owners: readOwners(p['Owner']),
   };
 }
