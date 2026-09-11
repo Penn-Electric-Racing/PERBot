@@ -11,6 +11,8 @@ import {
   NotionUser,
   PipelineDealInput,
   PipelineRow,
+  QuotaAuditResult,
+  QuotaRosterMember,
   SponsorType,
   Stage,
   WonKind,
@@ -136,6 +138,7 @@ function parsePipelineRow(page: any): PipelineRow {
     nextAction: readRichText(p['Next action']),
     nextActionDate: readDate(p['Next action date']),
     notes: readRichText(p['Notes']),
+    createdTime: typeof page?.created_time === 'string' ? page.created_time : '',
   };
 }
 
@@ -398,6 +401,14 @@ export class SponsorNotion {
     return this.queryPipeline({ property: 'Company', title: { contains: name } });
   }
 
+  /**
+   * Deals whose Notion page was created at/after `sinceIso` (an ISO datetime) — feeds the
+   * weekly quota audit, which counts DRI assignments by when the deal entered the Pipeline.
+   */
+  async queryDealsCreatedSince(sinceIso: string): Promise<PipelineRow[]> {
+    return this.queryPipeline({ timestamp: 'created_time', created_time: { on_or_after: sinceIso } });
+  }
+
   /** Deals flagged Reply pending by the Phase-3 flow — awaiting a DRI DM. */
   async queryReplyPending(): Promise<PipelineRow[]> {
     return this.queryPipeline({ property: 'Reply pending', checkbox: { equals: true } });
@@ -465,6 +476,79 @@ export class SponsorNotion {
       } as any,
     });
     logger.info(`Set stage ${stage}: ${row.company} (${row.id}).`);
+  }
+
+  // --- Weekly quota audit -------------------------------------------------------
+
+  /**
+   * Active members of the 👥 Ops Quota Roster. Rows without a Member person are skipped
+   * with a warning (nothing to match a DRI against). Ops leads edit this list in Notion.
+   */
+  async queryQuotaRoster(): Promise<QuotaRosterMember[]> {
+    const members: QuotaRosterMember[] = [];
+    let cursor: string | undefined;
+    do {
+      const response: any = await this.client.dataSources.query({
+        data_source_id: config.sponsorship.quotaRosterDataSourceId,
+        filter: { property: 'Active', checkbox: { equals: true } },
+        start_cursor: cursor,
+        page_size: 100,
+      });
+      for (const page of response.results ?? []) {
+        const p = page?.properties ?? {};
+        const name = readTitle(p['Name']);
+        const notionUserId = readPeopleIds(p['Member'])[0];
+        if (!notionUserId) {
+          logger.warn(`Quota roster: "${name || page.id}" has no Member person — skipping.`);
+          continue;
+        }
+        members.push({ name: name || notionUserId, notionUserId });
+      }
+      cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
+    } while (cursor);
+    return members;
+  }
+
+  /**
+   * Write one member's weekly result to 📋 Weekly Quota Audit — creating the row for
+   * (member, week end) or updating it if a previous run already wrote one (re-runs and
+   * forced runs are safe; the row always reflects the latest check).
+   */
+  async upsertQuotaAuditRow(result: QuotaAuditResult): Promise<BankPageRef> {
+    const { member, weekStartIso, weekEndIso } = result;
+    const existing: any = await this.client.dataSources.query({
+      data_source_id: config.sponsorship.quotaAuditDataSourceId,
+      filter: {
+        and: [
+          { property: 'Week end', date: { equals: weekEndIso } },
+          { property: 'Member', people: { contains: member.notionUserId } },
+        ],
+      },
+      page_size: 1,
+    });
+
+    const properties: Record<string, any> = {
+      Name: { title: [{ text: { content: `${member.name} — week ending ${weekEndIso}`.slice(0, 200) } }] },
+      Member: { people: [{ id: member.notionUserId }] },
+      'Week start': { date: { start: weekStartIso } },
+      'Week end': { date: { start: weekEndIso } },
+      Assigned: { number: result.deals.length },
+      Quota: { number: result.quota },
+      Met: { checkbox: result.met },
+      Deals: { relation: result.deals.map((d) => ({ id: d.id })) },
+      'Checked at': { date: { start: new Date().toISOString() } },
+    };
+
+    const hit = (existing.results ?? [])[0];
+    if (hit) {
+      const updated: any = await this.client.pages.update({ page_id: hit.id, properties: properties as any });
+      return { id: updated.id, url: updated.url };
+    }
+    const created: any = await this.client.pages.create({
+      parent: { type: 'data_source_id', data_source_id: config.sponsorship.quotaAuditDataSourceId },
+      properties: properties as any,
+    });
+    return { id: created.id, url: created.url };
   }
 
   // --- Page content (email template + drafts) ----------------------------------

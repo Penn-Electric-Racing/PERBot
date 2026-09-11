@@ -126,6 +126,29 @@ export interface PipelineRow {
   nextAction: string | null;
   nextActionDate: string | null;
   notes: string;
+  /** ISO datetime the Notion page was created — when the deal (and its DRI) entered the Pipeline. */
+  createdTime: string;
+}
+
+/** An active row of the 👥 Ops Quota Roster — a member held to the weekly quota. */
+export interface QuotaRosterMember {
+  /** Display name from the roster's title (humans maintain it; Notion display names can be blank/emails). */
+  name: string;
+  /** The member's Notion user ID — matched against Pipeline DRI. */
+  notionUserId: string;
+}
+
+/** One member's result for one audit week — what gets written to 📋 Weekly Quota Audit. */
+export interface QuotaAuditResult {
+  member: QuotaRosterMember;
+  /** YYYY-MM-DD (ET) — window opens Sat 10:00 ET on this date. */
+  weekStartIso: string;
+  /** YYYY-MM-DD (ET) — window closes Sat 10:00 ET on this date; the audit key. */
+  weekEndIso: string;
+  /** Pipeline deals created inside the window with this member as DRI. */
+  deals: PipelineRow[];
+  quota: number;
+  met: boolean;
 }
 
 /** A verified contact from Hunter — the ONLY source of contact data. */
