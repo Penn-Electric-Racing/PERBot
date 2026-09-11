@@ -5,16 +5,17 @@ import { etWallTimeToUtc, isoAddDays, todayIsoET } from '../dates.js';
 import { fetchSlackDirectory, Indexed, notionUserToSlackId } from '../identity.js';
 import { SponsorNotion } from '../notion.js';
 import { NotionUser, PipelineRow, QuotaAuditResult, QuotaRosterMember } from '../types.js';
+import { syncDriLedger } from './driSync.js';
 import { alreadyPosted, makeSlackClient, metadataFor, resolveChannelId, WinMeta } from './shared.js';
 
 /**
  * Saturday 10 AM ET weekly quota audit: every active member of the 👥 Ops Quota Roster
  * (a Notion DB ops leads maintain — no deploy to change who's on the hook) must have
  * been assigned as DRI on `config.sponsorship.weeklyQuota` Pipeline deals in the past
- * week. "Assigned this week" = the deal's Notion page was created inside the window
- * [last Sat 10:00 ET, this Sat 10:00 ET) with the member on its DRI. Every `/sponsor
- * add … @person`, `/sponsor claim`, and hand-made Pipeline row counts; co-owned deals
- * credit each DRI in full (same rule as the leaderboard).
+ * week. "Assigned this week" = the member's DRI stamp on the deal (PERBot's `DRI assigned`
+ * ledger, kept by jobs/driSync.ts; falls back to the deal's creation time) falls inside the
+ * window [last Sat 10:00 ET, this Sat 10:00 ET). So new deals AND re-assignments onto
+ * older deals count; co-owned deals credit each DRI in full (same rule as the leaderboard).
  *
  * Output: (1) one row per member per week upserted into 📋 Weekly Quota Audit — the
  * durable record of who met quota and who didn't; (2) ONE channel post (#perbot_spam)
@@ -60,9 +61,29 @@ export function auditWindow(weekEndIso: string = todayIsoET()): AuditWindow {
 }
 
 /**
- * Pure audit: for each roster member, the deals created inside the window that list
- * them as DRI, and whether that count reaches the quota. `deals` may include rows
- * outside the window (the Notion query is only lower-bounded) — filtered here.
+ * The window currently in progress — ends at 10:00 ET on the next Saturday (today, if it's
+ * Saturday before 10am; next week's if the 10am audit has already run). Powers the
+ * `/sponsor quota` mid-week self-check so people see the same window Saturday will judge.
+ */
+export function currentAuditWindow(now: Date = new Date()): AuditWindow {
+  const todayIso = now.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const weekday = now.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' });
+  const hour = Number(now.toLocaleString('en-US', { hour: '2-digit', hour12: false, timeZone: 'America/New_York' }));
+  const dow = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(weekday);
+  let daysToSaturday = (6 - dow + 7) % 7;
+  if (daysToSaturday === 0 && hour >= AUDIT_HOUR_ET) daysToSaturday = 7;
+  return auditWindow(isoAddDays(todayIso, daysToSaturday));
+}
+
+/** When `userId` was assigned to `deal`: the ledger stamp, else the deal's creation time. */
+export function assignedAtIso(deal: PipelineRow, userId: string): string {
+  return deal.driAssignedAt[userId.toLowerCase()] ?? deal.createdTime;
+}
+
+/**
+ * Pure audit: for each roster member, the deals they were assigned to inside the window
+ * (current DRI + assignment stamp in range), and whether that count reaches the quota.
+ * `deals` may include rows outside the window (the Notion query is only lower-bounded).
  */
 export function computeQuotaResults(
   members: QuotaRosterMember[],
@@ -70,15 +91,15 @@ export function computeQuotaResults(
   window: AuditWindow,
   quota: number
 ): QuotaAuditResult[] {
-  const inWindow = deals.filter((d) => {
-    if (!d.createdTime) return false;
-    const t = new Date(d.createdTime).getTime();
+  const inWindow = (iso: string) => {
+    if (!iso) return false;
+    const t = new Date(iso).getTime();
     return t >= window.start.getTime() && t < window.end.getTime();
-  });
+  };
   return members.map((member) => {
-    const mine = inWindow
-      .filter((d) => d.driUserIds.includes(member.notionUserId))
-      .sort((a, b) => a.createdTime.localeCompare(b.createdTime));
+    const mine = deals
+      .filter((d) => d.driUserIds.includes(member.notionUserId) && inWindow(assignedAtIso(d, member.notionUserId)))
+      .sort((a, b) => assignedAtIso(a, member.notionUserId).localeCompare(assignedAtIso(b, member.notionUserId)));
     return {
       member,
       weekStartIso: window.weekStartIso,
@@ -90,7 +111,7 @@ export function computeQuotaResults(
   });
 }
 
-function fmtDate(iso: string): string {
+export function fmtDate(iso: string): string {
   return new Date(`${iso}T12:00:00Z`).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
@@ -111,7 +132,7 @@ export function buildQuotaPost(
 
   const lines = [
     `:clipboard: *Weekly sponsorship quota audit* — ${fmtDate(window.weekStartIso)} → ${fmtDate(window.weekEndIso)}`,
-    `_Quota: ${quota} new sponsor assignment${plural} per ops member (a Pipeline deal opened this week with you as DRI)._`,
+    `_Quota: ${quota} new sponsor assignment${plural} per ops member (Pipeline deals you were made DRI on this week — new or re-assigned)._`,
   ];
   if (met.length > 0) {
     lines.push(`:white_check_mark: *Met (${met.length}/${total}):* ${met.map((r) => `${r.member.name} (${r.deals.length})`).join(' · ')}`);
@@ -125,6 +146,45 @@ export function buildQuotaPost(
   lines.push(
     `_Record: <${config.sponsorship.quotaAuditUrl}|📋 Weekly Quota Audit>. Get assigned with \`/sponsor claim <company>\` or \`/sponsor add <company> @you\`._`
   );
+  return lines.join('\n');
+}
+
+/**
+ * Ephemeral `/sponsor quota` text: the caller's own standing first (if they're on the
+ * roster), then the whole team's, so anyone can see where things stand before Saturday.
+ */
+export function formatQuotaStanding(
+  results: QuotaAuditResult[],
+  window: AuditWindow,
+  quota: number,
+  callerNotionId: string | null
+): string {
+  const header = `*Sponsor quota — week of ${fmtDate(window.weekStartIso)} → ${fmtDate(window.weekEndIso)}* (audited Sat 10am ET, posted to #${config.sponsorship.quotaChannel})`;
+  const lines = [header];
+
+  const mine = callerNotionId ? results.find((r) => r.member.notionUserId === callerNotionId) : undefined;
+  if (mine) {
+    const deals = mine.deals.length ? ` — ${mine.deals.map((d) => `<${d.url}|${d.company || 'Untitled'}>`).join(', ')}` : '';
+    const remaining = quota - mine.deals.length;
+    lines.push(
+      mine.met
+        ? `:white_check_mark: *You: ${mine.deals.length}/${quota}* — quota met${deals}`
+        : `:hourglass_flowing_sand: *You: ${mine.deals.length}/${quota}*${deals}. ${remaining} more assignment${remaining === 1 ? '' : 's'} by Saturday 10am.`
+    );
+  } else {
+    lines.push("_You're not on the Ops Quota Roster (ops leads can add you in Notion)._");
+  }
+
+  const sorted = [...results].sort(
+    (a, b) => b.deals.length - a.deals.length || a.member.name.localeCompare(b.member.name)
+  );
+  if (sorted.length > 0) {
+    const met = sorted.filter((r) => r.met).length;
+    lines.push(
+      `*Team (${met}/${sorted.length} met):* ${sorted.map((r) => `${r.met ? '✅ ' : ''}${r.member.name} ${r.deals.length}/${quota}`).join(' · ')}`
+    );
+  }
+  lines.push('_Counts Pipeline deals you were made DRI on this week (new or re-assigned). `/sponsor claim <company>` or `/sponsor add <company> @you` to add one._');
   return lines.join('\n');
 }
 
@@ -166,9 +226,13 @@ export async function runQuotaAudit(
   const client = makeSlackClient();
   const notion = new SponsorNotion();
 
+  // Bring the DRI ledger up to date first so re-assignments since the last hourly sync
+  // are dated (skipped in dry runs — no writes — so counts may lag by up to an hour).
+  if (!dryRun) await syncDriLedger(notion);
+
   const [members, deals, notionUsers] = await Promise.all([
     notion.queryQuotaRoster(),
-    notion.queryDealsCreatedSince(window.start.toISOString()),
+    notion.queryDealsEditedSince(window.start.toISOString()),
     notion.listNotionUsers(),
   ]);
   if (members.length === 0) {

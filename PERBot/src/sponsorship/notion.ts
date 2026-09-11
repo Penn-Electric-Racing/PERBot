@@ -93,6 +93,27 @@ function readRelationCount(prop: any): number {
   return (prop?.relation ?? []).length;
 }
 
+/** Name of the Pipeline rich-text property holding PERBot's DRI ledger. */
+export const DRI_LEDGER_PROP = 'DRI assigned';
+
+/** Parse the ledger text ("<userId> <ISO>" per line; malformed lines ignored). */
+export function parseDriLedger(text: string): Record<string, string> {
+  const ledger: Record<string, string> = {};
+  for (const line of text.split('\n')) {
+    const m = line.trim().match(/^([0-9a-f-]{32,36})\s+(\d{4}-\d{2}-\d{2}T[^\s]+)$/i);
+    if (m && !Number.isNaN(Date.parse(m[2]!))) ledger[m[1]!.toLowerCase()] = m[2]!;
+  }
+  return ledger;
+}
+
+/** Serialize a ledger back to the property text (sorted for stable diffs). */
+export function formatDriLedger(ledger: Record<string, string>): string {
+  return Object.entries(ledger)
+    .sort(([, a], [, b]) => a.localeCompare(b))
+    .map(([id, iso]) => `${id} ${iso}`)
+    .join('\n');
+}
+
 function parseBankRow(page: any): BankLeadRow {
   const p = page?.properties ?? {};
   const contactName = readRichText(p['Contact name']);
@@ -139,6 +160,7 @@ function parsePipelineRow(page: any): PipelineRow {
     nextActionDate: readDate(p['Next action date']),
     notes: readRichText(p['Notes']),
     createdTime: typeof page?.created_time === 'string' ? page.created_time : '',
+    driAssignedAt: parseDriLedger(readRichText(p[DRI_LEDGER_PROP])),
   };
 }
 
@@ -335,6 +357,18 @@ export class SponsorNotion {
       Type: { select: { name: input.type } },
       Category: { multi_select: input.categories.map((name) => ({ name })) },
       DRI: { people: input.driNotionIds.map((id) => ({ id })) },
+      // Seed the DRI ledger so the assignment is dated even before the hourly sync runs.
+      [DRI_LEDGER_PROP]: {
+        rich_text: [
+          {
+            text: {
+              content: formatDriLedger(
+                Object.fromEntries(input.driNotionIds.map((id) => [id.toLowerCase(), new Date().toISOString()]))
+              ),
+            },
+          },
+        ],
+      },
       'Bank source': { relation: [{ id: input.bankPageId }] },
       'Next action': { rich_text: [{ text: { content: input.nextAction.slice(0, 200) } }] },
       'Next action date': { date: { start: input.nextActionDateIso } },
@@ -402,11 +436,20 @@ export class SponsorNotion {
   }
 
   /**
-   * Deals whose Notion page was created at/after `sinceIso` (an ISO datetime) — feeds the
-   * weekly quota audit, which counts DRI assignments by when the deal entered the Pipeline.
+   * Deals edited (which includes created, and re-assigned — the DRI sync stamps the page)
+   * at/after `sinceIso` — a superset of every deal that can carry an assignment inside the
+   * quota window, so the audit doesn't have to scan the whole Pipeline.
    */
-  async queryDealsCreatedSince(sinceIso: string): Promise<PipelineRow[]> {
-    return this.queryPipeline({ timestamp: 'created_time', created_time: { on_or_after: sinceIso } });
+  async queryDealsEditedSince(sinceIso: string): Promise<PipelineRow[]> {
+    return this.queryPipeline({ timestamp: 'last_edited_time', last_edited_time: { on_or_after: sinceIso } });
+  }
+
+  /** Overwrite a deal's DRI ledger (`DRI assigned`) — used by the hourly DRI sync. */
+  async writeDriLedger(pageId: string, ledger: Record<string, string>): Promise<void> {
+    await this.client.pages.update({
+      page_id: pageId,
+      properties: { [DRI_LEDGER_PROP]: { rich_text: [{ text: { content: formatDriLedger(ledger).slice(0, 1900) } }] } } as any,
+    });
   }
 
   /** Deals flagged Reply pending by the Phase-3 flow — awaiting a DRI DM. */
