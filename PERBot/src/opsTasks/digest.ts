@@ -6,7 +6,7 @@ import { makeSlackClient } from '../sponsorship/jobs/shared.js';
 import { OpsTask, OpsTasksNotion } from './notion.js';
 
 /**
- * Sunday 6 PM ET Ops-tasks digest — DMs ONLY, never a channel post (Arjun's call,
+ * Sunday 10 AM ET Ops-tasks digest — DMs ONLY, never a channel post (Arjun's call,
  * 2026-09-11). Each Ops member with an open task in the Ops Tasks database gets one
  * short DM listing exactly their own open tasks: 🔴 on anything past Due, and a
  * "carried N wks" tag on anything assigned before the most recent Saturday. Members
@@ -16,18 +16,18 @@ import { OpsTask, OpsTasksNotion } from './notion.js';
  * set by hand when the meeting page is duplicated. If it is ever forgotten, a Week-based
  * query goes silent; a Status-based one keeps working and is the honest picture anyway.
  *
- * Idempotency: two DST cron triggers, and only the one landing on 6pm ET does the work
+ * Idempotency: two DST cron triggers, and only the one landing on 10am ET does the work
  * (same pattern as the sponsorship digest). DMs post straight to the user ID.
  */
 
 /** Seed rows created so Notion would show every member's group; skipped until renamed. */
 export const PLACEHOLDER_RE = /^rename me/i;
 
-function isSunday6pmET(): boolean {
+function isSunday10amET(): boolean {
   const now = new Date();
   const weekday = now.toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/New_York' });
   const hour = Number(now.toLocaleString('en-US', { hour: '2-digit', hour12: false, timeZone: 'America/New_York' }));
-  return weekday === 'Sunday' && hour === 18;
+  return weekday === 'Sunday' && hour === 10;
 }
 
 export function isPlaceholder(task: OpsTask): boolean {
@@ -80,8 +80,8 @@ export function buildDigest(tasks: OpsTask[]): string {
 }
 
 export async function runOpsDigest(force = process.env.FORCE_OPS_DIGEST?.toLowerCase() === 'true'): Promise<void> {
-  if (!force && !isSunday6pmET()) {
-    logger.info('Ops digest: not Sunday 6pm (ET) and not forced — skipping.');
+  if (!force && !isSunday10amET()) {
+    logger.info('Ops digest: not Sunday 10am (ET) and not forced — skipping.');
     return;
   }
   const dryRun = process.env.OPS_DIGEST_DRY_RUN?.toLowerCase() === 'true';
