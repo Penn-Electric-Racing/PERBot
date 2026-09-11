@@ -7,6 +7,8 @@ import { findMatchingProspects, scoutCompanies } from './discovery.js';
 import { draftOutreachEmail } from './emailDraft.js';
 import { DomainResolutionError, enrichCompany } from './enrichCompany.js';
 import { fetchSlackDirectory, indexNotionUsers, resolveSlackHandles, slackUserToNotionId } from './identity.js';
+import { syncDriLedger } from './jobs/driSync.js';
+import { computeQuotaResults, currentAuditWindow, formatQuotaStanding } from './jobs/quotaAudit.js';
 import { resolveChannelId } from './jobs/shared.js';
 import { announceWinIfNew, resolveDriMentions, totalRaised } from './jobs/winPost.js';
 import { SponsorNotion } from './notion.js';
@@ -18,7 +20,7 @@ const notion = new SponsorNotion();
 /**
  * Slack surface for the sponsorship module: the `/sponsor` command
  * (add / claim / ask / email / find / scout / log / won / stage / score / rank /
- * leaderboard / me).
+ * leaderboard / quota / me).
  * Registered from app.ts via registerSponsorCommands.
  * Drafting guardrail: `/sponsor email` fills the team's own template; the LLM writes
  * only the fit paragraph, the draft is never auto-sent, and a human reviews it first.
@@ -39,6 +41,7 @@ const USAGE = [
   '• `/sponsor find <what we need>` — search the *unclaimed* Bank for leads matching a need (e.g. `find cooling jackets for our motor`)',
   '• `/sponsor scout <what we need>` — hunt for *new* companies not in the Bank yet (AI-suggested, homepage-checked; add keepers with `/sponsor add`)',
   '• `/sponsor leaderboard` — who’s raised what: $ won + active deals per person (only you see it)',
+  '• `/sponsor quota` — where you (and the team) stand on this week’s 3-assignment quota before Saturday’s audit',
   '• `/sponsor me` — show your active deals + next actions',
 ].join('\n');
 
@@ -270,6 +273,31 @@ async function handleMe(client: WebClient, respond: RespondFn, slackUserId: stri
 
   const text = [`*Your active deals (${deals.length}):*`, ...deals.map(formatDealLine)].join('\n');
   await respond({ response_type: 'ephemeral', text });
+}
+
+// --- /sponsor quota ------------------------------------------------------------
+
+/**
+ * Mid-week self-check against the Saturday quota audit: same roster, same window
+ * (the one ending next Saturday 10am ET), same counting rule (`computeQuotaResults`),
+ * so what people see here is exactly what the audit will post. Ephemeral, read-only.
+ */
+async function handleQuota(client: WebClient, respond: RespondFn, slackUserId: string): Promise<void> {
+  const window = currentAuditWindow();
+  const quota = config.sponsorship.weeklyQuota;
+  await syncDriLedger(notion); // date any re-assignment made since the last hourly sync
+  const [members, deals, notionUsers] = await Promise.all([
+    notion.queryQuotaRoster(),
+    notion.queryDealsEditedSince(window.start.toISOString()),
+    notion.listNotionUsers(),
+  ]);
+  if (members.length === 0) {
+    await respond({ response_type: 'ephemeral', text: 'The Ops Quota Roster has no active members — nothing to check.' });
+    return;
+  }
+  const callerNotionId = await slackUserToNotionId(client, slackUserId, indexNotionUsers(notionUsers));
+  const results = computeQuotaResults(members, deals, window, quota);
+  await respond({ response_type: 'ephemeral', text: formatQuotaStanding(results, window, quota, callerNotionId) });
 }
 
 // --- /sponsor email ------------------------------------------------------------
@@ -1057,6 +1085,12 @@ export function registerSponsorCommands(app: App): void {
         case 'top':
           await ack();
           await handleLeaderboard(respond);
+          break;
+
+        case 'quota':
+          // Runs the DRI sync + three Notion queries — ack fast, respond via response_url.
+          await ack({ response_type: 'ephemeral', text: ':clipboard: Checking this week’s quota…' });
+          await handleQuota(client, respond, command.user_id);
           break;
 
         case 'me':

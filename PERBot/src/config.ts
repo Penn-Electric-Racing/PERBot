@@ -86,6 +86,13 @@ export const config = {
     // The team's outreach template page ("Sponsorship Email Template" under REV12
     // Operations) — fetched live by /sponsor email so ops can edit it without a deploy.
     emailTemplatePageId: optionalString('SPONSOR_EMAIL_TEMPLATE_PAGE_ID', '393560bc-c039-8097-be19-fdc8876bef9b'),
+    // Weekly quota audit (Saturday 10am ET): who's on the hook (👥 Ops Quota Roster), the
+    // per-week record (📋 Weekly Quota Audit), where the call-out lands, and the bar.
+    quotaRosterDataSourceId: optionalString('SPONSOR_QUOTA_ROSTER_DS_ID', '62729c68-535c-4dd0-a633-2feaf6e2b853'),
+    quotaAuditDataSourceId: optionalString('SPONSOR_QUOTA_AUDIT_DS_ID', '784770f3-8276-4347-89e0-d677c53576a2'),
+    quotaAuditUrl: optionalString('SPONSOR_QUOTA_AUDIT_URL', 'https://www.notion.so/acc29c47cfd44d02b5e5835d5ed6a090'),
+    quotaChannel: optionalString('SPONSOR_QUOTA_CHANNEL', 'perbot_spam'),
+    weeklyQuota: optionalNumber('SPONSOR_WEEKLY_QUOTA', 3),
   },
   github: {
     token: process.env.GITHUB_TOKEN?.trim() || '',

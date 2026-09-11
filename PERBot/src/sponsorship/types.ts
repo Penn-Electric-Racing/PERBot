@@ -126,6 +126,35 @@ export interface PipelineRow {
   nextAction: string | null;
   nextActionDate: string | null;
   notes: string;
+  /** ISO datetime the Notion page was created — when the deal entered the Pipeline. */
+  createdTime: string;
+  /**
+   * PERBot's DRI ledger (`DRI assigned` rich text): Notion user ID → ISO datetime that person
+   * first appeared on this deal's DRI. Maintained by the hourly DRI sync (jobs/driSync.ts) so
+   * a re-assignment onto an older deal is dated — the quota audit counts by these stamps.
+   */
+  driAssignedAt: Record<string, string>;
+}
+
+/** An active row of the 👥 Ops Quota Roster — a member held to the weekly quota. */
+export interface QuotaRosterMember {
+  /** Display name from the roster's title (humans maintain it; Notion display names can be blank/emails). */
+  name: string;
+  /** The member's Notion user ID — matched against Pipeline DRI. */
+  notionUserId: string;
+}
+
+/** One member's result for one audit week — what gets written to 📋 Weekly Quota Audit. */
+export interface QuotaAuditResult {
+  member: QuotaRosterMember;
+  /** YYYY-MM-DD (ET) — window opens Sat 10:00 ET on this date. */
+  weekStartIso: string;
+  /** YYYY-MM-DD (ET) — window closes Sat 10:00 ET on this date; the audit key. */
+  weekEndIso: string;
+  /** Pipeline deals this member was assigned to (DRI stamp, else deal creation) inside the window. */
+  deals: PipelineRow[];
+  quota: number;
+  met: boolean;
 }
 
 /** A verified contact from Hunter — the ONLY source of contact data. */

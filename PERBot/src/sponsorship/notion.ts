@@ -11,6 +11,8 @@ import {
   NotionUser,
   PipelineDealInput,
   PipelineRow,
+  QuotaAuditResult,
+  QuotaRosterMember,
   SponsorType,
   Stage,
   WonKind,
@@ -91,6 +93,27 @@ function readRelationCount(prop: any): number {
   return (prop?.relation ?? []).length;
 }
 
+/** Name of the Pipeline rich-text property holding PERBot's DRI ledger. */
+export const DRI_LEDGER_PROP = 'DRI assigned';
+
+/** Parse the ledger text ("<userId> <ISO>" per line; malformed lines ignored). */
+export function parseDriLedger(text: string): Record<string, string> {
+  const ledger: Record<string, string> = {};
+  for (const line of text.split('\n')) {
+    const m = line.trim().match(/^([0-9a-f-]{32,36})\s+(\d{4}-\d{2}-\d{2}T[^\s]+)$/i);
+    if (m && !Number.isNaN(Date.parse(m[2]!))) ledger[m[1]!.toLowerCase()] = m[2]!;
+  }
+  return ledger;
+}
+
+/** Serialize a ledger back to the property text (sorted for stable diffs). */
+export function formatDriLedger(ledger: Record<string, string>): string {
+  return Object.entries(ledger)
+    .sort(([, a], [, b]) => a.localeCompare(b))
+    .map(([id, iso]) => `${id} ${iso}`)
+    .join('\n');
+}
+
 function parseBankRow(page: any): BankLeadRow {
   const p = page?.properties ?? {};
   const contactName = readRichText(p['Contact name']);
@@ -136,6 +159,8 @@ function parsePipelineRow(page: any): PipelineRow {
     nextAction: readRichText(p['Next action']),
     nextActionDate: readDate(p['Next action date']),
     notes: readRichText(p['Notes']),
+    createdTime: typeof page?.created_time === 'string' ? page.created_time : '',
+    driAssignedAt: parseDriLedger(readRichText(p[DRI_LEDGER_PROP])),
   };
 }
 
@@ -332,6 +357,18 @@ export class SponsorNotion {
       Type: { select: { name: input.type } },
       Category: { multi_select: input.categories.map((name) => ({ name })) },
       DRI: { people: input.driNotionIds.map((id) => ({ id })) },
+      // Seed the DRI ledger so the assignment is dated even before the hourly sync runs.
+      [DRI_LEDGER_PROP]: {
+        rich_text: [
+          {
+            text: {
+              content: formatDriLedger(
+                Object.fromEntries(input.driNotionIds.map((id) => [id.toLowerCase(), new Date().toISOString()]))
+              ),
+            },
+          },
+        ],
+      },
       'Bank source': { relation: [{ id: input.bankPageId }] },
       'Next action': { rich_text: [{ text: { content: input.nextAction.slice(0, 200) } }] },
       'Next action date': { date: { start: input.nextActionDateIso } },
@@ -396,6 +433,23 @@ export class SponsorNotion {
   /** Find Pipeline deals whose Company title contains `name` (for `/sponsor log`). */
   async findDealsByCompany(name: string): Promise<PipelineRow[]> {
     return this.queryPipeline({ property: 'Company', title: { contains: name } });
+  }
+
+  /**
+   * Deals edited (which includes created, and re-assigned — the DRI sync stamps the page)
+   * at/after `sinceIso` — a superset of every deal that can carry an assignment inside the
+   * quota window, so the audit doesn't have to scan the whole Pipeline.
+   */
+  async queryDealsEditedSince(sinceIso: string): Promise<PipelineRow[]> {
+    return this.queryPipeline({ timestamp: 'last_edited_time', last_edited_time: { on_or_after: sinceIso } });
+  }
+
+  /** Overwrite a deal's DRI ledger (`DRI assigned`) — used by the hourly DRI sync. */
+  async writeDriLedger(pageId: string, ledger: Record<string, string>): Promise<void> {
+    await this.client.pages.update({
+      page_id: pageId,
+      properties: { [DRI_LEDGER_PROP]: { rich_text: [{ text: { content: formatDriLedger(ledger).slice(0, 1900) } }] } } as any,
+    });
   }
 
   /** Deals flagged Reply pending by the Phase-3 flow — awaiting a DRI DM. */
@@ -465,6 +519,79 @@ export class SponsorNotion {
       } as any,
     });
     logger.info(`Set stage ${stage}: ${row.company} (${row.id}).`);
+  }
+
+  // --- Weekly quota audit -------------------------------------------------------
+
+  /**
+   * Active members of the 👥 Ops Quota Roster. Rows without a Member person are skipped
+   * with a warning (nothing to match a DRI against). Ops leads edit this list in Notion.
+   */
+  async queryQuotaRoster(): Promise<QuotaRosterMember[]> {
+    const members: QuotaRosterMember[] = [];
+    let cursor: string | undefined;
+    do {
+      const response: any = await this.client.dataSources.query({
+        data_source_id: config.sponsorship.quotaRosterDataSourceId,
+        filter: { property: 'Active', checkbox: { equals: true } },
+        start_cursor: cursor,
+        page_size: 100,
+      });
+      for (const page of response.results ?? []) {
+        const p = page?.properties ?? {};
+        const name = readTitle(p['Name']);
+        const notionUserId = readPeopleIds(p['Member'])[0];
+        if (!notionUserId) {
+          logger.warn(`Quota roster: "${name || page.id}" has no Member person — skipping.`);
+          continue;
+        }
+        members.push({ name: name || notionUserId, notionUserId });
+      }
+      cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
+    } while (cursor);
+    return members;
+  }
+
+  /**
+   * Write one member's weekly result to 📋 Weekly Quota Audit — creating the row for
+   * (member, week end) or updating it if a previous run already wrote one (re-runs and
+   * forced runs are safe; the row always reflects the latest check).
+   */
+  async upsertQuotaAuditRow(result: QuotaAuditResult): Promise<BankPageRef> {
+    const { member, weekStartIso, weekEndIso } = result;
+    const existing: any = await this.client.dataSources.query({
+      data_source_id: config.sponsorship.quotaAuditDataSourceId,
+      filter: {
+        and: [
+          { property: 'Week end', date: { equals: weekEndIso } },
+          { property: 'Member', people: { contains: member.notionUserId } },
+        ],
+      },
+      page_size: 1,
+    });
+
+    const properties: Record<string, any> = {
+      Name: { title: [{ text: { content: `${member.name} — week ending ${weekEndIso}`.slice(0, 200) } }] },
+      Member: { people: [{ id: member.notionUserId }] },
+      'Week start': { date: { start: weekStartIso } },
+      'Week end': { date: { start: weekEndIso } },
+      Assigned: { number: result.deals.length },
+      Quota: { number: result.quota },
+      Met: { checkbox: result.met },
+      Deals: { relation: result.deals.map((d) => ({ id: d.id })) },
+      'Checked at': { date: { start: new Date().toISOString() } },
+    };
+
+    const hit = (existing.results ?? [])[0];
+    if (hit) {
+      const updated: any = await this.client.pages.update({ page_id: hit.id, properties: properties as any });
+      return { id: updated.id, url: updated.url };
+    }
+    const created: any = await this.client.pages.create({
+      parent: { type: 'data_source_id', data_source_id: config.sponsorship.quotaAuditDataSourceId },
+      properties: properties as any,
+    });
+    return { id: created.id, url: created.url };
   }
 
   // --- Page content (email template + drafts) ----------------------------------

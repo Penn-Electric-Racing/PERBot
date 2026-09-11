@@ -1,0 +1,52 @@
+name: Sponsorship — Saturday Quota Audit
+
+# Saturday ~10am ET: check every active member of the 👥 Ops Quota Roster against the
+# weekly sponsor-assignment quota (Pipeline deals opened this week with them as DRI),
+# record the result per member in 📋 Weekly Quota Audit, and post one message to
+# #perbot_spam that @-mentions only the people below quota. Two cron triggers cover the
+# EDT/EST offset; the script's isSaturday10amET() time gate makes double-fires safe, and a
+# per-week Slack metadata marker blocks a duplicate post on manual re-runs.
+on:
+  schedule:
+    - cron: '0 14 * * 6' # 10am EDT
+    - cron: '0 15 * * 6' # 10am EST
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Run even if it is not Saturday 10am ET'
+        type: boolean
+        default: false
+      dry_run:
+        description: 'Print the post and skip all writes (Notion + Slack)'
+        type: boolean
+        default: false
+
+jobs:
+  quota-audit:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: sponsor-quota-audit
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: PERBot/package-lock.json
+
+      - name: Install dependencies
+        working-directory: PERBot
+        run: npm ci
+
+      - name: Audit the weekly sponsor quota
+        working-directory: PERBot
+        run: npm run job:sponsor-quota
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          SPONSOR_QUOTA_CHANNEL: ${{ vars.SPONSOR_QUOTA_CHANNEL || 'perbot_spam' }}
+          SPONSOR_WEEKLY_QUOTA: ${{ vars.SPONSOR_WEEKLY_QUOTA || '3' }}
+          FORCE_QUOTA_AUDIT: ${{ inputs.force }}
+          QUOTA_DRY_RUN: ${{ inputs.dry_run }}

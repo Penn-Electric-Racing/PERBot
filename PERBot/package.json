@@ -17,6 +17,8 @@
     "job:sponsor-stale": "tsx src/sponsorship/jobs/staleDm.ts",
     "job:sponsor-reply": "tsx src/sponsorship/jobs/replyDm.ts",
     "job:sponsor-digest": "tsx src/sponsorship/jobs/weeklyDigest.ts",
+    "job:sponsor-quota": "tsx src/sponsorship/jobs/quotaAudit.ts",
+    "job:sponsor-dri-sync": "tsx src/sponsorship/jobs/driSync.ts",
     "check": "tsc --noEmit"
   },
   "dependencies": {
