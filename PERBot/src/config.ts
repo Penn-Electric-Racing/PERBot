@@ -94,6 +94,16 @@ export const config = {
     quotaChannel: optionalString('SPONSOR_QUOTA_CHANNEL', 'perbot_spam'),
     weeklyQuota: optionalNumber('SPONSOR_WEEKLY_QUOTA', 3),
   },
+  opsTasks: {
+    // Ops Tasks database under REV12 Operations (see CLAUDE.md "Notion IDs"): one row per
+    // action item a member types under their name on the Saturday meeting page.
+    dataSourceId: optionalString('OPS_TASKS_DS_ID', 'a8afc6ec-29d6-4308-b779-ad4235b35e80'),
+    // The database's "My open" view (Owner = me, Status != Done) — linked from the digest DM.
+    myOpenViewUrl: optionalString(
+      'OPS_TASKS_MY_OPEN_URL',
+      'https://www.notion.so/20cbf9381bcb45f99125e1468de321a3?v=3d8560bcc0398150b213000c6479f533'
+    ),
+  },
   github: {
     token: process.env.GITHUB_TOKEN?.trim() || '',
     repo: optionalString('GITHUB_REPO', 'Penn-Electric-Racing/PERBot'),

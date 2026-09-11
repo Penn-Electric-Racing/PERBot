@@ -19,6 +19,7 @@
     "job:sponsor-digest": "tsx src/sponsorship/jobs/weeklyDigest.ts",
     "job:sponsor-quota": "tsx src/sponsorship/jobs/quotaAudit.ts",
     "job:sponsor-dri-sync": "tsx src/sponsorship/jobs/driSync.ts",
+    "job:ops-digest": "tsx src/opsTasks/digest.ts",
     "check": "tsc --noEmit"
   },
   "dependencies": {
