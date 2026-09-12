@@ -1,0 +1,48 @@
+name: Ops Tasks — Sunday Digest DM
+
+# Sunday ~10am ET: DM each Ops member their own open tasks from the Ops Tasks Notion
+# database (🔴 past due, "carried N wks" on rollovers). DMs only — never a channel post.
+# Two cron triggers cover the EDT/EST offset; the script's isSunday10amET() time-check
+# makes double-fires safe. Members with nothing open get no DM (silence is valid).
+on:
+  schedule:
+    - cron: '0 14 * * 0' # 10am EDT
+    - cron: '0 15 * * 0' # 10am EST
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Run even if it is not Sunday 10am ET'
+        type: boolean
+        default: false
+      dry_run:
+        description: 'Print the DMs to the log instead of sending them'
+        type: boolean
+        default: false
+
+jobs:
+  ops-digest:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ops-tasks-digest
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: PERBot/package-lock.json
+
+      - name: Install dependencies
+        working-directory: PERBot
+        run: npm ci
+
+      - name: DM members their open Ops tasks
+        working-directory: PERBot
+        run: npm run job:ops-digest
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          FORCE_OPS_DIGEST: ${{ inputs.force }}
+          OPS_DIGEST_DRY_RUN: ${{ inputs.dry_run }}
