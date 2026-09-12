@@ -18,7 +18,7 @@
     "job:sponsor-reply": "tsx src/sponsorship/jobs/replyDm.ts",
     "job:sponsor-digest": "tsx src/sponsorship/jobs/weeklyDigest.ts",
     "job:sponsor-quota": "tsx src/sponsorship/jobs/quotaAudit.ts",
-    "job:sponsor-dri-sync": "tsx src/sponsorship/jobs/driSync.ts",
+    "job:sponsor-stage-sync": "tsx src/sponsorship/jobs/stageSync.ts",
     "job:ops-digest": "tsx src/opsTasks/digest.ts",
     "check": "tsc --noEmit"
   },

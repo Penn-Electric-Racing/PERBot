@@ -5,17 +5,17 @@ import { etWallTimeToUtc, isoAddDays, todayIsoET } from '../dates.js';
 import { fetchSlackDirectory, Indexed, notionUserToSlackId } from '../identity.js';
 import { SponsorNotion } from '../notion.js';
 import { NotionUser, PipelineRow, QuotaAuditResult, QuotaRosterMember } from '../types.js';
-import { syncDriLedger } from './driSync.js';
+import { syncContactedStamps } from './stageSync.js';
 import { alreadyPosted, makeSlackClient, metadataFor, resolveChannelId, WinMeta } from './shared.js';
 
 /**
  * Saturday 10 AM ET weekly quota audit: every active member of the 👥 Ops Quota Roster
  * (a Notion DB ops leads maintain — no deploy to change who's on the hook) must have
- * been assigned as DRI on `config.sponsorship.weeklyQuota` Pipeline deals in the past
- * week. "Assigned this week" = the member's DRI stamp on the deal (PERBot's `DRI assigned`
- * ledger, kept by jobs/driSync.ts; falls back to the deal's creation time) falls inside the
- * window [last Sat 10:00 ET, this Sat 10:00 ET). So new deals AND re-assignments onto
- * older deals count; co-owned deals credit each DRI in full (same rule as the leaderboard).
+ * moved `config.sponsorship.weeklyQuota` of their Pipeline deals out of Prospect in the
+ * past week — i.e. sent outreach. "Contacted this week" = the deal's `Contacted at` stamp
+ * (first move Prospect → Contacted / In talks / Won; set by `/sponsor stage`/`won` or the
+ * hourly stage sync for Notion edits) falls inside [last Sat 10:00 ET, this Sat 10:00 ET),
+ * credited to the deal's current DRI(s) — co-owned deals credit each in full.
  *
  * Output: (1) one row per member per week upserted into 📋 Weekly Quota Audit — the
  * durable record of who met quota and who didn't; (2) ONE channel post (#perbot_spam)
@@ -75,15 +75,10 @@ export function currentAuditWindow(now: Date = new Date()): AuditWindow {
   return auditWindow(isoAddDays(todayIso, daysToSaturday));
 }
 
-/** When `userId` was assigned to `deal`: the ledger stamp, else the deal's creation time. */
-export function assignedAtIso(deal: PipelineRow, userId: string): string {
-  return deal.driAssignedAt[userId.toLowerCase()] ?? deal.createdTime;
-}
-
 /**
- * Pure audit: for each roster member, the deals they were assigned to inside the window
- * (current DRI + assignment stamp in range), and whether that count reaches the quota.
- * `deals` may include rows outside the window (the Notion query is only lower-bounded).
+ * Pure audit: for each roster member, their deals (current DRI) whose `Contacted at` falls
+ * inside the window, and whether that count reaches the quota. `deals` may include rows
+ * outside the window (the Notion query is only lower-bounded).
  */
 export function computeQuotaResults(
   members: QuotaRosterMember[],
@@ -96,10 +91,11 @@ export function computeQuotaResults(
     const t = new Date(iso).getTime();
     return t >= window.start.getTime() && t < window.end.getTime();
   };
+  const contacted = deals.filter((d) => d.contactedAt && inWindow(d.contactedAt));
   return members.map((member) => {
-    const mine = deals
-      .filter((d) => d.driUserIds.includes(member.notionUserId) && inWindow(assignedAtIso(d, member.notionUserId)))
-      .sort((a, b) => assignedAtIso(a, member.notionUserId).localeCompare(assignedAtIso(b, member.notionUserId)));
+    const mine = contacted
+      .filter((d) => d.driUserIds.includes(member.notionUserId))
+      .sort((a, b) => a.contactedAt!.localeCompare(b.contactedAt!));
     return {
       member,
       weekStartIso: window.weekStartIso,
@@ -132,7 +128,7 @@ export function buildQuotaPost(
 
   const lines = [
     `:clipboard: *Weekly sponsorship quota audit* — ${fmtDate(window.weekStartIso)} → ${fmtDate(window.weekEndIso)}`,
-    `_Quota: ${quota} new sponsor assignment${plural} per ops member (Pipeline deals you were made DRI on this week — new or re-assigned)._`,
+    `_Quota: ${quota} sponsor${plural} contacted per ops member (your Pipeline deals moved Prospect → Contacted this week)._`,
   ];
   if (met.length > 0) {
     lines.push(`:white_check_mark: *Met (${met.length}/${total}):* ${met.map((r) => `${r.member.name} (${r.deals.length})`).join(' · ')}`);
@@ -144,7 +140,7 @@ export function buildQuotaPost(
     lines.push(':tada: Everyone hit quota this week.');
   }
   lines.push(
-    `_Record: <${config.sponsorship.quotaAuditUrl}|📋 Weekly Quota Audit>. Get assigned with \`/sponsor claim <company>\` or \`/sponsor add <company> @you\`._`
+    `_Record: <${config.sponsorship.quotaAuditUrl}|📋 Weekly Quota Audit>. Send outreach, then \`/sponsor stage <company> Contacted\`._`
   );
   return lines.join('\n');
 }
@@ -169,7 +165,7 @@ export function formatQuotaStanding(
     lines.push(
       mine.met
         ? `:white_check_mark: *You: ${mine.deals.length}/${quota}* — quota met${deals}`
-        : `:hourglass_flowing_sand: *You: ${mine.deals.length}/${quota}*${deals}. ${remaining} more assignment${remaining === 1 ? '' : 's'} by Saturday 10am.`
+        : `:hourglass_flowing_sand: *You: ${mine.deals.length}/${quota}*${deals}. ${remaining} more to contact by Saturday 10am.`
     );
   } else {
     lines.push("_You're not on the Ops Quota Roster (ops leads can add you in Notion)._");
@@ -184,7 +180,7 @@ export function formatQuotaStanding(
       `*Team (${met}/${sorted.length} met):* ${sorted.map((r) => `${r.met ? '✅ ' : ''}${r.member.name} ${r.deals.length}/${quota}`).join(' · ')}`
     );
   }
-  lines.push('_Counts Pipeline deals you were made DRI on this week (new or re-assigned). `/sponsor claim <company>` or `/sponsor add <company> @you` to add one._');
+  lines.push('_Counts your Pipeline deals moved Prospect → Contacted this week. Send outreach, then `/sponsor stage <company> Contacted`._');
   return lines.join('\n');
 }
 
@@ -226,9 +222,9 @@ export async function runQuotaAudit(
   const client = makeSlackClient();
   const notion = new SponsorNotion();
 
-  // Bring the DRI ledger up to date first so re-assignments since the last hourly sync
-  // are dated (skipped in dry runs — no writes — so counts may lag by up to an hour).
-  if (!dryRun) await syncDriLedger(notion);
+  // Stamp any Notion-side stage moves since the last hourly sync first (skipped in dry
+  // runs — no writes — so counts may lag by up to an hour).
+  if (!dryRun) await syncContactedStamps(notion, false);
 
   const [members, deals, notionUsers] = await Promise.all([
     notion.queryQuotaRoster(),

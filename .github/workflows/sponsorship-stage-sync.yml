@@ -1,20 +1,20 @@
-name: Sponsorship — Hourly DRI Sync
+name: Sponsorship — Hourly Stage Sync
 
-# Keeps PERBot's DRI ledger (`DRI assigned` on each Pipeline deal) in step with the DRI
-# people property: stamps newly-added DRIs with the time they were noticed, drops removed
-# ones, backfills pre-ledger deals with their creation time. This is what lets the weekly
-# quota audit count re-assignments onto older deals. Idempotent — only changed deals are
-# written — so late/double cron fires are harmless.
+# Stamps `Contacted at` on Pipeline deals that have moved out of Prospect (Contacted /
+# In talks / Won) but weren't stamped yet — i.e. stage changes made in Notion rather than
+# via /sponsor stage. This is the weekly quota audit's signal ("sponsors contacted").
+# Once per deal, ever. Idempotent — only unstamped deals are written — so late/double
+# cron fires are harmless.
 on:
   schedule:
     - cron: '30 * * * *' # hourly, offset from the win-post job
   workflow_dispatch:
 
 jobs:
-  dri-sync:
+  stage-sync:
     runs-on: ubuntu-latest
     concurrency:
-      group: sponsor-dri-sync
+      group: sponsor-stage-sync
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
@@ -29,9 +29,9 @@ jobs:
         working-directory: PERBot
         run: npm ci
 
-      - name: Sync the DRI ledger
+      - name: Stamp Contacted at on newly-contacted deals
         working-directory: PERBot
-        run: npm run job:sponsor-dri-sync
+        run: npm run job:sponsor-stage-sync
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
