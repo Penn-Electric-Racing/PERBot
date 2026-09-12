@@ -129,11 +129,12 @@ export interface PipelineRow {
   /** ISO datetime the Notion page was created — when the deal entered the Pipeline. */
   createdTime: string;
   /**
-   * PERBot's DRI ledger (`DRI assigned` rich text): Notion user ID → ISO datetime that person
-   * first appeared on this deal's DRI. Maintained by the hourly DRI sync (jobs/driSync.ts) so
-   * a re-assignment onto an older deal is dated — the quota audit counts by these stamps.
+   * ISO datetime the deal first left Prospect (→ Contacted / In talks / Won) = outreach sent.
+   * Stamped instantly by `/sponsor stage` / `/sponsor won`, or by the hourly stage sync for
+   * edits made in Notion (jobs/stageSync.ts). Null while still Prospect (or Lost from Prospect).
+   * The weekly quota audit credits the deal's DRI(s) in the week of this stamp.
    */
-  driAssignedAt: Record<string, string>;
+  contactedAt: string | null;
 }
 
 /** An active row of the 👥 Ops Quota Roster — a member held to the weekly quota. */
@@ -151,7 +152,7 @@ export interface QuotaAuditResult {
   weekStartIso: string;
   /** YYYY-MM-DD (ET) — window closes Sat 10:00 ET on this date; the audit key. */
   weekEndIso: string;
-  /** Pipeline deals this member was assigned to (DRI stamp, else deal creation) inside the window. */
+  /** This member's deals whose `Contacted at` (first move out of Prospect) falls inside the window. */
   deals: PipelineRow[];
   quota: number;
   met: boolean;

@@ -93,26 +93,11 @@ function readRelationCount(prop: any): number {
   return (prop?.relation ?? []).length;
 }
 
-/** Name of the Pipeline rich-text property holding PERBot's DRI ledger. */
-export const DRI_LEDGER_PROP = 'DRI assigned';
+/** Pipeline date property PERBot stamps the first time a deal leaves Prospect. */
+export const CONTACTED_AT_PROP = 'Contacted at';
 
-/** Parse the ledger text ("<userId> <ISO>" per line; malformed lines ignored). */
-export function parseDriLedger(text: string): Record<string, string> {
-  const ledger: Record<string, string> = {};
-  for (const line of text.split('\n')) {
-    const m = line.trim().match(/^([0-9a-f-]{32,36})\s+(\d{4}-\d{2}-\d{2}T[^\s]+)$/i);
-    if (m && !Number.isNaN(Date.parse(m[2]!))) ledger[m[1]!.toLowerCase()] = m[2]!;
-  }
-  return ledger;
-}
-
-/** Serialize a ledger back to the property text (sorted for stable diffs). */
-export function formatDriLedger(ledger: Record<string, string>): string {
-  return Object.entries(ledger)
-    .sort(([, a], [, b]) => a.localeCompare(b))
-    .map(([id, iso]) => `${id} ${iso}`)
-    .join('\n');
-}
+/** Stages that mean outreach has gone out — reaching any of them from Prospect stamps `Contacted at`. */
+export const CONTACTED_STAGES: ReadonlySet<Stage> = new Set<Stage>(['Contacted', 'In talks', 'Won']);
 
 function parseBankRow(page: any): BankLeadRow {
   const p = page?.properties ?? {};
@@ -160,7 +145,7 @@ function parsePipelineRow(page: any): PipelineRow {
     nextActionDate: readDate(p['Next action date']),
     notes: readRichText(p['Notes']),
     createdTime: typeof page?.created_time === 'string' ? page.created_time : '',
-    driAssignedAt: parseDriLedger(readRichText(p[DRI_LEDGER_PROP])),
+    contactedAt: readDate(p[CONTACTED_AT_PROP]),
   };
 }
 
@@ -357,18 +342,6 @@ export class SponsorNotion {
       Type: { select: { name: input.type } },
       Category: { multi_select: input.categories.map((name) => ({ name })) },
       DRI: { people: input.driNotionIds.map((id) => ({ id })) },
-      // Seed the DRI ledger so the assignment is dated even before the hourly sync runs.
-      [DRI_LEDGER_PROP]: {
-        rich_text: [
-          {
-            text: {
-              content: formatDriLedger(
-                Object.fromEntries(input.driNotionIds.map((id) => [id.toLowerCase(), new Date().toISOString()]))
-              ),
-            },
-          },
-        ],
-      },
       'Bank source': { relation: [{ id: input.bankPageId }] },
       'Next action': { rich_text: [{ text: { content: input.nextAction.slice(0, 200) } }] },
       'Next action date': { date: { start: input.nextActionDateIso } },
@@ -444,11 +417,11 @@ export class SponsorNotion {
     return this.queryPipeline({ timestamp: 'last_edited_time', last_edited_time: { on_or_after: sinceIso } });
   }
 
-  /** Overwrite a deal's DRI ledger (`DRI assigned`) — used by the hourly DRI sync. */
-  async writeDriLedger(pageId: string, ledger: Record<string, string>): Promise<void> {
+  /** Stamp `Contacted at` (first move out of Prospect) — used by the hourly stage sync. */
+  async writeContactedAt(pageId: string, iso: string): Promise<void> {
     await this.client.pages.update({
       page_id: pageId,
-      properties: { [DRI_LEDGER_PROP]: { rich_text: [{ text: { content: formatDriLedger(ledger).slice(0, 1900) } }] } } as any,
+      properties: { [CONTACTED_AT_PROP]: { date: { start: iso } } } as any,
     });
   }
 
@@ -501,6 +474,8 @@ export class SponsorNotion {
     };
     if (kind) properties['Won kind'] = { select: { name: kind } };
     if (row.dealValue == null) properties['Deal value ($)'] = { number: amountUsd };
+    // Won straight from Prospect still means outreach happened — date it for the quota audit.
+    if (!row.contactedAt) properties[CONTACTED_AT_PROP] = { date: { start: new Date().toISOString() } };
     if (note) {
       const merged = `${dateIso}: WON — ${note}${row.notes ? `\n${row.notes}` : ''}`;
       properties['Notes'] = { rich_text: [{ text: { content: merged.slice(0, 1900) } }] };
@@ -509,15 +484,20 @@ export class SponsorNotion {
     logger.info(`Marked WON: ${row.company} ($${amountUsd}).`);
   }
 
-  /** Move a deal to any Stage and stamp Last contact. */
+  /**
+   * Move a deal to any Stage and stamp Last contact. The first move out of Prospect into
+   * Contacted / In talks / Won also stamps `Contacted at` (the quota audit's signal) — once
+   * per deal, so bouncing a deal back and forth never earns a second credit.
+   */
   async setStage(row: PipelineRow, stage: Stage, dateIso: string): Promise<void> {
-    await this.client.pages.update({
-      page_id: row.id,
-      properties: {
-        Stage: { select: { name: stage } },
-        'Last contact': { date: { start: dateIso } },
-      } as any,
-    });
+    const properties: Record<string, any> = {
+      Stage: { select: { name: stage } },
+      'Last contact': { date: { start: dateIso } },
+    };
+    if (CONTACTED_STAGES.has(stage) && !row.contactedAt) {
+      properties[CONTACTED_AT_PROP] = { date: { start: new Date().toISOString() } };
+    }
+    await this.client.pages.update({ page_id: row.id, properties: properties as any });
     logger.info(`Set stage ${stage}: ${row.company} (${row.id}).`);
   }
 
@@ -575,7 +555,7 @@ export class SponsorNotion {
       Member: { people: [{ id: member.notionUserId }] },
       'Week start': { date: { start: weekStartIso } },
       'Week end': { date: { start: weekEndIso } },
-      Assigned: { number: result.deals.length },
+      Contacted: { number: result.deals.length },
       Quota: { number: result.quota },
       Met: { checkbox: result.met },
       Deals: { relation: result.deals.map((d) => ({ id: d.id })) },

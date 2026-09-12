@@ -7,7 +7,7 @@ import { findMatchingProspects, scoutCompanies } from './discovery.js';
 import { draftOutreachEmail } from './emailDraft.js';
 import { DomainResolutionError, enrichCompany } from './enrichCompany.js';
 import { fetchSlackDirectory, indexNotionUsers, resolveSlackHandles, slackUserToNotionId } from './identity.js';
-import { syncDriLedger } from './jobs/driSync.js';
+import { syncContactedStamps } from './jobs/stageSync.js';
 import { computeQuotaResults, currentAuditWindow, formatQuotaStanding } from './jobs/quotaAudit.js';
 import { resolveChannelId } from './jobs/shared.js';
 import { announceWinIfNew, resolveDriMentions, totalRaised } from './jobs/winPost.js';
@@ -41,7 +41,7 @@ const USAGE = [
   '• `/sponsor find <what we need>` — search the *unclaimed* Bank for leads matching a need (e.g. `find cooling jackets for our motor`)',
   '• `/sponsor scout <what we need>` — hunt for *new* companies not in the Bank yet (AI-suggested, homepage-checked; add keepers with `/sponsor add`)',
   '• `/sponsor leaderboard` — who’s raised what: $ won + active deals per person (only you see it)',
-  '• `/sponsor quota` — where you (and the team) stand on this week’s 3-assignment quota before Saturday’s audit',
+  '• `/sponsor quota` — where you (and the team) stand on this week’s quota (3 deals moved to Contacted) before Saturday’s audit',
   '• `/sponsor me` — show your active deals + next actions',
 ].join('\n');
 
@@ -280,12 +280,12 @@ async function handleMe(client: WebClient, respond: RespondFn, slackUserId: stri
 /**
  * Mid-week self-check against the Saturday quota audit: same roster, same window
  * (the one ending next Saturday 10am ET), same counting rule (`computeQuotaResults`),
- * so what people see here is exactly what the audit will post. Ephemeral, read-only.
+ * so what people see here is exactly what the audit will post. Ephemeral.
  */
 async function handleQuota(client: WebClient, respond: RespondFn, slackUserId: string): Promise<void> {
   const window = currentAuditWindow();
   const quota = config.sponsorship.weeklyQuota;
-  await syncDriLedger(notion); // date any re-assignment made since the last hourly sync
+  await syncContactedStamps(notion, false); // date any Notion-side stage move since the last hourly sync
   const [members, deals, notionUsers] = await Promise.all([
     notion.queryQuotaRoster(),
     notion.queryDealsEditedSince(window.start.toISOString()),
