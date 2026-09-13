@@ -17,6 +17,13 @@ import { OpsTask, OpsTasksNotion } from './notion.js';
  * task, date) pre-filled with whatever it could parse; plain `/assign` opens it empty.
  * Mentions arrive as real `<@U…>` only if the command has link-escaping on; typed
  * `@handles` are resolved via the Slack directory (same as /sponsor). `me` = yourself.
+ *
+ * THREADS: Slack doesn't allow custom slash commands inside threads (platform rule), so
+ * two thread-friendly entry points share the same code path:
+ *   • a MESSAGE SHORTCUT ("Assign as Ops task" in a message's ··· menu, threads included)
+ *     that opens the form pre-filled with that message's text and author; and
+ *   • `@PERBot assign @person <task> [by <date>]` typed in the thread (app_mention).
+ * Both post the public confirmation as a reply IN that thread.
  */
 
 const ASSIGN_MODAL_ID = 'ops_assign_modal';
@@ -133,7 +140,15 @@ async function resolveOwners(client: WebClient, slackIds: string[], handles: str
   return { notionIds, resolvedSlackIds, unresolved };
 }
 
-function assignModal(meta: { ch: string; a: string }, prefill: { users: string[]; task: string; dueIso: string | null }) {
+export const ASSIGN_SHORTCUT_ID = 'ops_assign_shortcut';
+
+interface AssignMeta {
+  ch: string; // channel to post the public line in
+  a: string; // assigner Slack id
+  ts?: string; // thread to reply in (message shortcut / mention paths)
+}
+
+function assignModal(meta: AssignMeta, prefill: { users: string[]; task: string; dueIso: string | null }) {
   return {
     type: 'modal' as const,
     callback_id: ASSIGN_MODAL_ID,
@@ -228,7 +243,7 @@ export function registerAssignCommand(app: App): void {
       return;
     }
     await ack();
-    const meta = JSON.parse(view.private_metadata || '{}') as { ch: string; a: string };
+    const meta = JSON.parse(view.private_metadata || '{}') as AssignMeta;
     const assigner = (body as any)?.user?.id ?? meta.a;
     try {
       const { notionIds, resolvedSlackIds, unresolved } = await resolveOwners(client as WebClient, users, []);
@@ -246,7 +261,7 @@ export function registerAssignCommand(app: App): void {
       // Public post in the channel the command was run in; if the bot can't post there
       // (a private channel it isn't in), tell the assigner privately instead.
       try {
-        await client.chat.postMessage({ channel: meta.ch, text: publicText, unfurl_links: false });
+        await client.chat.postMessage({ channel: meta.ch, ...(meta.ts ? { thread_ts: meta.ts } : {}), text: publicText, unfurl_links: false });
       } catch {
         await client.chat.postMessage({ channel: assigner, text: `${publicText}\n_(couldn't post in that channel — invite PERBot to it)_`, unfurl_links: false });
       }
@@ -256,4 +271,81 @@ export function registerAssignCommand(app: App): void {
       await client.chat.postMessage({ channel: assigner, text: '✗ Something went wrong creating that task. Check the PERBot logs.' });
     }
   });
+}
+
+/** Message text → a sensible task title (mentions/links unwrapped, whitespace collapsed, capped). */
+function taskFromMessage(text: string): string {
+  return unwrapSlackLinks(text)
+    .replace(MENTION_RE, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 200);
+}
+
+/** "Assign as Ops task" message shortcut — works from any message, including thread replies. */
+export function registerAssignShortcut(app: App): void {
+  app.shortcut({ callback_id: ASSIGN_SHORTCUT_ID, type: 'message_action' }, async ({ ack, shortcut, client }) => {
+    await ack();
+    const sc: any = shortcut;
+    const msg = sc.message ?? {};
+    const channel: string = sc.channel?.id ?? '';
+    const threadTs: string | undefined = msg.thread_ts ?? msg.ts;
+    // Pre-fill "who" with the message's author when it's a person (not a bot post) — the
+    // usual case is "assign this to the person who raised it"; easy to change in the form.
+    const author: string | undefined = typeof msg.user === 'string' && !msg.bot_id ? msg.user : undefined;
+    try {
+      await client.views.open({
+        trigger_id: sc.trigger_id,
+        view: assignModal(
+          { ch: channel, a: sc.user?.id ?? '', ts: threadTs },
+          { users: author ? [author] : [], task: taskFromMessage(String(msg.text ?? '')), dueIso: null }
+        ),
+      });
+    } catch (err) {
+      logger.error('Assign shortcut: could not open form', err);
+    }
+  });
+}
+
+/**
+ * `@PERBot assign @person <task> [by <date>]` — the in-thread text path (app_mention).
+ * `text` must already have the bot's own mention removed but OTHER mentions intact.
+ * There's no trigger_id on an event, so missing info gets a usage reply in the thread
+ * instead of the form.
+ */
+export async function assignFromMention(
+  client: WebClient,
+  opts: { text: string; userId: string; channel: string; threadTs?: string }
+): Promise<void> {
+  const body = opts.text.replace(/^\s*assign\b[:,]?\s*/i, '');
+  const parsed = parseAssign(body);
+  const reply = (text: string) =>
+    client.chat.postMessage({ channel: opts.channel, ...(opts.threadTs ? { thread_ts: opts.threadTs } : {}), text, unfurl_links: false });
+
+  if (!parsed.task || (parsed.slackIds.length === 0 && parsed.handles.length === 0 && !parsed.self)) {
+    await reply(`<@${opts.userId}> ${USAGE.replace('Usage: `/assign', 'Usage: `@PERBot assign').replace(' Plain `/assign` opens a form.', ' (Slash commands don’t work in threads — the ··· menu → *Assign as Ops task* opens the form.)')}`);
+    return;
+  }
+  try {
+    const slackIds = parsed.self ? [...new Set([opts.userId, ...parsed.slackIds])] : parsed.slackIds;
+    const { notionIds, resolvedSlackIds, unresolved } = await resolveOwners(client, slackIds, parsed.handles);
+    if (notionIds.length === 0) {
+      await reply(`<@${opts.userId}> I couldn't match ${unresolved.join(', ') || 'that person'} to a Notion account — nothing assigned.`);
+      return;
+    }
+    const { publicText } = await createAndAnnounce(client, {
+      assignerSlackId: opts.userId,
+      assigneeSlackIds: resolvedSlackIds,
+      ownerNotionIds: notionIds,
+      task: parsed.task,
+      dueIso: parsed.dueIso ?? nextSaturdayIso(),
+    });
+    const notes: string[] = [];
+    if (unresolved.length) notes.push(`(couldn't match ${unresolved.join(', ')} — not added)`);
+    if (parsed.badDate) notes.push(`(didn't understand "${parsed.badDate}" — used next Saturday)`);
+    await reply(notes.length ? `${publicText}\n_${notes.join(' ')}_` : publicText);
+  } catch (err) {
+    logger.error('assign-from-mention failed', err);
+    await reply(`<@${opts.userId}> ✗ Something went wrong creating that task. Check the PERBot logs.`);
+  }
 }

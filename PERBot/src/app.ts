@@ -8,7 +8,7 @@ import { searchIndex } from './services/search.js';
 import { summarizeSearchResults } from './services/llm.js';
 import { buildResultBlocks } from './services/slack-format.js';
 import { registerOpsTaskActions } from './opsTasks/actions.js';
-import { registerAssignCommand } from './opsTasks/assign.js';
+import { assignFromMention, registerAssignCommand, registerAssignShortcut } from './opsTasks/assign.js';
 import { registerSponsorActions } from './sponsorship/actions.js';
 import { registerSponsorCommands } from './sponsorship/slack.js';
 
@@ -328,8 +328,24 @@ app.command('/indexstatus', async ({ ack, command, client }) => {
   });
 });
 
-app.event('app_mention', async ({ event, client }) => {
+app.event('app_mention', async ({ event, client, context }) => {
   const rawText = 'text' in event ? event.text : '';
+
+  // "@PERBot assign @person <task> [by <date>]" — the in-thread way to assign (slash
+  // commands can't run in threads). Strip only the bot's own mention so assignee
+  // mentions survive; everything else falls through to docs search.
+  const botMention = context.botUserId ? new RegExp(`<@${context.botUserId}(?:\\|[^>]*)?>`, 'g') : null;
+  const withoutBot = (botMention ? rawText.replace(botMention, ' ') : rawText).trim();
+  if (/^assign\b/i.test(withoutBot)) {
+    await assignFromMention(client, {
+      text: withoutBot,
+      userId: (event as any).user,
+      channel: event.channel,
+      threadTs: event.thread_ts || event.ts,
+    });
+    return;
+  }
+
   const query = cleanMentionText(rawText);
 
   if (!query) {
@@ -366,6 +382,7 @@ app.event('app_mention', async ({ event, client }) => {
 registerSponsorCommands(app);
 registerOpsTaskActions(app);
 registerAssignCommand(app);
+registerAssignShortcut(app);
 registerSponsorActions(app);
 
 async function main(): Promise<void> {
