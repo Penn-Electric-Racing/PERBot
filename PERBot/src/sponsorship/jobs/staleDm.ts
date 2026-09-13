@@ -4,6 +4,7 @@ import { daysUntil, todayIsoET } from '../dates.js';
 import { fetchSlackDirectory, notionUserToSlackId } from '../identity.js';
 import { SponsorNotion } from '../notion.js';
 import { NotionUser, PipelineRow } from '../types.js';
+import { dealListBlocks } from '../dealBlocks.js';
 import { makeSlackClient } from './shared.js';
 
 /**
@@ -72,12 +73,17 @@ export async function runStaleDm(force = process.env.FORCE_STALE_DM?.toLowerCase
     const lines = deals
       .sort((a, b) => (a.nextActionDate ?? '').localeCompare(b.nextActionDate ?? ''))
       .map(overdueLine);
-    const text =
-      `:wave: You have *${deals.length}* sponsorship deal(s) with an overdue next action:\n` +
-      `${lines.join('\n')}\n\n_Update them in Notion or log a touch with_ \`/sponsor log\`.`;
+    const header = `:wave: You have *${deals.length}* sponsorship deal(s) with an overdue next action:`;
+    const footer = '_Use the buttons, or update in Notion / `/sponsor log` / `/sponsor stage`._';
+    const text = `${header}\n${lines.join('\n')}\n\n${footer}`;
+    const sorted = deals.sort((a, b) => (a.nextActionDate ?? '').localeCompare(b.nextActionDate ?? ''));
+    const blocks = dealListBlocks(header, sorted.slice(0, 20), slackUserId, {
+      footer,
+      lineFor: (d) => overdueLine(d).replace(/^• /, ''),
+    });
 
     // Post straight to the user ID — Slack opens the DM (needs only chat:write).
-    await client.chat.postMessage({ channel: slackUserId, text, unfurl_links: false });
+    await client.chat.postMessage({ channel: slackUserId, text, blocks, unfurl_links: false });
     logger.info(`Stale DM: sent ${deals.length} overdue deal(s) to ${notionUser.name || slackUserId}.`);
   }
 }

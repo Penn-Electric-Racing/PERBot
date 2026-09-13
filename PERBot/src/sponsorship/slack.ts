@@ -6,11 +6,11 @@ import { isoDaysFromNowET, todayIsoET } from './dates.js';
 import { findMatchingProspects, scoutCompanies } from './discovery.js';
 import { draftOutreachEmail } from './emailDraft.js';
 import { DomainResolutionError, enrichCompany } from './enrichCompany.js';
-import { fetchSlackDirectory, indexNotionUsers, resolveSlackHandles, slackUserToNotionId } from './identity.js';
+import { indexNotionUsers, resolveSlackHandles, slackUserToNotionId } from './identity.js';
+import { dealListBlocks } from './dealBlocks.js';
 import { syncContactedStamps } from './jobs/stageSync.js';
 import { computeQuotaResults, currentAuditWindow, formatQuotaStanding } from './jobs/quotaAudit.js';
-import { resolveChannelId } from './jobs/shared.js';
-import { announceWinIfNew, resolveDriMentions, totalRaised } from './jobs/winPost.js';
+import { announceWonNow, totalRaised } from './jobs/winPost.js';
 import { SponsorNotion } from './notion.js';
 import { fitScore, impactScore, priorityScore, quadrant, SponsorScores } from './scoring.js';
 import { BankLeadRow, CATEGORIES, Category, EnrichResult, PipelineRow, STAGES, Stage, WonKind } from './types.js';
@@ -271,8 +271,15 @@ async function handleMe(client: WebClient, respond: RespondFn, slackUserId: stri
     return;
   }
 
-  const text = [`*Your active deals (${deals.length}):*`, ...deals.map(formatDealLine)].join('\n');
-  await respond({ response_type: 'ephemeral', text });
+  const header = `*Your active deals (${deals.length}):*`;
+  const text = [header, ...deals.map(formatDealLine)].join('\n');
+  // Buttons (Contacted / In talks / Won / Lost / Log touch) — handled by actions.ts. Slack caps a
+  // message at 50 blocks; beyond ~20 deals the rest are listed without buttons.
+  const withButtons = deals.slice(0, 20);
+  const blocks = dealListBlocks(header, withButtons, slackUserId, {
+    footer: deals.length > withButtons.length ? `_…and ${deals.length - withButtons.length} more — see Notion._` : undefined,
+  });
+  await respond({ response_type: 'ephemeral', text, blocks });
 }
 
 // --- /sponsor quota ------------------------------------------------------------
@@ -774,23 +781,8 @@ async function handleWon(client: WebClient, respond: RespondFn, arg: string): Pr
   // Post to #operations immediately. Same marker as the hourly job → no double-post.
   let announcedSuffix = '';
   try {
-    const channelId = await resolveChannelId(client, config.sponsorship.winPostChannel);
-    if (channelId) {
-      const won = await notion.queryWonDeals();
-      // Read-after-write guard: make sure this deal's amount is in the running total.
-      let total = totalRaised(won);
-      if (!won.some((d) => d.id === deal.id)) total += parsed.amountUsd;
-      const notionUsersById = new Map((await notion.listNotionUsers()).map((u) => [u.id, u]));
-      const dri = await resolveDriMentions(client, deal.driUserIds, notionUsersById, await fetchSlackDirectory(client));
-      const posted = await announceWinIfNew(
-        client,
-        channelId,
-        { ...deal, received: parsed.amountUsd, wonKind: parsed.kind ?? deal.wonKind },
-        total,
-        dri,
-        parsed.note
-      );
-      if (posted) announcedSuffix = ` and posted it to #${config.sponsorship.winPostChannel}`;
+    if (await announceWonNow(client, notion, deal, parsed.amountUsd, parsed.kind ?? null, parsed.note)) {
+      announcedSuffix = ` and posted it to #${config.sponsorship.winPostChannel}`;
     }
   } catch (err) {
     logger.error('/sponsor won: announcement failed (deal still marked Won)', err);

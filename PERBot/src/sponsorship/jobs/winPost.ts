@@ -139,3 +139,26 @@ if (isMain) {
     process.exitCode = 1;
   });
 }
+
+/**
+ * Instant win post for a deal just marked Won from Slack (`/sponsor won` or the Won
+ * button): running total with a read-after-write guard, DRI shoutout, and the shared
+ * per-deal marker so the hourly job won't double-post. Returns true if it posted.
+ */
+export async function announceWonNow(
+  client: WebClient,
+  notion: SponsorNotion,
+  deal: PipelineRow,
+  amountUsd: number,
+  kind: PipelineRow['wonKind'],
+  note: string
+): Promise<boolean> {
+  const channelId = await resolveChannelId(client, config.sponsorship.winPostChannel);
+  if (!channelId) return false;
+  const won = await notion.queryWonDeals();
+  let total = totalRaised(won);
+  if (!won.some((d) => d.id === deal.id)) total += amountUsd;
+  const notionUsersById = new Map((await notion.listNotionUsers()).map((u) => [u.id, u]));
+  const dri = await resolveDriMentions(client, deal.driUserIds, notionUsersById, await fetchSlackDirectory(client));
+  return announceWinIfNew(client, channelId, { ...deal, received: amountUsd, wonKind: kind ?? deal.wonKind }, total, dri, note);
+}

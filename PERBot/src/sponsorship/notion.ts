@@ -379,6 +379,12 @@ export class SponsorNotion {
     return rows;
   }
 
+  /** Re-read one deal by page id (button handlers do this first — the DM may be days old). */
+  async fetchDeal(pageId: string): Promise<PipelineRow> {
+    const page: any = await this.client.pages.retrieve({ page_id: pageId });
+    return parsePipelineRow(page);
+  }
+
   /** All Won deals — feeds the win post + running total. */
   async queryWonDeals(): Promise<PipelineRow[]> {
     return this.queryPipeline({ property: 'Stage', select: { equals: 'Won' } });
@@ -489,13 +495,18 @@ export class SponsorNotion {
    * Contacted / In talks / Won also stamps `Contacted at` (the quota audit's signal) — once
    * per deal, so bouncing a deal back and forth never earns a second credit.
    */
-  async setStage(row: PipelineRow, stage: Stage, dateIso: string): Promise<void> {
+  async setStage(row: PipelineRow, stage: Stage, dateIso: string, note?: string): Promise<void> {
     const properties: Record<string, any> = {
       Stage: { select: { name: stage } },
       'Last contact': { date: { start: dateIso } },
     };
     if (CONTACTED_STAGES.has(stage) && !row.contactedAt) {
       properties[CONTACTED_AT_PROP] = { date: { start: new Date().toISOString() } };
+    }
+    if (note) {
+      // Same dated-line convention as logTouch, so Slack-driven moves show in the audit trail.
+      const merged = `${dateIso}: ${note}${row.notes ? `\n${row.notes}` : ''}`;
+      properties['Notes'] = { rich_text: [{ text: { content: merged.slice(0, 1900) } }] };
     }
     await this.client.pages.update({ page_id: row.id, properties: properties as any });
     logger.info(`Set stage ${stage}: ${row.company} (${row.id}).`);
