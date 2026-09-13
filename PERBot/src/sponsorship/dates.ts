@@ -42,3 +42,8 @@ export function etWallTimeToUtc(dateIso: string, hour: number): Date {
   const offsetTotalMin = offsetHours * 60 + Math.sign(offsetHours) * offsetMinutes;
   return new Date(naive.getTime() - offsetTotalMin * 60_000);
 }
+
+/** "1:42 PM" in ET — for "done at" stamps on Slack-updated messages. */
+export function nowTimeET(now: Date = new Date()): string {
+  return now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' });
+}

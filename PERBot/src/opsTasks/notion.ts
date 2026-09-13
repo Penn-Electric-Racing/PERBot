@@ -1,8 +1,11 @@
 import { Client } from '@notionhq/client';
 import { config } from '../config.js';
+import { logger } from '../utils/logger.js';
 
 /**
- * Read-only Notion access for the Ops Tasks database (child of "REV12 Operations").
+ * Notion access for the Ops Tasks database (child of "REV12 Operations"). Reads feed the
+ * Sunday digest; the small writers below back the digest's Slack buttons (Done / In
+ * progress / Push a week) so members can update from Slack instead of opening Notion.
  * One row = one action item a member typed under their own name on a Saturday meeting
  * page. Schema: Task (title) · Owner (person) · Status (Not started / In progress /
  * Done) · Due (date, convention = next Saturday) · Week (date, the Saturday it was
@@ -101,5 +104,23 @@ export class OpsTasksNotion {
       cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
     } while (cursor);
     return tasks;
+  }
+
+  /** Re-read one task (button handlers do this before writing, so a stale DM can't clobber a newer edit). */
+  async fetchTask(pageId: string): Promise<OpsTask> {
+    const page: any = await this.client.pages.retrieve({ page_id: pageId });
+    return parseOpsTask(page);
+  }
+
+  /** Set Status (a Notion status property — options: Not started / In progress / Done). */
+  async setStatus(pageId: string, status: 'Not started' | 'In progress' | 'Done'): Promise<void> {
+    await this.client.pages.update({ page_id: pageId, properties: { Status: { status: { name: status } } } as any });
+    logger.info(`Ops task ${pageId} → Status ${status}.`);
+  }
+
+  /** Set the Due date (YYYY-MM-DD). */
+  async setDue(pageId: string, dueIso: string): Promise<void> {
+    await this.client.pages.update({ page_id: pageId, properties: { Due: { date: { start: dueIso } } } as any });
+    logger.info(`Ops task ${pageId} → Due ${dueIso}.`);
   }
 }
