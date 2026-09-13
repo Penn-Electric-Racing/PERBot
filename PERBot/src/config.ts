@@ -60,6 +60,9 @@ export const config = {
     token: requireAny(['NOTION_TOKEN', 'NOTION_API_KEY']),
     apiVersion: optionalString('NOTION_API_VERSION', '2026-03-11'),
     allowedPageIds: optionalList('NOTION_ALLOWED_PAGE_IDS'),
+    // ⚙️ PERBot Job Log — per-day run records so late/duplicate cron fires never re-send
+    // (see utils/schedule.ts). Empty disables dedup (with a warning).
+    jobLogDataSourceId: optionalString('NOTION_JOB_LOG_DS_ID', 'db0c6a0d-e10b-4edf-97fb-6f381d15a465'),
   },
   openai: {
     apiKey: process.env.OPENAI_API_KEY?.trim() || '',

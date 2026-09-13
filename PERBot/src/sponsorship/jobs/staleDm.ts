@@ -1,4 +1,5 @@
 import { logger } from '../../utils/logger.js';
+import { claimJobRun, isSlotOpenET } from '../../utils/schedule.js';
 import { daysUntil, todayIsoET } from '../dates.js';
 import { fetchSlackDirectory, notionUserToSlackId } from '../identity.js';
 import { SponsorNotion } from '../notion.js';
@@ -10,17 +11,11 @@ import { makeSlackClient } from './shared.js';
  * their own deals whose Next action date is overdue. No DM if a member has nothing
  * overdue (silence is valid). Timed for weekly check-ins.
  *
- * DMs post straight to the user ID (needs only `chat:write`, not `im:write`). Idempotency
- * is a time gate: only the 9am-ET hour runs the work, so the two DST cron triggers (9am
- * EDT / 9am EST) don't both fire — only the one that lands on 9am ET does.
+ * DMs post straight to the user ID (needs only `chat:write`, not `im:write`). Idempotency:
+ * the gate is "Wednesday, 9am ET or later" (GitHub cron fires hours late — utils/
+ * schedule.ts) and the ⚙️ Job Log claim makes the second DST trigger a no-op.
  */
 
-function isWednesday9amET(): boolean {
-  const now = new Date();
-  const weekday = now.toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/New_York' });
-  const hour = Number(now.toLocaleString('en-US', { hour: '2-digit', hour12: false, timeZone: 'America/New_York' }));
-  return weekday === 'Wednesday' && hour === 9;
-}
 
 function overdueLine(row: PipelineRow): string {
   const overdue = row.nextActionDate ? Math.abs(daysUntil(row.nextActionDate)) : 0;
@@ -30,10 +25,12 @@ function overdueLine(row: PipelineRow): string {
 }
 
 export async function runStaleDm(force = process.env.FORCE_STALE_DM?.toLowerCase() === 'true'): Promise<void> {
-  if (!force && !isWednesday9amET()) {
-    logger.info('Stale DM: not Wednesday 9am (ET) and not forced — skipping.');
+  if (!force && !isSlotOpenET('Wednesday', 9)) {
+    logger.info('Stale DM: not Wednesday ≥9:00 ET and not forced — skipping.');
     return;
   }
+  // Late-tolerant gate + two DST crons ⇒ dedupe via the Job Log (DM jobs can't read DM history).
+  if (!force && !(await claimJobRun('sponsor-stale-dm'))) return;
 
   const client = makeSlackClient();
   const notion = new SponsorNotion();

@@ -1,5 +1,6 @@
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
+import { claimJobRun, isSlotOpenET } from '../utils/schedule.js';
 import { daysUntil, todayIsoET } from '../sponsorship/dates.js';
 import { fetchSlackDirectory, notionUserToSlackId } from '../sponsorship/identity.js';
 import { makeSlackClient } from '../sponsorship/jobs/shared.js';
@@ -23,12 +24,6 @@ import { OpsTask, OpsTasksNotion } from './notion.js';
 /** Seed rows created so Notion would show every member's group; skipped until renamed. */
 export const PLACEHOLDER_RE = /^rename me/i;
 
-function isSunday10amET(): boolean {
-  const now = new Date();
-  const weekday = now.toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/New_York' });
-  const hour = Number(now.toLocaleString('en-US', { hour: '2-digit', hour12: false, timeZone: 'America/New_York' }));
-  return weekday === 'Sunday' && hour === 10;
-}
 
 export function isPlaceholder(task: OpsTask): boolean {
   return task.title === '' || PLACEHOLDER_RE.test(task.title);
@@ -80,11 +75,13 @@ export function buildDigest(tasks: OpsTask[]): string {
 }
 
 export async function runOpsDigest(force = process.env.FORCE_OPS_DIGEST?.toLowerCase() === 'true'): Promise<void> {
-  if (!force && !isSunday10amET()) {
-    logger.info('Ops digest: not Sunday 10am (ET) and not forced — skipping.');
+  if (!force && !isSlotOpenET('Sunday', 10)) {
+    logger.info('Ops digest: not Sunday ≥10:00 ET and not forced — skipping.');
     return;
   }
   const dryRun = process.env.OPS_DIGEST_DRY_RUN?.toLowerCase() === 'true';
+  // Late-tolerant gate + two DST crons ⇒ dedupe via the Job Log (DM jobs can't read DM history).
+  if (!force && !dryRun && !(await claimJobRun('ops-tasks-digest'))) return;
 
   const notion = new OpsTasksNotion();
   const open = await notion.queryOpenTasks();

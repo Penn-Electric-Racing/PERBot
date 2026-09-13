@@ -1,13 +1,15 @@
 name: Ops Tasks — Sunday Digest DM
 
-# Sunday ~10am ET: DM each Ops member their own open tasks from the Ops Tasks Notion
+# Sunday 10am ET: DM each Ops member their own open tasks from the Ops Tasks Notion
 # database (🔴 past due, "carried N wks" on rollovers). DMs only — never a channel post.
-# Two cron triggers cover the EDT/EST offset; the script's isSunday10amET() time-check
-# makes double-fires safe. Members with nothing open get no DM (silence is valid).
+# GitHub cron fires hours late on this repo, so the script's gate is "Sunday, 10am ET or
+# later" and there are three triggers (EDT/EST + a catch-up); a Notion ⚙️ Job Log claim
+# makes any extra fire a no-op. Members with nothing open get no DM (silence is valid).
 on:
   schedule:
     - cron: '0 14 * * 0' # 10am EDT
     - cron: '0 15 * * 0' # 10am EST
+    - cron: '0 18 * * 0' # catch-up (GitHub cron here fires hours late; gate is ≥10am ET, Job Log dedupes)
   workflow_dispatch:
     inputs:
       force:

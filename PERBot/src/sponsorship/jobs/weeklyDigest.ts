@@ -1,5 +1,6 @@
 import { config } from '../../config.js';
 import { logger } from '../../utils/logger.js';
+import { claimJobRun, isSlotOpenET } from '../../utils/schedule.js';
 import { daysUntil, todayIsoET } from '../dates.js';
 import { fetchSlackDirectory, notionUserToSlackId } from '../identity.js';
 import { SponsorNotion } from '../notion.js';
@@ -13,16 +14,11 @@ import { totalRaised } from './winPost.js';
  * progress line, the week's wins, their own numbers, and their upcoming next actions.
  * Members with no deals get nothing (silence is valid, same as the stale DM).
  *
- * Same idempotency as the stale DM: two DST cron triggers, and only the one landing
- * on 9am ET runs the work. DMs post straight to the user ID (chat:write only).
+ * Idempotency (same as the stale DM): the gate is "Saturday, 9am ET or later" because
+ * GitHub cron fires hours late here (utils/schedule.ts), and the ⚙️ Job Log claim makes
+ * the second DST trigger (or any stray fire) a no-op. DMs post straight to the user ID.
  */
 
-function isSaturday9amET(): boolean {
-  const now = new Date();
-  const weekday = now.toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/New_York' });
-  const hour = Number(now.toLocaleString('en-US', { hour: '2-digit', hour12: false, timeZone: 'America/New_York' }));
-  return weekday === 'Saturday' && hour === 9;
-}
 
 function fmtUsd(n: number): string {
   return `$${Math.round(n).toLocaleString('en-US')}`;
@@ -63,10 +59,13 @@ function nextActionLine(deal: PipelineRow): string {
 }
 
 export async function runWeeklyDigest(force = process.env.FORCE_DIGEST?.toLowerCase() === 'true'): Promise<void> {
-  if (!force && !isSaturday9amET()) {
-    logger.info('Weekly digest: not Saturday 9am (ET) and not forced — skipping.');
+  if (!force && !isSlotOpenET('Saturday', 9)) {
+    logger.info('Weekly digest: not Saturday ≥9:00 ET and not forced — skipping.');
     return;
   }
+  // Late-tolerant gate + two DST crons ⇒ dedupe via the Job Log (DM jobs can't read DM history).
+  const dryRun = process.env.DIGEST_DRY_RUN?.toLowerCase() === 'true';
+  if (!force && !dryRun && !(await claimJobRun('sponsor-weekly-digest'))) return;
 
   const client = makeSlackClient();
   const notion = new SponsorNotion();
@@ -136,7 +135,7 @@ export async function runWeeklyDigest(force = process.env.FORCE_DIGEST?.toLowerC
 
     const text = [...teamLines, youLine, ...actionLines, footer].join('\n');
     // DIGEST_DRY_RUN=true prints instead of DMing — for safe local verification.
-    if (process.env.DIGEST_DRY_RUN?.toLowerCase() === 'true') {
+    if (dryRun) {
       logger.info(`Weekly digest (dry run) → ${notionUser.name || slackUserId}:\n${text}`);
       continue;
     }

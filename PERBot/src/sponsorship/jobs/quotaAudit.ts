@@ -1,6 +1,7 @@
 import type { WebClient } from '@slack/web-api';
 import { config } from '../../config.js';
 import { logger } from '../../utils/logger.js';
+import { isSlotOpenET } from '../../utils/schedule.js';
 import { etWallTimeToUtc, isoAddDays, todayIsoET } from '../dates.js';
 import { fetchSlackDirectory, Indexed, notionUserToSlackId } from '../identity.js';
 import { SponsorNotion } from '../notion.js';
@@ -19,9 +20,9 @@ import { alreadyPosted, makeSlackClient, metadataFor, resolveChannelId, WinMeta 
  *
  * Output: (1) one row per member per week upserted into 📋 Weekly Quota Audit — the
  * durable record of who met quota and who didn't; (2) ONE channel post (#perbot_spam)
- * listing who met and @-mentioning only those who didn't. Idempotent two ways: the
- * 10am-ET time gate makes the two DST cron triggers safe, and a per-week Slack
- * metadata marker blocks a duplicate post if the job is re-run by hand.
+ * listing who met and @-mentioning only those who didn't. Idempotent: the gate is
+ * "Saturday, 10am ET or later" (GitHub cron fires hours late — utils/schedule.ts), and
+ * the per-week Slack metadata marker blocks a duplicate post from any extra fire.
  *
  * Env: FORCE_QUOTA_AUDIT=true runs off-schedule; QUOTA_DRY_RUN=true prints the post and
  * skips every write (Notion + Slack); QUOTA_WEEK_END=YYYY-MM-DD audits the week ending
@@ -30,12 +31,6 @@ import { alreadyPosted, makeSlackClient, metadataFor, resolveChannelId, WinMeta 
 
 const AUDIT_HOUR_ET = 10;
 
-function isSaturday10amET(): boolean {
-  const now = new Date();
-  const weekday = now.toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/New_York' });
-  const hour = Number(now.toLocaleString('en-US', { hour: '2-digit', hour12: false, timeZone: 'America/New_York' }));
-  return weekday === 'Saturday' && hour === AUDIT_HOUR_ET;
-}
 
 export interface AuditWindow {
   /** YYYY-MM-DD (ET) the window opens — Sat 10:00 ET. */
@@ -206,8 +201,10 @@ async function slackMentionResolver(
 export async function runQuotaAudit(
   force = process.env.FORCE_QUOTA_AUDIT?.toLowerCase() === 'true'
 ): Promise<void> {
-  if (!force && !isSaturday10amET()) {
-    logger.info('Quota audit: not Saturday 10am (ET) and not forced — skipping.');
+  // Late-tolerant gate (GitHub cron fires hours late here — see utils/schedule.ts); the
+  // per-week Slack marker below keeps a second Saturday fire from reposting.
+  if (!force && !isSlotOpenET('Saturday', AUDIT_HOUR_ET)) {
+    logger.info(`Quota audit: not Saturday ≥${AUDIT_HOUR_ET}:00 ET and not forced — skipping.`);
     return;
   }
   const dryRun = process.env.QUOTA_DRY_RUN?.toLowerCase() === 'true';

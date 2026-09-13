@@ -1,12 +1,14 @@
 name: Sponsorship — Wednesday Stale DM
 
-# Wednesday ~9am ET: DM each DRI only their own overdue deals. Two cron triggers cover
-# the EDT/EST offset; the script's isWednesdayET() time-check + a per-user daily marker
-# make double-fires safe. Silence is valid — members with nothing overdue get no DM.
+# Wednesday 9am ET: DM each DRI only their own overdue deals. GitHub cron fires hours
+# late on this repo, so the script's gate is "Wednesday, 9am ET or later" and there are
+# three triggers (EDT/EST + a catch-up); a Notion ⚙️ Job Log claim makes any extra fire a
+# no-op. Silence is valid — members with nothing overdue get no DM.
 on:
   schedule:
     - cron: '0 13 * * 3' # 9am EDT
     - cron: '0 14 * * 3' # 9am EST
+    - cron: '0 17 * * 3' # catch-up (GitHub cron here fires hours late; gate is ≥9am ET, Job Log dedupes)
   workflow_dispatch:
     inputs:
       force:
