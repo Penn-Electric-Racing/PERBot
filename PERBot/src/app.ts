@@ -8,6 +8,7 @@ import { searchIndex } from './services/search.js';
 import { summarizeSearchResults } from './services/llm.js';
 import { buildResultBlocks } from './services/slack-format.js';
 import { registerOpsTaskActions } from './opsTasks/actions.js';
+import { registerAssignCommand } from './opsTasks/assign.js';
 import { registerSponsorActions } from './sponsorship/actions.js';
 import { registerSponsorCommands } from './sponsorship/slack.js';
 
@@ -364,6 +365,7 @@ app.event('app_mention', async ({ event, client }) => {
 
 registerSponsorCommands(app);
 registerOpsTaskActions(app);
+registerAssignCommand(app);
 registerSponsorActions(app);
 
 async function main(): Promise<void> {

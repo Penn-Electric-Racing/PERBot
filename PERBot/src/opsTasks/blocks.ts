@@ -99,3 +99,12 @@ export function replaceTaskBlocks(blocks: any[], taskId: string, replacement: an
   }
   return inserted ? out : [...blocks, ...replacement];
 }
+
+/** The DM an assignee gets from `/assign`: who assigned it + the task with its buttons. */
+export function assignmentDmBlocks(task: OpsTask, assignerSlackId: string, assigneeSlackId: string): any[] {
+  return [
+    { type: 'section', text: { type: 'mrkdwn', text: `:pushpin: <@${assignerSlackId}> assigned you a task:` } },
+    ...taskBlocks(task, assigneeSlackId),
+    { type: 'context', elements: [{ type: 'mrkdwn', text: `_It's in the Ops Tasks list — Sunday's digest will include it. <${config.opsTasks.myOpenViewUrl}|My open>_` }] },
+  ];
+}

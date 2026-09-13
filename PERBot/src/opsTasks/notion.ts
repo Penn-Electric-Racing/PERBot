@@ -106,6 +106,22 @@ export class OpsTasksNotion {
     return tasks;
   }
 
+  /** Create a task (powers `/assign`): Status = Not started, Owner(s), optional Due. Not linked to a meeting page. */
+  async createTask(input: { title: string; ownerIds: string[]; dueIso: string | null }): Promise<OpsTask> {
+    const properties: Record<string, any> = {
+      Task: { title: [{ text: { content: input.title.slice(0, 200) } }] },
+      Owner: { people: input.ownerIds.map((id) => ({ id })) },
+      Status: { status: { name: 'Not started' } },
+    };
+    if (input.dueIso) properties['Due'] = { date: { start: input.dueIso } };
+    const page: any = await this.client.pages.create({
+      parent: { type: 'data_source_id', data_source_id: config.opsTasks.dataSourceId },
+      properties: properties as any,
+    });
+    logger.info(`Ops task created: "${input.title}" → ${input.ownerIds.length} owner(s), due ${input.dueIso ?? 'none'}.`);
+    return parseOpsTask(page);
+  }
+
   /** Re-read one task (button handlers do this before writing, so a stale DM can't clobber a newer edit). */
   async fetchTask(pageId: string): Promise<OpsTask> {
     const page: any = await this.client.pages.retrieve({ page_id: pageId });
