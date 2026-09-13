@@ -50,11 +50,11 @@ function fmtMoney(n: number): string {
 }
 
 /** Slack encodes mentions in command text as `<@U012ABC>` or `<@U012ABC|handle>`. */
-const MENTION_RE = /<@([A-Z0-9]+)(?:\|[^>]+)?>/g;
+export const MENTION_RE = /<@([A-Z0-9]+)(?:\|[^>]+)?>/g;
 const EMAIL_RE = /[^\s<>]+@[^\s<>]+\.[^\s<>]+/;
 
 /** Slack auto-links URLs/emails in slash-command text — strip the `<…|…>` wrappers. */
-function unwrapSlackLinks(text: string): string {
+export function unwrapSlackLinks(text: string): string {
   return text
     .replace(/<mailto:([^|>]+)(?:\|[^>]*)?>/gi, '$1')
     .replace(/<(https?:\/\/[^|>]+)(?:\|[^>]*)?>/gi, '$1');
@@ -65,7 +65,7 @@ function unwrapSlackLinks(text: string): string {
 const PLAIN_HANDLE_RE = /(^|\s)@([a-z0-9._-]+)/gi;
 
 /** Pull out plain-text @handles (typed, not picked from the menu) and remove them. */
-function extractPlainHandles(text: string): { handles: string[]; cleaned: string } {
+export function extractPlainHandles(text: string): { handles: string[]; cleaned: string } {
   const handles = [...text.matchAll(PLAIN_HANDLE_RE)].map((m) => m[2]!);
   const cleaned = text.replace(PLAIN_HANDLE_RE, '$1').replace(/\s+/g, ' ').trim();
   return { handles, cleaned };
@@ -185,7 +185,7 @@ function formatAddResult(result: EnrichResult): string {
  * @handles (Slack sends blue-chip mentions as plain text unless the command escapes
  * links); handles are looked up in the Slack directory first. Email-first, name fallback.
  */
-async function resolveAssignees(
+export async function resolveAssignees(
   client: WebClient,
   slackIds: string[],
   plainHandles: string[] = []
