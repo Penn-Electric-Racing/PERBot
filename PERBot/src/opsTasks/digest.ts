@@ -1,10 +1,15 @@
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 import { claimJobRun, isSlotOpenET } from '../utils/schedule.js';
-import { daysUntil, todayIsoET } from '../sponsorship/dates.js';
+import { todayIsoET } from '../sponsorship/dates.js';
 import { fetchSlackDirectory, notionUserToSlackId } from '../sponsorship/identity.js';
 import { makeSlackClient } from '../sponsorship/jobs/shared.js';
+import { buildDigestBlocks } from './blocks.js';
+import { isOverdue, sortTasks, taskLine } from './format.js';
 import { OpsTask, OpsTasksNotion } from './notion.js';
+
+// Formatting helpers live in format.ts (shared with blocks.ts); re-exported for existing importers.
+export { carriedWeeks, isOverdue, sortTasks, taskLine } from './format.js';
 
 /**
  * Sunday 10 AM ET Ops-tasks digest — DMs ONLY, never a channel post (Arjun's call,
@@ -29,48 +34,11 @@ export function isPlaceholder(task: OpsTask): boolean {
   return task.title === '' || PLACEHOLDER_RE.test(task.title);
 }
 
-/** Whole Saturday meetings that have passed since the task was assigned (0 = fresh). */
-export function carriedWeeks(task: OpsTask): number {
-  if (!task.week) return 0;
-  const age = -daysUntil(task.week);
-  return age > 0 ? Math.floor(age / 7) : 0;
-}
-
-export function isOverdue(task: OpsTask): boolean {
-  return task.due !== null && daysUntil(task.due) < 0;
-}
-
-/** "9/19" — matches how the meeting pages are named. */
-function shortDate(iso: string): string {
-  const [, m, d] = iso.split('-');
-  return `${Number(m)}/${Number(d)}`;
-}
-
-/** Overdue first (oldest due first), then by due date, undated last. */
-export function sortTasks(tasks: OpsTask[]): OpsTask[] {
-  return [...tasks].sort((a, b) => {
-    const ao = isOverdue(a) ? 0 : 1;
-    const bo = isOverdue(b) ? 0 : 1;
-    if (ao !== bo) return ao - bo;
-    return (a.due ?? '9999').localeCompare(b.due ?? '9999');
-  });
-}
-
-export function taskLine(task: OpsTask): string {
-  const link = `<${task.url}|${task.title}>`;
-  const parts: string[] = [];
-  if (task.due) parts.push(`due ${shortDate(task.due)}${isOverdue(task) ? ' 🔴 overdue' : ''}`);
-  else parts.push('no due date');
-  const carried = carriedWeeks(task);
-  if (carried >= 1) parts.push(`carried ${carried} wk${carried === 1 ? '' : 's'}`);
-  return `• ${link} — ${parts.join(' · ')}`;
-}
-
 export function buildDigest(tasks: OpsTask[]): string {
   const sorted = sortTasks(tasks);
   const overdue = sorted.filter(isOverdue).length;
   const header = `:clipboard: *Your open Ops tasks (${sorted.length}${overdue > 0 ? `, ${overdue} overdue` : ''})*`;
-  const footer = `_Set Status → Done in Notion as you finish — Saturday's walkthrough runs off this list. <${config.opsTasks.myOpenViewUrl}|My open>_`;
+  const footer = `_Update here with the buttons or in Notion — Saturday's walkthrough runs off this list. <${config.opsTasks.myOpenViewUrl}|My open>_`;
   return [header, ...sorted.map(taskLine), footer].join('\n');
 }
 
@@ -121,7 +89,9 @@ export async function runOpsDigest(force = process.env.FORCE_OPS_DIGEST?.toLower
       logger.info(`Ops digest (dry run) → ${label} (${slackUserId}):\n${text}`);
       continue;
     }
-    await client.chat.postMessage({ channel: slackUserId, text, unfurl_links: false });
+    // Blocks carry the Done / In progress / Push buttons (handled by opsTasks/actions.ts);
+    // `text` is the notification/fallback copy.
+    await client.chat.postMessage({ channel: slackUserId, text, blocks: buildDigestBlocks(tasks, slackUserId), unfurl_links: false });
     logger.info(`Ops digest: sent ${tasks.length} task(s) to ${label}.`);
   }
 }
