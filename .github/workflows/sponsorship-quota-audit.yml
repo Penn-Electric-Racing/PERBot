@@ -1,15 +1,16 @@
 name: Sponsorship — Saturday Quota Audit
 
-# Saturday ~10am ET: check every active member of the 👥 Ops Quota Roster against the
-# weekly sponsor-assignment quota (Pipeline deals opened this week with them as DRI),
-# record the result per member in 📋 Weekly Quota Audit, and post one message to
-# #perbot_spam that @-mentions only the people below quota. Two cron triggers cover the
-# EDT/EST offset; the script's isSaturday10amET() time gate makes double-fires safe, and a
-# per-week Slack metadata marker blocks a duplicate post on manual re-runs.
+# Saturday 10am ET: check every active member of the 👥 Ops Quota Roster against the
+# weekly quota (their Pipeline deals moved out of Prospect this week), record the result
+# per member in 📋 Weekly Quota Audit, and post one message to #perbot_spam that
+# @-mentions only the people below quota. GitHub cron fires hours late on this repo, so
+# the script's gate is "Saturday, 10am ET or later" and there are three triggers (two for
+# EDT/EST + a catch-up); a per-week Slack metadata marker makes any extra fire a no-op.
 on:
   schedule:
     - cron: '0 14 * * 6' # 10am EDT
     - cron: '0 15 * * 6' # 10am EST
+    - cron: '0 18 * * 6' # catch-up (GitHub cron here fires hours late; gate is ≥10am ET, marker dedupes)
   workflow_dispatch:
     inputs:
       force:

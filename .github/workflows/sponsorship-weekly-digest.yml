@@ -1,13 +1,15 @@
 name: Sponsorship — Saturday Weekly Digest
 
-# Saturday ~9am ET: DM each member with live deals the team progress line, the week's
-# wins, and their own numbers + next actions. DMs only — never a channel post. Two cron
-# triggers cover the EDT/EST offset; the script's isSaturday9amET() time-check makes
-# double-fires safe. Members with no deals get no DM (silence is valid).
+# Saturday 9am ET: DM each member with live deals the team progress line, the week's
+# wins, and their own numbers + next actions. DMs only — never a channel post. GitHub cron
+# fires hours late on this repo, so the script's gate is "Saturday, 9am ET or later" and
+# there are three triggers (EDT/EST + a catch-up); a Notion ⚙️ Job Log claim makes any
+# extra fire a no-op. Members with no deals get no DM (silence is valid).
 on:
   schedule:
     - cron: '0 13 * * 6' # 9am EDT
     - cron: '0 14 * * 6' # 9am EST
+    - cron: '0 17 * * 6' # catch-up (GitHub cron here fires hours late; gate is ≥9am ET, Job Log dedupes)
   workflow_dispatch:
     inputs:
       force:
