@@ -5,6 +5,7 @@ import { daysUntil, todayIsoET } from '../dates.js';
 import { fetchSlackDirectory, notionUserToSlackId } from '../identity.js';
 import { SponsorNotion } from '../notion.js';
 import { NotionUser, PipelineRow } from '../types.js';
+import { dealListBlocks } from '../dealBlocks.js';
 import { makeSlackClient } from './shared.js';
 import { totalRaised } from './winPost.js';
 
@@ -134,12 +135,22 @@ export async function runWeeklyDigest(force = process.env.FORCE_DIGEST?.toLowerC
     const footer = `_${available} researched lead${available === 1 ? '' : 's'} available in the Bank — \`/sponsor claim\` one. \`/sponsor leaderboard\` for standings._`;
 
     const text = [...teamLines, youLine, ...actionLines, footer].join('\n');
+    // Blocks: the same content, with stage/touch buttons under each next-action deal.
+    const blocks = upcoming.length > 0
+      ? [
+          { type: 'section', text: { type: 'mrkdwn', text: [...teamLines, youLine].join('\n') } },
+          ...dealListBlocks('*Your next actions:*', upcoming, slackUserId, { footer, lineFor: (d) => nextActionLine(d).replace(/^• /, '') }),
+        ]
+      : [
+          { type: 'section', text: { type: 'mrkdwn', text: [...teamLines, youLine].join('\n') } },
+          { type: 'context', elements: [{ type: 'mrkdwn', text: footer }] },
+        ];
     // DIGEST_DRY_RUN=true prints instead of DMing — for safe local verification.
     if (dryRun) {
       logger.info(`Weekly digest (dry run) → ${notionUser.name || slackUserId}:\n${text}`);
       continue;
     }
-    await client.chat.postMessage({ channel: slackUserId, text, unfurl_links: false });
+    await client.chat.postMessage({ channel: slackUserId, text, blocks, unfurl_links: false });
     logger.info(`Weekly digest: sent to ${notionUser.name || slackUserId}.`);
   }
 }
