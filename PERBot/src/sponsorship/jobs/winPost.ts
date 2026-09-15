@@ -1,6 +1,7 @@
 import type { WebClient } from '@slack/web-api';
 import { config } from '../../config.js';
 import { logger } from '../../utils/logger.js';
+import { claimOnce } from '../../utils/schedule.js';
 import { fetchSlackDirectory, Indexed, notionUserToSlackId } from '../identity.js';
 import { SponsorNotion } from '../notion.js';
 import { NotionUser, PipelineRow } from '../types.js';
@@ -9,16 +10,32 @@ import { alreadyPosted, makeSlackClient, metadataFor, resolveChannelId, WinMeta 
 /**
  * Win post: when a Pipeline deal reaches Stage = Won, post ONCE to #operations with
  * the running total toward the semester goal. Gated to Won only (no prospect/stage/touch
- * posts — that would be spam). Idempotent via a per-deal marker in the channel.
+ * posts — that would be spam). Announced once per deal, ever.
  *
  * Two callers: the hourly cron (`runWinPost`) and the `/sponsor won` command (which
- * calls `announceWinIfNew` directly for an instant post). Both use the same marker, so
- * whichever runs first wins and the other skips — no duplicate.
+ * calls `announceWinIfNew` directly for an instant post). Both claim the same Job Log key,
+ * so whichever runs first wins and the other skips — no duplicate.
+ *
+ * DEDUP — why it's a Notion record and not a channel marker (bug, fixed 2026-09-15):
+ * this job re-posts every Won deal it can't find a marker for, and `alreadyPosted` only
+ * reads the most recent 200 messages of #operations. Once a win post scrolled past that
+ * window, the deal looked un-announced and got announced again — and the fresh post
+ * scrolled out too, so old wins kept resurfacing at random. The Job Log claim
+ * (`sponsor-win <deal id>`, permanent) can't scroll away; the channel marker is kept only
+ * as a secondary guard for wins posted before this existed.
+ *
+ * Wins announced before the claim existed are seeded by a one-time `WIN_POST_BACKFILL=true`
+ * run (same shape as STAGE_SYNC_BACKFILL) — see `runWinPost`.
  */
 
 /** Legacy in-text marker (still checked so old posts aren't re-announced). */
 export function winMarker(deal: PipelineRow): string {
   return `sponsor-won:${deal.id}`;
+}
+
+/** Permanent Job Log key for "this deal's win has been announced". */
+export function winClaimKey(deal: PipelineRow): string {
+  return `sponsor-win ${deal.id}`;
 }
 
 function winMeta(deal: PipelineRow): WinMeta {
@@ -81,7 +98,12 @@ export async function announceWinIfNew(
   contextNote = ''
 ): Promise<boolean> {
   const meta = winMeta(deal);
-  if (await alreadyPosted(client, channelId, meta, winMarker(deal))) return false; // already announced
+  // Durable dedupe first — this is the one that holds once the post leaves the channel's
+  // recent history. Claimed before posting, so a failed post is a missed win, never a re-post.
+  if (!(await claimOnce(winClaimKey(deal), 'sponsor-win'))) return false; // already announced
+  // Secondary guard for wins announced before the Job Log claim existed and still in recent
+  // history. We've claimed above either way, so this costs at most one skipped post.
+  if (await alreadyPosted(client, channelId, meta, winMarker(deal))) return false;
 
   const goal = config.sponsorship.semesterGoalUsd;
   const pct = goal > 0 ? Math.round((totalUsd / goal) * 100) : 0;
@@ -104,7 +126,15 @@ export async function announceWinIfNew(
   return true;
 }
 
-export async function runWinPost(): Promise<void> {
+/**
+ * WIN_POST_BACKFILL=true (one-time, at rollout): claim every currently-Won deal in the Job
+ * Log WITHOUT posting. Wins announced before the claim existed have no record, and the ones
+ * that already scrolled out of #operations' recent history would otherwise be re-announced
+ * on the next run — this seeds them as done. Run it once before the first normal run.
+ */
+export async function runWinPost(
+  backfill = process.env.WIN_POST_BACKFILL?.toLowerCase() === 'true'
+): Promise<void> {
   const client = makeSlackClient();
   const notion = new SponsorNotion();
 
@@ -117,6 +147,15 @@ export async function runWinPost(): Promise<void> {
   const won = await notion.queryWonDeals();
   if (won.length === 0) {
     logger.info('Win post: no Won deals.');
+    return;
+  }
+
+  if (backfill) {
+    let claimed = 0;
+    for (const deal of won) {
+      if (await claimOnce(winClaimKey(deal), 'sponsor-win')) claimed += 1;
+    }
+    logger.info(`Win post: backfill marked ${claimed}/${won.length} Won deals as announced — nothing posted.`);
     return;
   }
 

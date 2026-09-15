@@ -1,12 +1,19 @@
 name: Sponsorship — Win Post
 
 # Polls the Pipeline for newly-Won deals and posts once to #operations. There is no
-# Notion webhook in this repo, so we poll hourly; a per-deal marker in the channel
-# makes re-runs idempotent (only un-announced Won deals are posted).
+# Notion webhook in this repo, so we poll hourly; a permanent per-deal claim in the Notion
+# ⚙️ Job Log makes re-runs idempotent (only un-announced Won deals are posted). The claim
+# replaced a channel-history marker that only saw the last 200 messages, so old wins came
+# back around whenever their post scrolled out of #operations.
 on:
   schedule:
     - cron: '0 * * * *' # hourly
   workflow_dispatch:
+    inputs:
+      backfill:
+        description: 'Seed the Job Log from current Won deals (marks them announced, posts nothing) — run once'
+        type: boolean
+        default: false
 
 jobs:
   win-post:
@@ -34,3 +41,4 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           SPONSOR_WIN_CHANNEL: ${{ vars.SPONSOR_WIN_CHANNEL || 'operations' }}
+          WIN_POST_BACKFILL: ${{ inputs.backfill }}
