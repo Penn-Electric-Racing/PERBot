@@ -11,6 +11,7 @@ import { registerOpsTaskActions } from './opsTasks/actions.js';
 import { assignFromMention, registerAssignCommand, registerAssignShortcut } from './opsTasks/assign.js';
 import { registerSponsorActions } from './sponsorship/actions.js';
 import { registerSponsorCommands } from './sponsorship/slack.js';
+import { registerBenbuysCommand } from './benbuys/slack.js';
 
 const app = new App({
   token: config.slack.botToken,
@@ -384,6 +385,7 @@ registerOpsTaskActions(app);
 registerAssignCommand(app);
 registerAssignShortcut(app);
 registerSponsorActions(app);
+registerBenbuysCommand(app);
 
 async function main(): Promise<void> {
   logger.info('[PERBot] Starting Slack Socket Mode...');
