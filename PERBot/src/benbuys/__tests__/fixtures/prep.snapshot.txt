@@ -1,0 +1,19 @@
+--- cart ---
+16, 399-C1206X223KDRACTUCT-ND, CAP CER 0.022UF 1KV X7R 1206
+8, 399-C0603C103K5RACTUCT-ND, CAP CER 10000PF 50V X7R 0603
+3, 725-S1-12-BDM-ND, RELAY REED 1 N/C 1.5KV 12V
+10, 497-16630-ND, ARM® Cortex®-M7 STM32F7
+10, CRGP2010F1M0, RES 1M OHM 1% 1.25W 2010
+--- ben ---
+Description:   PER electrical purchase
+Justification: This is a purchase for PER's electrical subteam.
+Receipt Required: leave unchecked
+Services location: leave blank
+--- summary ---
+5 lines · 6 rows · est. $202.71 → likely no approval needed (≤$500; BEN total decides)
+Not ready (fix in Notion): 2 rows — <https://notion.so/n1|DIODE SCHOTTKY 20V 500MA SOD123>, <https://notion.so/n2|Radiator / fans &lt;TBD&gt;>
+Warnings: 3
+  • 399-C1206X223KDRACTUCT-ND: aggregated across batches (Order 1, Order 2)
+  • 497-16630-ND: high-value line ($177.79) — double-check quantity
+  • CRGP2010F1M0: may be a manufacturer part number — DigiKey may pick different packaging
+Next: /benbuys done <requisition#> <BEN total>

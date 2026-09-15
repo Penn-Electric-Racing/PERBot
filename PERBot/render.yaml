@@ -35,3 +35,10 @@ services:
         value: REV12
       - key: TOP_K_RESULTS
         value: 3
+      # BenBuys ordering helper (/benbuys done sends the requisition email from electric@)
+      - key: BENBUYS_GMAIL_CLIENT_ID
+        sync: false
+      - key: BENBUYS_GMAIL_CLIENT_SECRET
+        sync: false
+      - key: BENBUYS_GMAIL_REFRESH_TOKEN
+        sync: false

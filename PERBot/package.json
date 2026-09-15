@@ -20,6 +20,9 @@
     "job:sponsor-quota": "tsx src/sponsorship/jobs/quotaAudit.ts",
     "job:sponsor-stage-sync": "tsx src/sponsorship/jobs/stageSync.ts",
     "job:ops-digest": "tsx src/opsTasks/digest.ts",
+    "benbuys:prep": "tsx src/benbuys/cli.ts prep",
+    "benbuys:email": "tsx src/benbuys/cli.ts email",
+    "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "check": "tsc --noEmit"
   },
   "dependencies": {

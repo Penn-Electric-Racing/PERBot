@@ -107,6 +107,33 @@ export const config = {
       'https://www.notion.so/20cbf9381bcb45f99125e1468de321a3?v=3d8560bcc0398150b213000c6479f533'
     ),
   },
+  benbuys: {
+    // BenBuys ordering helper (/benbuys prep|done). Source of truth = Purchasing (PEFS) DB.
+    purchasingDataSourceId: optionalString('BENBUYS_PURCHASING_DS_ID', '39e560bc-c039-83db-9f16-076cb18f7d7b'),
+    season: optionalString('BENBUYS_SEASON', 'REV12'),
+    // Shared across vendors: the sending mailbox, the constant CC pair, and the BEN approval bar.
+    from: optionalString('BENBUYS_FROM', 'electric@engineering.upenn.edu'),
+    cc: optionalList('BENBUYS_CC', ['oat@engineering.upenn.edu', 'arjunsh@sas.upenn.edu']),
+    approvalThreshold: optionalNumber('BENBUYS_APPROVAL_THRESHOLD', 500),
+    // DigiKey's customer-reference field is length-capped (spec assumes 35; confirm on the first real run).
+    referenceMaxChars: optionalNumber('BENBUYS_REFERENCE_MAX_CHARS', 35),
+    mail: {
+      // gmail (OAuth2 refresh token on the electric@ mailbox) | webhook (POST JSON to a URL)
+      transport: optionalString('BENBUYS_MAIL_TRANSPORT', 'gmail'),
+      gmailClientId: process.env.BENBUYS_GMAIL_CLIENT_ID?.trim() || '',
+      gmailClientSecret: process.env.BENBUYS_GMAIL_CLIENT_SECRET?.trim() || '',
+      gmailRefreshToken: process.env.BENBUYS_GMAIL_REFRESH_TOKEN?.trim() || '',
+      webhookUrl: process.env.BENBUYS_MAIL_WEBHOOK_URL?.trim() || '',
+    },
+    digikey: {
+      to: optionalList('BENBUYS_DIGIKEY_TO', ['purchasing@engineering.upenn.edu']),
+      description: optionalString('BENBUYS_DIGIKEY_DESCRIPTION', 'PER electrical purchase'),
+      justification: optionalString('BENBUYS_DIGIKEY_JUSTIFICATION', "This is a purchase for PER's electrical subteam."),
+      // Slack user ids allowed to run `done` (Katherine Shen).
+      operators: optionalList('BENBUYS_DIGIKEY_OPERATORS', ['U09GD5JKSBW']),
+      signatureName: optionalString('BENBUYS_DIGIKEY_SIGNATURE', 'Katherine Shen'),
+    },
+  },
   github: {
     token: process.env.GITHUB_TOKEN?.trim() || '',
     repo: optionalString('GITHUB_REPO', 'Penn-Electric-Racing/PERBot'),
