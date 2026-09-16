@@ -1,10 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { auditWindow, bulkStampInstants, computeQuotaResults } from '../quotaAudit.js';
-import { contactedStampFor } from '../stageSync.js';
 import type { PipelineRow, QuotaRosterMember } from '../../types.js';
-
-const NOW = '2026-09-12T17:22:03.688Z';
 
 function deal(over: Partial<PipelineRow> = {}): PipelineRow {
   return {
@@ -25,32 +22,6 @@ function deal(over: Partial<PipelineRow> = {}): PipelineRow {
     ...over,
   };
 }
-
-// --- stage sync: what date goes on a deal it has never stamped -----------------------
-
-test('contactedStampFor: a deal that moved this week is dated now', () => {
-  assert.equal(contactedStampFor(deal(), NOW, false), NOW);
-});
-
-test('contactedStampFor: a deal older than the sync is dated from the deal, not now', () => {
-  // The 2026-09-12 sweep: sitting at Contacted since July, no Last contact recorded.
-  const old = deal({ createdTime: '2026-07-23T10:00:00.000Z' });
-  assert.equal(contactedStampFor(old, NOW, false), '2026-07-23T10:00:00.000Z');
-});
-
-test('contactedStampFor: an old deal contacted for real uses the recorded Last contact', () => {
-  const old = deal({ createdTime: '2026-07-23T10:00:00.000Z', lastContact: '2026-09-12' });
-  assert.equal(contactedStampFor(old, NOW, false), '2026-09-12');
-});
-
-test('contactedStampFor: already stamped, or still Prospect, is left alone', () => {
-  assert.equal(contactedStampFor(deal({ contactedAt: '2026-09-01T00:00:00Z' }), NOW, false), null);
-  assert.equal(contactedStampFor(deal({ stage: 'Prospect' }), NOW, false), null);
-});
-
-test('contactedStampFor: backfill still dates every unstamped deal from creation', () => {
-  assert.equal(contactedStampFor(deal(), NOW, true), '2026-09-11T12:00:00.000Z');
-});
 
 // --- quota audit: one bulk write is not N contacts -----------------------------------
 
@@ -96,4 +67,25 @@ test('computeQuotaResults: contacts outside the window never count', () => {
   const inside = deal({ id: 'i1', contactedAt: '2026-09-12T19:31:00.000Z' });
   const [result] = computeQuotaResults(members, [before, inside], window, 3);
   assert.deepEqual(result.deals.map((d) => d.id), ['i1']);
+});
+
+test('computeQuotaResults: a Notion-side move earns nothing without the Slack command', () => {
+  // Dragging the card to Contacted in Notion leaves `Contacted at` empty — nothing stamps it
+  // now that the hourly stage sync is gone, so it cannot count. Running
+  // `/sponsor stage <company> Contacted` afterwards stamps it and it counts.
+  const window = auditWindow('2026-09-19');
+  const members: QuotaRosterMember[] = [{ name: 'Katherine Shen', notionUserId: 'u1' }];
+  const moved = deal({ id: 'm1', stage: 'Contacted', contactedAt: null, lastContact: '2026-09-15' });
+  assert.equal(computeQuotaResults(members, [moved], window, 3)[0].deals.length, 0);
+
+  const logged = { ...moved, contactedAt: '2026-09-15T18:00:00.000Z' };
+  assert.equal(computeQuotaResults(members, [logged], window, 3)[0].deals.length, 1);
+});
+
+test('computeQuotaResults: claiming a lead earns nothing', () => {
+  // /sponsor claim creates a Prospect deal and stamps no Contacted at.
+  const window = auditWindow('2026-09-19');
+  const members: QuotaRosterMember[] = [{ name: 'Arjun Sharma', notionUserId: 'u1' }];
+  const claimed = deal({ id: 'c1', stage: 'Prospect', contactedAt: null });
+  assert.equal(computeQuotaResults(members, [claimed], window, 3)[0].deals.length, 0);
 });

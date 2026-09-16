@@ -423,7 +423,7 @@ export class SponsorNotion {
     return this.queryPipeline({ timestamp: 'last_edited_time', last_edited_time: { on_or_after: sinceIso } });
   }
 
-  /** Stamp `Contacted at` (first move out of Prospect) — used by the hourly stage sync. */
+  /** Stamp `Contacted at` (first move out of Prospect) — quota credit; see jobs/quotaAudit.ts. */
   async writeContactedAt(pageId: string, iso: string): Promise<void> {
     await this.client.pages.update({
       page_id: pageId,

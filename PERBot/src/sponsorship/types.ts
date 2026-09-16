@@ -130,8 +130,10 @@ export interface PipelineRow {
   createdTime: string;
   /**
    * ISO datetime the deal first left Prospect (→ Contacted / In talks / Won) = outreach sent.
-   * Stamped instantly by `/sponsor stage` / `/sponsor won`, or by the hourly stage sync for
-   * edits made in Notion (jobs/stageSync.ts). Null while still Prospect (or Lost from Prospect).
+   * Stamped ONLY by a deliberate act in Slack — `/sponsor stage` / `/sponsor won` / a stage
+   * button. Editing Stage in Notion leaves this null on purpose (Arjun's rule, 2026-09-16:
+   * a row saying "Contacted" isn't evidence anyone sent an email), so such a deal earns no
+   * quota credit until someone runs the command. Null while still Prospect (or Lost from it).
    * The weekly quota audit credits the deal's DRI(s) in the week of this stamp.
    */
   contactedAt: string | null;

@@ -6,7 +6,6 @@ import { etWallTimeToUtc, isoAddDays, todayIsoET } from '../dates.js';
 import { fetchSlackDirectory, Indexed, notionUserToSlackId } from '../identity.js';
 import { SponsorNotion } from '../notion.js';
 import { NotionUser, PipelineRow, QuotaAuditResult, QuotaRosterMember } from '../types.js';
-import { syncContactedStamps } from './stageSync.js';
 import { alreadyPosted, makeSlackClient, metadataFor, resolveChannelId, WinMeta } from './shared.js';
 
 /**
@@ -14,9 +13,18 @@ import { alreadyPosted, makeSlackClient, metadataFor, resolveChannelId, WinMeta 
  * (a Notion DB ops leads maintain — no deploy to change who's on the hook) must have
  * moved `config.sponsorship.weeklyQuota` of their Pipeline deals out of Prospect in the
  * past week — i.e. sent outreach. "Contacted this week" = the deal's `Contacted at` stamp
- * (first move Prospect → Contacted / In talks / Won; set by `/sponsor stage`/`won` or the
- * hourly stage sync for Notion edits) falls inside [last Sat 10:00 ET, this Sat 10:00 ET),
- * credited to the deal's current DRI(s) — co-owned deals credit each in full.
+ * falls inside [last Sat 10:00 ET, this Sat 10:00 ET), credited to the deal's current
+ * DRI(s) — co-owned deals credit each in full.
+ *
+ * ONLY A DELIBERATE ACT IN SLACK STAMPS `Contacted at` (Arjun's rule, 2026-09-16):
+ * `/sponsor stage <company> Contacted`, the stage buttons on a digest/stale DM, or
+ * `/sponsor won`. Claiming a Bank lead doesn't count — it creates a Prospect deal and
+ * stamps nothing. Dragging a card in Notion doesn't count either: the hourly stage sync
+ * that used to date those moves is DELETED, because "the row says Contacted" is not
+ * evidence anyone sent an email, and dating such a move `now` credited weeks-old outreach
+ * to the current week (it read 11/3 for one member on 2026-09-16 — see git log).
+ * Someone who moved the card in Notion first still earns credit by running the command
+ * afterwards: `/sponsor stage` always writes, even when the stage already matches.
  *
  * Output: (1) one row per member per week upserted into 📋 Weekly Quota Audit — the
  * durable record of who met quota and who didn't; (2) ONE channel post (#perbot_spam)
@@ -166,7 +174,7 @@ export function buildQuotaPost(
 
   const lines = [
     `:clipboard: *Weekly sponsorship quota audit* — ${fmtDate(window.weekStartIso)} → ${fmtDate(window.weekEndIso)}`,
-    `_Quota: ${quota} sponsor${plural} contacted per ops member (your Pipeline deals moved Prospect → Contacted this week)._`,
+    `_Quota: ${quota} sponsor${plural} contacted per ops member, logged with \`/sponsor stage <company> Contacted\`._`,
   ];
   if (met.length > 0) {
     lines.push(`:white_check_mark: *Met (${met.length}/${total}):* ${met.map((r) => `${r.member.name} (${r.deals.length})`).join(' · ')}`);
@@ -178,7 +186,8 @@ export function buildQuotaPost(
     lines.push(':tada: Everyone hit quota this week.');
   }
   lines.push(
-    `_Record: <${config.sponsorship.quotaAuditUrl}|📋 Weekly Quota Audit>. Send outreach, then \`/sponsor stage <company> Contacted\`._`
+    `_Record: <${config.sponsorship.quotaAuditUrl}|📋 Weekly Quota Audit>. Only the Slack command counts — ` +
+      `claiming a lead or moving a card in Notion doesn't._`
   );
   return lines.join('\n');
 }
@@ -218,7 +227,10 @@ export function formatQuotaStanding(
       `*Team (${met}/${sorted.length} met):* ${sorted.map((r) => `${r.met ? '✅ ' : ''}${r.member.name} ${r.deals.length}/${quota}`).join(' · ')}`
     );
   }
-  lines.push('_Counts your Pipeline deals moved Prospect → Contacted this week. Send outreach, then `/sponsor stage <company> Contacted`._');
+  lines.push(
+    '_Send outreach, then log it with `/sponsor stage <company> Contacted` — that command (or a stage button) ' +
+      "is what counts. Claiming a lead or moving a card in Notion doesn't._"
+  );
   return lines.join('\n');
 }
 
@@ -264,7 +276,6 @@ export async function runQuotaAudit(
 
   // Stamp any Notion-side stage moves since the last hourly sync first (skipped in dry
   // runs — no writes — so counts may lag by up to an hour).
-  if (!dryRun) await syncContactedStamps(notion, false);
 
   const [members, deals, notionUsers] = await Promise.all([
     notion.queryQuotaRoster(),
