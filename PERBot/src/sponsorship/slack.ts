@@ -8,7 +8,6 @@ import { draftOutreachEmail } from './emailDraft.js';
 import { DomainResolutionError, enrichCompany } from './enrichCompany.js';
 import { indexNotionUsers, resolveSlackHandles, slackUserToNotionId } from './identity.js';
 import { dealListBlocks } from './dealBlocks.js';
-import { syncContactedStamps } from './jobs/stageSync.js';
 import { computeQuotaResults, currentAuditWindow, formatQuotaStanding } from './jobs/quotaAudit.js';
 import { announceWonNow, totalRaised } from './jobs/winPost.js';
 import { SponsorNotion } from './notion.js';
@@ -292,7 +291,6 @@ async function handleMe(client: WebClient, respond: RespondFn, slackUserId: stri
 async function handleQuota(client: WebClient, respond: RespondFn, slackUserId: string): Promise<void> {
   const window = currentAuditWindow();
   const quota = config.sponsorship.weeklyQuota;
-  await syncContactedStamps(notion, false); // date any Notion-side stage move since the last hourly sync
   const [members, deals, notionUsers] = await Promise.all([
     notion.queryQuotaRoster(),
     notion.queryDealsEditedSince(window.start.toISOString()),
