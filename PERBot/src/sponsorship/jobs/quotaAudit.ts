@@ -31,6 +31,40 @@ import { alreadyPosted, makeSlackClient, metadataFor, resolveChannelId, WinMeta 
 
 const AUDIT_HOUR_ET = 10;
 
+/**
+ * Deals sharing ONE exact `Contacted at` instant, this many or more, with nothing else on
+ * the row to show outreach happened, are a single bulk write — a sync sweep or a Notion
+ * multi-row edit — not that many separate emails sent in the same minute. They're dropped
+ * from quota credit rather than counted.
+ *
+ * WHY: the stage sync's first run (2026-09-12) stamped 8 long-since-contacted deals with
+ * one timestamp and they all counted toward that week, showing a member at 11/3. The sync
+ * no longer dates old deals `now` (stageSync.ts), but a human bulk-editing Stage in Notion
+ * can still produce the same shape, so the audit refuses to read one write as N contacts.
+ *
+ * "Nothing else on the row" is what keeps this off real work: `/sponsor stage` stamps Last
+ * contact as it moves a deal, so three of those fired inside one minute each carry their own
+ * record of the contact and still count. A sweep leaves that column untouched.
+ */
+const BULK_STAMP_MIN = 3;
+
+/** True if the row itself records a contact inside the window — evidence independent of the stamp. */
+function hasOwnContactRecord(deal: PipelineRow, window: AuditWindow): boolean {
+  return !!deal.lastContact && deal.lastContact.slice(0, 10) >= window.weekStartIso;
+}
+
+/**
+ * The `Contacted at` instants that look like one bulk write rather than real outreach:
+ * shared by BULK_STAMP_MIN+ deals that carry no contact record of their own.
+ */
+export function bulkStampInstants(deals: PipelineRow[], window: AuditWindow): Set<string> {
+  const counts = new Map<string, number>();
+  for (const d of deals) {
+    if (!d.contactedAt || hasOwnContactRecord(d, window)) continue;
+    counts.set(d.contactedAt, (counts.get(d.contactedAt) ?? 0) + 1);
+  }
+  return new Set([...counts].filter(([, n]) => n >= BULK_STAMP_MIN).map(([iso]) => iso));
+}
 
 export interface AuditWindow {
   /** YYYY-MM-DD (ET) the window opens — Sat 10:00 ET. */
@@ -86,7 +120,16 @@ export function computeQuotaResults(
     const t = new Date(iso).getTime();
     return t >= window.start.getTime() && t < window.end.getTime();
   };
-  const contacted = deals.filter((d) => d.contactedAt && inWindow(d.contactedAt));
+  const inside = deals.filter((d) => d.contactedAt && inWindow(d.contactedAt));
+  // One bulk write is one event, however many rows it touched — never N contacts.
+  const bulk = bulkStampInstants(inside, window);
+  const contacted = inside.filter((d) => !bulk.has(d.contactedAt!) || hasOwnContactRecord(d, window));
+  if (contacted.length < inside.length) {
+    logger.warn(
+      `Quota audit: ignored ${inside.length - contacted.length} deal(s) sharing a bulk "Contacted at" stamp ` +
+        `(${[...bulk].join(', ')}) — one write, not outreach.`
+    );
+  }
   return members.map((member) => {
     const mine = contacted
       .filter((d) => d.driUserIds.includes(member.notionUserId))
