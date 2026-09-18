@@ -114,7 +114,17 @@ async function createAndAnnounce(
   client: WebClient,
   opts: { assignerSlackId: string; assigneeSlackIds: string[]; ownerNotionIds: string[]; task: string; dueIso: string | null }
 ): Promise<{ task: OpsTask; publicText: string }> {
-  const task = await notion.createTask({ title: opts.task, ownerIds: opts.ownerNotionIds, dueIso: opts.dueIso });
+  // Link to the week's meeting page so the task shows under "This week" there. The page is
+  // created ahead of time by the repeating template; if it isn't there yet the task is
+  // created unlinked and the Sunday digest links it once the page exists.
+  let meetingId: string | null = null;
+  try {
+    meetingId = (await notion.meetingForDate(todayIsoET()))?.id ?? null;
+    if (!meetingId) logger.warn(`/assign: no Ops Meetings page for the week of ${todayIsoET()} yet — creating "${opts.task}" unlinked.`);
+  } catch (err) {
+    logger.warn('/assign: meeting lookup failed — creating the task unlinked.', err);
+  }
+  const task = await notion.createTask({ title: opts.task, ownerIds: opts.ownerNotionIds, dueIso: opts.dueIso, meetingId });
   const who = opts.assigneeSlackIds.map((id) => `<@${id}>`).join(', ');
   const publicText = `:pushpin: <@${opts.assignerSlackId}> assigned ${who}: *${task.title}*${task.due ? ` · due ${shortDate(task.due)}` : ''} · <${task.url}|Open in Notion>`;
   for (const assignee of opts.assigneeSlackIds) {
