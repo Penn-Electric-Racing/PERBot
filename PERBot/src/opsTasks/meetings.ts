@@ -24,15 +24,16 @@ export function saturdayOnOrAfter(iso: string): string {
 }
 
 /**
- * The meeting a task anchored at `anchorIso` belongs to: the earliest meeting dated within
- * [anchor, Saturday-of-that-week]. `null` when no such page exists yet (the repeating
- * template creates pages ahead of the meeting; before that there is nothing to link to).
+ * The meeting a task anchored at `anchorIso` belongs to: the meeting page whose Date falls
+ * in the same Sunday–Saturday week as the anchor (earliest such page if several). Matching
+ * by week, not exact date, tolerates the repeating template stamping Date with the page's
+ * creation moment (Sunday morning) before the lead sets it to the Saturday. `null` when no
+ * page for that week exists yet.
  */
 export function pickMeeting(meetings: OpsMeeting[], anchorIso: string): OpsMeeting | null {
-  const from = anchorIso.slice(0, 10);
-  const to = saturdayOnOrAfter(from);
+  const week = saturdayOnOrAfter(anchorIso);
   const candidates = meetings
-    .filter((m) => m.date >= from && m.date <= to)
+    .filter((m) => saturdayOnOrAfter(m.date) === week)
     .sort((a, b) => a.date.localeCompare(b.date));
   return candidates[0] ?? null;
 }

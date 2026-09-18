@@ -32,8 +32,16 @@ test('pickMeeting: never links to a past meeting or a later week', () => {
   assert.equal(pickMeeting([], '2026-09-14'), null);
 });
 
-test('pickMeeting: tolerates a meeting dated before Saturday in the same week', () => {
-  const odd = [{ id: 'thu', date: '2026-09-17' }, { id: 'sat', date: '2026-09-19' }];
+test('pickMeeting: a page stamped with its Sunday creation time still counts for that week', () => {
+  const sundayStamped = [{ id: 'm0919', date: '2026-09-19' }, { id: 'm0926', date: '2026-09-20T13:00:00.000Z' }];
+  assert.equal(pickMeeting(sundayStamped, '2026-09-21')?.id, 'm0926'); // Monday → the page created Sunday
+  assert.equal(pickMeeting(sundayStamped, '2026-09-26')?.id, 'm0926'); // the Saturday itself
+  assert.equal(pickMeeting(sundayStamped, '2026-09-19')?.id, 'm0919'); // previous week unaffected
+  assert.equal(pickMeeting(sundayStamped, '2026-09-27'), null); // following week has no page yet
+});
+
+test('pickMeeting: a Thursday-stamped page (old repeat schedule) maps to its Saturday', () => {
+  const odd = [{ id: 'thu', date: '2026-09-17' }];
   assert.equal(pickMeeting(odd, '2026-09-14')?.id, 'thu');
-  assert.equal(pickMeeting(odd, '2026-09-18')?.id, 'sat');
+  assert.equal(pickMeeting(odd, '2026-09-19')?.id, 'thu');
 });
