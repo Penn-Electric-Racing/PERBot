@@ -6,6 +6,7 @@ import { fetchSlackDirectory, notionUserToSlackId } from '../sponsorship/identit
 import { makeSlackClient } from '../sponsorship/jobs/shared.js';
 import { buildDigestBlocks } from './blocks.js';
 import { isOverdue, sortTasks, taskLine } from './format.js';
+import { pickMeeting } from './meetings.js';
 import { OpsTask, OpsTasksNotion } from './notion.js';
 
 // Formatting helpers live in format.ts (shared with blocks.ts); re-exported for existing importers.
@@ -34,6 +35,37 @@ export function isPlaceholder(task: OpsTask): boolean {
   return task.title === '' || PLACEHOLDER_RE.test(task.title);
 }
 
+/**
+ * Link open tasks that have no Meeting relation to the meeting page their date falls in
+ * (see meetings.ts). Such tasks come from `/assign` runs before the week's page existed and
+ * from rows added on the old Week-filtered pages; unlinked, they never appear in any
+ * "This week" table and look carried over on every page. Mutates the passed tasks so the
+ * DMs sent right after use the linked meeting's date for "carried N wks". Returns the count.
+ */
+export async function linkOrphanTasks(notion: OpsTasksNotion, tasks: OpsTask[], dryRun = false): Promise<number> {
+  const orphans = tasks.filter((t) => t.meetingIds.length === 0 && t.week);
+  if (orphans.length === 0) return 0;
+  const meetings = await notion.listMeetings();
+  let linked = 0;
+  for (const task of orphans) {
+    const meeting = pickMeeting(meetings, task.week!);
+    if (!meeting) {
+      logger.info(`Ops digest: "${task.title}" (dated ${task.week}) has no meeting page to link to yet.`);
+      continue;
+    }
+    try {
+      if (!dryRun) await notion.linkMeeting(task, meeting.id);
+      task.meetingIds.push(meeting.id);
+      task.week = meeting.date;
+      linked++;
+    } catch (err) {
+      logger.warn(`Ops digest: could not link "${task.title}" to meeting ${meeting.date}.`, err);
+    }
+  }
+  logger.info(`Ops digest: linked ${linked}/${orphans.length} unlinked task(s) to their meeting page${dryRun ? ' (dry run)' : ''}.`);
+  return linked;
+}
+
 export function buildDigest(tasks: OpsTask[]): string {
   const sorted = sortTasks(tasks);
   const overdue = sorted.filter(isOverdue).length;
@@ -55,6 +87,7 @@ export async function runOpsDigest(force = process.env.FORCE_OPS_DIGEST?.toLower
   const open = await notion.queryOpenTasks();
   const real = open.filter((t) => !isPlaceholder(t));
   logger.info(`Ops digest (${todayIsoET()}): ${open.length} open rows, ${open.length - real.length} placeholders skipped.`);
+  await linkOrphanTasks(notion, real, dryRun);
 
   // One list per owner; a co-owned task appears in every owner's DM.
   const byOwner = new Map<string, { owner: OpsTask['owners'][number]; tasks: OpsTask[] }>();

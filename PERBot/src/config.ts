@@ -101,6 +101,9 @@ export const config = {
     // Ops Tasks database under REV12 Operations (see CLAUDE.md "Notion IDs"): one row per
     // action item a member types under their name on the Saturday meeting page.
     dataSourceId: optionalString('OPS_TASKS_DS_ID', 'a8afc6ec-29d6-4308-b779-ad4235b35e80'),
+    // Ops Meetings database (one row per Saturday meeting page, Date property). Tasks link to a
+    // row via the `Meeting` relation; each page's "This week" table filters on that relation.
+    meetingsDataSourceId: optionalString('OPS_MEETINGS_DS_ID', 'f0e637cd-db29-4a8d-883f-c8c5603db02f'),
     // The database's "My open" view (Owner = me, Status != Done) — linked from the digest DM.
     myOpenViewUrl: optionalString(
       'OPS_TASKS_MY_OPEN_URL',
