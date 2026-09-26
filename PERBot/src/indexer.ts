@@ -198,6 +198,8 @@ async function main(): Promise<void> {
       min: config.app.chunkMinChars,
     });
     if (pieces.length === 0) continue;
+    // Cap chunks per document so one 200-page datasheet can't dominate the index or the memory budget.
+    if (pieces.length > config.app.maxChunksPerDoc) pieces.length = config.app.maxChunksPerDoc;
     pages.push(page);
     pieces.forEach((piece, chunkIndex) => {
       const embedText = buildEmbedText(page.title, doc.ancestors, piece.heading, piece.text);

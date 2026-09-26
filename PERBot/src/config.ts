@@ -153,7 +153,13 @@ export const config = {
     // Subtrees under a folder with one of these names are skipped (case-insensitive).
     excludeFolderNames: optionalList('GDRIVE_EXCLUDE_FOLDERS', ['Photos', 'Pictures', 'Media', 'Videos', 'Archive']),
     maxFileBytes: optionalNumber('GDRIVE_MAX_FILE_MB', 20) * 1_000_000,
-    maxFiles: optionalNumber('GDRIVE_MAX_FILES', 5000),
+    maxFiles: optionalNumber('GDRIVE_MAX_FILES', 20000),
+    // Folders named "REVn" with n below this are skipped (default: two seasons before CURRENT_REV).
+    // The FSAE drive holds ~66k files under REV7/REV8 alone; last two seasons + shared folders is the
+    // useful slice, and anything older is "historical" for ranking anyway.
+    minRev: optionalNumber('GDRIVE_MIN_REV', (Number(optionalString('CURRENT_REV', 'REV12').replace(/\D/g, '')) || 12) - 2),
+    // Characters kept per file (Docs export / PDF text). Long datasheets are cut, not skipped.
+    maxDocChars: optionalNumber('GDRIVE_MAX_DOC_CHARS', 60_000),
   },
   github: {
     token: process.env.GITHUB_TOKEN?.trim() || '',
@@ -172,6 +178,7 @@ export const config = {
     chunkTargetChars: optionalNumber('CHUNK_TARGET_CHARS', 900),
     chunkMaxChars: optionalNumber('CHUNK_MAX_CHARS', 1400),
     chunkMinChars: optionalNumber('CHUNK_MIN_CHARS', 250),
+    maxChunksPerDoc: optionalNumber('MAX_CHUNKS_PER_DOC', 60),
     // Database rows need at least this much cleaned body text to be indexed as a doc.
     minRecordBodyChars: optionalNumber('MIN_RECORD_BODY_CHARS', 300),
     // Any page needs at least this much cleaned text to be worth a chunk.

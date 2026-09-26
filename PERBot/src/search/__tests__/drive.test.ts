@@ -75,3 +75,16 @@ test('files route to export, download or skip by type and size', () => {
   assert.equal(routeFile(f('e', 'part.SLDPRT', 'application/octet-stream'), max).type, 'skip');
   assert.equal(routeFile(f('g', 'Folder', 'application/vnd.google-apps.folder'), max).type, 'skip');
 });
+
+test('folders for seasons older than minRev are excluded', () => {
+  const folders = [
+    f('r7', 'REV7', 'application/vnd.google-apps.folder', 'DRIVE'),
+    f('r11', 'REV11', 'application/vnd.google-apps.folder', 'DRIVE'),
+    f('r11sub', 'Accumulator', 'application/vnd.google-apps.folder', 'r11'),
+    f('common', 'Common Resources', 'application/vnd.google-apps.folder', 'DRIVE'),
+  ];
+  const index = buildFolderIndex(folders, new Map([['DRIVE', 'PER']]), [], 10);
+  assert.equal(index.excluded(f('a', 'old', 'application/pdf', 'r7')), true);
+  assert.equal(index.excluded(f('b', 'new', 'application/pdf', 'r11sub')), false);
+  assert.equal(index.excluded(f('c', 'shared', 'application/pdf', 'common')), false);
+});
