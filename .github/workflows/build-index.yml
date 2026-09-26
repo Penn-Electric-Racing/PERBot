@@ -39,6 +39,8 @@ jobs:
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # Google Shared Drive source (service account key JSON, raw or base64). Unset ⇒ Notion only.
+          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
           GITHUB_TOKEN: ${{ github.token }}
           # Slack tokens are required by config.ts at load time but unused by the indexer
           SLACK_BOT_TOKEN: unused

@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
-import { config } from './config.js';
-import { NotionService, type IndexableDocument } from './services/notion.js';
+import { config, hasDrive } from './config.js';
+import { NotionService } from './services/notion.js';
+import { DriveService } from './sources/drive.js';
+import { loadServiceAccountKey, ServiceAccountAuth } from './sources/googleAuth.js';
+import type { SourceDocument } from './sources/types.js';
 import { downloadBuildInputsFromRelease } from './services/index-downloader.js';
 import {
   indexExists,
@@ -15,6 +18,7 @@ import { extractDocDate, extractRevNumber } from './utils/notionText.js';
 import { logger } from './utils/logger.js';
 import { embedTexts } from './services/llm.js';
 import type {
+  BuildCache,
   ChunkRecord,
   InferredBranch,
   InferredDocType,
@@ -98,29 +102,48 @@ function sha1(text: string): string {
   return createHash('sha1').update(text).digest('hex');
 }
 
-function toPageRecord(doc: IndexableDocument, currentRev: number | null): PageRecord {
-  const path = [...doc.ancestors, doc.page.title];
+function toPageRecord(doc: SourceDocument, currentRev: number | null): PageRecord {
+  const path = [...doc.ancestors, doc.title];
   const pathText = path.join(' › ');
   const head = doc.cleanText.slice(0, 500);
-  const revNumber = extractRevNumber(doc.page.title, pathText, head);
+  const revNumber = extractRevNumber(doc.title, pathText, head);
   return {
-    id: doc.page.id,
-    source: 'notion',
+    id: doc.id,
+    source: doc.source,
     kind: doc.kind,
-    title: doc.page.title,
-    url: doc.page.url,
+    title: doc.title,
+    url: doc.url,
     path,
     pathText,
-    createdTime: doc.page.createdTime,
-    lastEditedTime: doc.page.lastEditedTime,
+    createdTime: doc.createdTime,
+    lastEditedTime: doc.lastEditedTime,
     revNumber,
-    docDate: extractDocDate(doc.page.title),
+    docDate: extractDocDate(doc.title),
     isHistorical: isHistorical(pathText, revNumber, currentRev),
     textLength: doc.cleanText.length,
     inferredBranch: inferBranch(pathText),
     inferredSubsystem: inferSubsystem(pathText, head),
-    inferredDocType: inferDocType(doc.page.title, pathText, head),
+    inferredDocType: inferDocType(doc.title, pathText, head),
   };
+}
+
+/** Google Shared Drive documents, or none when the service account isn't configured or fails. */
+async function buildDriveDocuments(cache: BuildCache): Promise<{ docs: SourceDocument[]; cache: BuildCache['drive'] }> {
+  if (!hasDrive()) {
+    logger.info('Google Drive source not configured (GDRIVE_SERVICE_ACCOUNT_JSON unset); Notion only.');
+    return { docs: [], cache: cache.drive };
+  }
+  try {
+    const key = await loadServiceAccountKey({ json: config.gdrive.serviceAccountJson, file: config.gdrive.serviceAccountFile });
+    if (!key) return { docs: [], cache: cache.drive };
+    const auth = new ServiceAccountAuth(key, ['https://www.googleapis.com/auth/drive.readonly']);
+    logger.info(`Google Drive source: indexing as ${auth.email}.`);
+    return await new DriveService(auth).buildDocuments(cache);
+  } catch (err) {
+    // A Drive outage must not take the Notion index down with it; keep last night's Drive text.
+    logger.error('Google Drive indexing failed; continuing with Notion only.', err);
+    return { docs: [], cache: cache.drive };
+  }
 }
 
 async function loadPreviousEmbeddings(): Promise<Map<string, Float32Array>> {
@@ -156,8 +179,10 @@ async function main(): Promise<void> {
 
   const notion = new NotionService();
   await saveStatus({ state: 'indexing', phase: 'building_pages', startedAt });
-  const { docs, cache: nextCache } = await notion.buildIndexableDocuments(cache);
-  await saveBuildCache(nextCache);
+  const { docs: notionDocs, cache: pagesCache } = await notion.buildIndexableDocuments(cache);
+  const { docs: driveDocs, cache: driveCache } = await buildDriveDocuments(cache);
+  const docs = [...notionDocs, ...driveDocs];
+  await saveBuildCache({ version: 1, pages: pagesCache, ...(driveCache ? { drive: driveCache } : {}) });
 
   await saveStatus({ state: 'indexing', phase: 'chunking', startedAt, totalPages: docs.length });
   const currentRevNumber = Number(config.app.currentRev.replace(/\D/g, '')) || null;

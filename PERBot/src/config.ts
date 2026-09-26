@@ -141,6 +141,20 @@ export const config = {
       signatureName: optionalString('BENBUYS_DIGIKEY_SIGNATURE', 'Katherine Shen'),
     },
   },
+  gdrive: {
+    // Google Shared Drive source for /dt (Phase 5). A service account key, as raw JSON or base64
+    // (secret `GDRIVE_SERVICE_ACCOUNT_JSON`) or a file path. Unset ⇒ the Drive source is skipped.
+    serviceAccountJson: process.env.GDRIVE_SERVICE_ACCOUNT_JSON?.trim() || '',
+    serviceAccountFile: process.env.GDRIVE_SERVICE_ACCOUNT_FILE?.trim() || '',
+    // Empty = every Shared Drive the service account has been added to.
+    driveIds: optionalList('GDRIVE_DRIVE_IDS'),
+    // Extra folders (any drive) shared with the service account, walked recursively.
+    folderIds: optionalList('GDRIVE_FOLDER_IDS'),
+    // Subtrees under a folder with one of these names are skipped (case-insensitive).
+    excludeFolderNames: optionalList('GDRIVE_EXCLUDE_FOLDERS', ['Photos', 'Pictures', 'Media', 'Videos', 'Archive']),
+    maxFileBytes: optionalNumber('GDRIVE_MAX_FILE_MB', 20) * 1_000_000,
+    maxFiles: optionalNumber('GDRIVE_MAX_FILES', 5000),
+  },
   github: {
     token: process.env.GITHUB_TOKEN?.trim() || '',
     repo: optionalString('GITHUB_REPO', 'Penn-Electric-Racing/PERBot'),
@@ -183,6 +197,10 @@ export function hasOpenAI(): boolean {
 
 export function hasGroq(): boolean {
   return Boolean(config.groq.apiKey);
+}
+
+export function hasDrive(): boolean {
+  return Boolean(config.gdrive.serviceAccountJson || config.gdrive.serviceAccountFile);
 }
 
 export function hasHunter(): boolean {

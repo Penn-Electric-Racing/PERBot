@@ -25,6 +25,9 @@ services:
         sync: false
       - key: GITHUB_TOKEN
         sync: false
+      # Only needed if /reindex on Render should include Google Drive (the nightly Action does).
+      - key: GDRIVE_SERVICE_ACCOUNT_JSON
+        sync: false
       - key: GITHUB_REPO
         value: Penn-Electric-Racing/PERBot
       - key: INDEX_PATH
