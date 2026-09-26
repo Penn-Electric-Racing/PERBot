@@ -126,7 +126,8 @@ function toPageRecord(doc: IndexableDocument, currentRev: number | null): PageRe
 async function loadPreviousEmbeddings(): Promise<Map<string, Float32Array>> {
   const reuse = new Map<string, Float32Array>();
   if (!config.app.indexIncremental) return reuse;
-  if (!(await indexExists())) await downloadBuildInputsFromRelease();
+  // On Render the bot has index + embeddings but never the build cache; fetch whatever is missing.
+  await downloadBuildInputsFromRelease();
   if (!(await indexExists())) return reuse;
   try {
     const { index, embeddings } = await readIndexFiles();

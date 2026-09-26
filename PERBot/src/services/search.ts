@@ -65,6 +65,9 @@ const GLOSSARY: Record<string, string[]> = {
   dti: ['drivetrain', 'innovation', 'inverter'],
 };
 
+/** Glossary keys that are also ordinary words; only expanded when typed in capitals ("AIR", "CAN"). */
+const UPPERCASE_ONLY = new Set(['can', 'air', 'airs', 'di', 'ts', 'tc', 'tv', 'dash', 'ses']);
+
 const HIGH_LEVEL_HINTS = ['high level', 'overview', 'intro', 'introduction', 'summary', 'where should i start', 'new member', 'guide', 'wiki', 'learn', 'onboarding'];
 const NOTES_HINTS = ['latest notes', 'recent notes', 'meeting notes', 'meeting', 'notes', 'minutes', 'agenda', 'recent', 'latest', 'update', 'updates', 'this week', 'last week'];
 
@@ -118,9 +121,13 @@ function expandTerms(query: string): Array<{ term: string; weight: number }> {
   const typed = tokenize(query);
   const out = new Map<string, number>();
   for (const t of typed) out.set(t, 1);
+  const content = new Set(contentTerms(query));
   const joined = typed.join(' ');
   for (const [acronym, words] of Object.entries(GLOSSARY)) {
-    if (typed.includes(acronym)) {
+    const typedIt =
+      content.has(acronym) &&
+      (!UPPERCASE_ONLY.has(acronym) || new RegExp(`\\b${acronym.toUpperCase()}\\b`).test(query));
+    if (typedIt) {
       for (const w of words) if (!out.has(w)) out.set(w, 0.4);
     } else if (words.length > 1 && joined.includes(words.join(' ')) && !out.has(acronym)) {
       out.set(acronym, 0.8);
@@ -195,7 +202,7 @@ export function rankPages(loaded: LoadedIndex, parsed: ParsedQuery, queryEmbeddi
   const q = queryText.toLowerCase();
   const wantsHighLevel = HIGH_LEVEL_HINTS.some((h) => q.includes(h));
   const wantsNotes = NOTES_HINTS.some((h) => q.includes(h));
-  const wantsHistorical = /\b(historical|old|older|previous|past|rev\s?[0-9]|history)\b/.test(q);
+  const wantsHistorical = /\b(historical|old|older|previous|past|rev\s?\d{1,2}|history)\b/.test(q);
 
   const ranked: RankedPage[] = [];
   for (const [pid, agg] of byPage) {
@@ -289,10 +296,10 @@ export async function searchIndex(loaded: LoadedIndex, rawQuery: string, opts: S
 
 /** The best chunk plus its neighbour on the same page, for the answer model. */
 export function contextForResult(loaded: LoadedIndex, result: SearchResult, maxChars: number): string {
+  // Chunks are stored in page order, so a page's k-th chunk is idxs[k].
   const idxs = loaded.chunkIdxByPage.get(result.page.id) ?? [];
-  const pos = idxs.indexOf(loaded.index.chunks.findIndex((c) => c.id === result.chunk.id));
   const parts = [result.chunk.text];
-  const next = pos >= 0 ? idxs[pos + 1] : undefined;
+  const next = idxs[result.chunk.chunkIndex + 1];
   if (next !== undefined) parts.push(loaded.index.chunks[next]!.text);
   const joined = parts.join('\n\n');
   return joined.length > maxChars ? `${joined.slice(0, maxChars)}…` : joined;

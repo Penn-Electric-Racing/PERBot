@@ -68,6 +68,8 @@ async function downloadAsset(release: Release, name: string, destPath: string): 
   }
   const res = await fetch(`${GITHUB_API}/repos/${config.github.repo}/releases/assets/${asset.id}`, {
     headers: { ...headers(), Accept: 'application/octet-stream' },
+    // ~60 MB gzipped at worst; a stalled CDN connection must not hang every /dt behind it.
+    signal: AbortSignal.timeout(10 * 60_000),
   });
   if (!res.ok || !res.body) {
     logger.warn(`Download of ${name} failed (${res.status}).`);
@@ -112,18 +114,32 @@ export async function downloadIndexFromRelease(
   }
 }
 
-/** For the indexer: previous index + embeddings + raw-markdown cache so unchanged pages are reused. */
+async function exists(p: string): Promise<boolean> {
+  return fs.access(p).then(
+    () => true,
+    () => false
+  );
+}
+
+/**
+ * For the indexer: previous index + embeddings + raw-markdown cache so unchanged pages are reused.
+ * Only fetches what is missing locally (the bot keeps index + embeddings but never the cache).
+ */
 export async function downloadBuildInputsFromRelease(): Promise<void> {
   try {
+    const wanted: Array<[string, string]> = [
+      [RELEASE_ASSETS.index, config.app.indexPath],
+      [RELEASE_ASSETS.embeddings, config.app.embeddingsPath],
+      [RELEASE_ASSETS.buildCache, config.app.buildCachePath],
+    ];
+    const missing: Array<[string, string]> = [];
+    for (const pair of wanted) if (!(await exists(pair[1]))) missing.push(pair);
+    if (missing.length === 0) return;
     const release = await getRelease();
     if (!release) return;
-    await downloadAsset(release, RELEASE_ASSETS.index, config.app.indexPath).catch((e) => logger.warn('index', e));
-    await downloadAsset(release, RELEASE_ASSETS.embeddings, config.app.embeddingsPath).catch((e) =>
-      logger.warn('embeddings', e)
-    );
-    await downloadAsset(release, RELEASE_ASSETS.buildCache, config.app.buildCachePath).catch((e) =>
-      logger.warn('build cache', e)
-    );
+    for (const [name, dest] of missing) {
+      await downloadAsset(release, name, dest).catch((e) => logger.warn(`Could not download ${name}.`, e));
+    }
   } catch (err) {
     logger.warn('Could not fetch previous build inputs; building from scratch.', err);
   }

@@ -32,6 +32,8 @@ const app = new App({
 let reindexInProgress = false;
 /** `updated_at` of the release asset the loaded index came from; drives the hourly refresh. */
 let loadedStamp: string | null = null;
+/** One in-flight load at a time: concurrent /dt calls during startup all await the same promise. */
+let loading: Promise<LoadedIndex | null> | null = null;
 
 function cleanMentionText(text: string): string {
   return text
@@ -79,6 +81,15 @@ function formatStatus(status: Awaited<ReturnType<typeof loadStatus>>): string {
 async function ensureIndexLoaded(): Promise<LoadedIndex | null> {
   const cached = getLoadedIndex();
   if (cached) return cached;
+  if (!loading) {
+    loading = loadOrDownload().finally(() => {
+      loading = null;
+    });
+  }
+  return loading;
+}
+
+async function loadOrDownload(): Promise<LoadedIndex | null> {
   if (!(await indexExists())) {
     const dl = await downloadIndexFromRelease();
     if (!dl) return null;
@@ -92,7 +103,12 @@ async function ensureIndexLoaded(): Promise<LoadedIndex | null> {
     if (!loadedStamp) loadedStamp = await fetchIndexStamp();
     return loaded;
   } catch (err) {
-    logger.error('Index files exist but could not be loaded.', err);
+    // A half-replaced pair (download overlapping the nightly upload) would otherwise wedge the bot:
+    // the files exist, so nothing re-downloads. Drop them so the next call fetches a fresh pair.
+    logger.error('Index files exist but could not be loaded; discarding them.', err);
+    await fs.unlink(config.app.indexPath).catch(() => undefined);
+    await fs.unlink(config.app.embeddingsPath).catch(() => undefined);
+    loadedStamp = null;
     return null;
   }
 }
@@ -107,11 +123,21 @@ async function refreshIndexIfNewer(): Promise<void> {
   const dl = await downloadIndexFromRelease(next);
   if (!dl) return;
   try {
+    // Parse the new files first (cheap to fail), then swap the files into place and rebuild the
+    // in-memory index with the old one already released — holding both plus BM25 scratch would
+    // roughly triple the heap on a 512 MB worker. Queries during the ~1 s rebuild await `loading`.
     const { index, embeddings } = await readIndexFiles(next.indexPath, next.embeddingsPath);
-    setLoadedIndex(assembleIndex(index, embeddings));
     await fs.rename(next.indexPath, config.app.indexPath);
     await fs.rename(next.embeddingsPath, config.app.embeddingsPath);
     loadedStamp = dl.stamp;
+    setLoadedIndex(null);
+    loading = Promise.resolve(assembleIndex(index, embeddings)).then((loaded) => {
+      setLoadedIndex(loaded);
+      return loaded;
+    });
+    await loading.finally(() => {
+      loading = null;
+    });
     logger.info(`Swapped in index generated ${index.generatedAt} (${index.pages.length} pages).`);
   } catch (err) {
     logger.error('New index could not be loaded; keeping the current one.', err);
@@ -136,7 +162,7 @@ async function answerQuery(query: string): Promise<Answer> {
     const status = await loadStatus();
     return {
       summary:
-        status?.phase === 'embedding' || status?.phase === 'building_pages'
+        status?.state === 'indexing'
           ? `I am still building the PER Notion index.\n${formatStatus(status)}`
           : 'I do not have a search index loaded yet. Run `/reindex`, or check that the nightly index build succeeded.',
       results: [],
@@ -462,7 +488,7 @@ async function main(): Promise<void> {
 
   if (!loaded && config.app.autoBootstrapOnMissingIndex) {
     const status = await loadStatus();
-    if (status?.phase !== 'embedding' && status?.phase !== 'building_pages') {
+    if (status?.state !== 'indexing') {
       startBackgroundReindex({ triggerLabel: 'auto-bootstrap' });
     }
   }

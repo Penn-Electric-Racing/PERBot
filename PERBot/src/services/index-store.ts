@@ -3,6 +3,7 @@ import path from 'node:path';
 import { config } from '../config.js';
 import { buildBM25Index, type BM25Index } from '../utils/bm25.js';
 import { buildEmbedText } from '../utils/chunk.js';
+import { logger } from '../utils/logger.js';
 import type { BuildCache, IndexStatus, PageRecord, SearchIndex } from '../types.js';
 
 /**
@@ -128,8 +129,12 @@ export async function loadBuildCache(): Promise<BuildCache> {
     const raw = await fs.readFile(config.app.buildCachePath, 'utf8');
     const parsed = JSON.parse(raw) as BuildCache;
     if (parsed.version === 1 && parsed.pages) return parsed;
-  } catch {
-    // no cache yet
+    logger.warn('Build cache has an unexpected shape; starting from an empty cache.');
+  } catch (err) {
+    if ((err as { code?: string })?.code !== 'ENOENT') {
+      // A corrupt or unreadable cache silently turns the nightly build into a full re-fetch; say so.
+      logger.warn('Build cache could not be read; every page will be fetched again.', err);
+    }
   }
   return { version: 1, pages: {} };
 }
