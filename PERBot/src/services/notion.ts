@@ -4,6 +4,7 @@ import type { BuildCache, DocKind } from '../types.js';
 import { cleanNotionMarkdown, isTemplatePlaceholder } from '../utils/notionText.js';
 import { logger } from '../utils/logger.js';
 import { sleep } from '../utils/chunk.js';
+import type { SourceDocument } from '../sources/types.js';
 
 /** A page as returned by `search`, reduced to what the indexer needs. */
 export interface RawNotionPage {
@@ -23,15 +24,6 @@ type NotionParent =
   | { type: 'block_id'; block_id: string }
   | { type: 'database_id'; database_id: string }
   | { type: 'data_source_id'; data_source_id: string; database_id?: string };
-
-/** A page that made it through the filters, ready to be enriched and chunked. */
-export interface IndexableDocument {
-  page: RawNotionPage;
-  kind: DocKind;
-  /** Ancestor titles, top-down, excluding the page itself. */
-  ancestors: string[];
-  cleanText: string;
-}
 
 function normId(id: string): string {
   return id.replace(/-/g, '');
@@ -245,13 +237,13 @@ export class NotionService {
    * worth indexing. Database rows are only kept when they carry a real write-up, unless their
    * data source is in `NOTION_INDEX_DATA_SOURCE_IDS`, in which case they are indexed as records.
    */
-  async buildIndexableDocuments(cache: BuildCache): Promise<{ docs: IndexableDocument[]; cache: BuildCache }> {
+  async buildIndexableDocuments(cache: BuildCache): Promise<{ docs: SourceDocument[]; cache: BuildCache['pages'] }> {
     const rawPages = await this.listAllSharedPages();
     const pagesById = new Map(rawPages.map((p) => [normId(p.id), p]));
     const allowed = new Set(config.notion.allowedPageIds.map(normId));
     const forcedSources = new Set(config.notion.indexDataSourceIds.map(normId));
-    const nextCache: BuildCache = { version: 1, pages: {} };
-    const docs: IndexableDocument[] = [];
+    const nextCache: BuildCache['pages'] = {};
+    const docs: SourceDocument[] = [];
 
     const counts = { fetched: 0, cached: 0, rowsSkipped: 0, thin: 0, templates: 0, archived: 0, failed: 0 };
 
@@ -282,7 +274,7 @@ export class NotionService {
           await sleep(config.app.indexRateLimitMs);
         }
       }
-      nextCache.pages[page.id] = { lastEditedTime: page.lastEditedTime, markdown };
+      nextCache[page.id] = { lastEditedTime: page.lastEditedTime, markdown };
 
       const body = cleanNotionMarkdown(markdown);
       let kind: DocKind = 'doc';
@@ -309,7 +301,17 @@ export class NotionService {
       }
 
       const ancestors = await this.ancestorsOf(page.parent, pagesById);
-      docs.push({ page, kind, ancestors, cleanText });
+      docs.push({
+        id: page.id,
+        source: 'notion',
+        kind,
+        title: page.title,
+        url: page.url,
+        ancestors,
+        cleanText,
+        createdTime: page.createdTime,
+        lastEditedTime: page.lastEditedTime,
+      });
 
       if ((counts.fetched + counts.cached) % 500 === 0) {
         logger.info(`Processed ${counts.fetched + counts.cached}/${rawPages.length} pages (${docs.length} kept so far)`);

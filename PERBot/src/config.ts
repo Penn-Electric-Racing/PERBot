@@ -141,6 +141,28 @@ export const config = {
       signatureName: optionalString('BENBUYS_DIGIKEY_SIGNATURE', 'Katherine Shen'),
     },
   },
+  gdrive: {
+    // Google Shared Drive source for /dt (Phase 5). A service account key, as raw JSON or base64
+    // (secret `GDRIVE_SERVICE_ACCOUNT_JSON`) or a file path. Unset ⇒ the Drive source is skipped.
+    serviceAccountJson: process.env.GDRIVE_SERVICE_ACCOUNT_JSON?.trim() || '',
+    serviceAccountFile: process.env.GDRIVE_SERVICE_ACCOUNT_FILE?.trim() || '',
+    // Empty = every Shared Drive the service account has been added to.
+    driveIds: optionalList('GDRIVE_DRIVE_IDS'),
+    // Extra folders (any drive) shared with the service account, walked recursively.
+    folderIds: optionalList('GDRIVE_FOLDER_IDS'),
+    // Subtrees under a folder with one of these names are skipped (case-insensitive).
+    excludeFolderNames: optionalList('GDRIVE_EXCLUDE_FOLDERS', ['Photos', 'Pictures', 'Media', 'Videos', 'Archive']),
+    maxFileBytes: optionalNumber('GDRIVE_MAX_FILE_MB', 20) * 1_000_000,
+    maxFiles: optionalNumber('GDRIVE_MAX_FILES', 20000),
+    // Parallel downloads/exports. Drive's per-user quota is generous; 6 keeps well under it.
+    concurrency: optionalNumber('GDRIVE_CONCURRENCY', 6),
+    // Folders named "REVn" with n below this are skipped (default: two seasons before CURRENT_REV).
+    // The FSAE drive holds ~66k files under REV7/REV8 alone; last two seasons + shared folders is the
+    // useful slice, and anything older is "historical" for ranking anyway.
+    minRev: optionalNumber('GDRIVE_MIN_REV', (Number(optionalString('CURRENT_REV', 'REV12').replace(/\D/g, '')) || 12) - 2),
+    // Characters kept per file (Docs export / PDF text). Long datasheets are cut, not skipped.
+    maxDocChars: optionalNumber('GDRIVE_MAX_DOC_CHARS', 60_000),
+  },
   github: {
     token: process.env.GITHUB_TOKEN?.trim() || '',
     repo: optionalString('GITHUB_REPO', 'Penn-Electric-Racing/PERBot'),
@@ -158,6 +180,7 @@ export const config = {
     chunkTargetChars: optionalNumber('CHUNK_TARGET_CHARS', 900),
     chunkMaxChars: optionalNumber('CHUNK_MAX_CHARS', 1400),
     chunkMinChars: optionalNumber('CHUNK_MIN_CHARS', 250),
+    maxChunksPerDoc: optionalNumber('MAX_CHUNKS_PER_DOC', 60),
     // Database rows need at least this much cleaned body text to be indexed as a doc.
     minRecordBodyChars: optionalNumber('MIN_RECORD_BODY_CHARS', 300),
     // Any page needs at least this much cleaned text to be worth a chunk.
@@ -183,6 +206,10 @@ export function hasOpenAI(): boolean {
 
 export function hasGroq(): boolean {
   return Boolean(config.groq.apiKey);
+}
+
+export function hasDrive(): boolean {
+  return Boolean(config.gdrive.serviceAccountJson || config.gdrive.serviceAccountFile);
 }
 
 export function hasHunter(): boolean {

@@ -107,7 +107,10 @@ export interface SearchIndex {
 /** Raw page markdown by page id, so unchanged pages are not re-fetched from Notion nightly. */
 export interface BuildCache {
   version: 1;
+  /** Notion: raw markdown per page id. */
   pages: Record<string, { lastEditedTime: string; markdown: string }>;
+  /** Google Drive: extracted text per file id. */
+  drive?: Record<string, { modifiedTime: string; text: string }>;
 }
 
 export interface IndexStatus {
