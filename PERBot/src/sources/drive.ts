@@ -275,10 +275,12 @@ export class DriveService {
       logger.info(`Drive folder "${root?.name ?? folderId}": ${files.length - folders.length} files.`);
     }
 
+    // Decide what to read, then read it with a small pool: the first full run of the FSAE drive
+    // (~6k readable files) was download-latency bound at ~1 file/s sequentially.
+    const work: Array<{ file: DriveFile; route: FileRoute; index: FolderIndex }> = [];
     for (const { files, index } of batches) {
       for (const file of files) {
         counts.listed++;
-        if (docs.length >= maxFiles) break;
         if (index.excluded(file)) {
           counts.excluded++;
           continue;
@@ -288,45 +290,62 @@ export class DriveService {
           counts.skipped++;
           continue;
         }
+        work.push({ file, route, index });
+      }
+    }
+    if (work.length > maxFiles) {
+      logger.warn(`Drive: ${work.length} readable files exceed GDRIVE_MAX_FILES=${maxFiles}; indexing the first ${maxFiles}.`);
+      work.length = maxFiles;
+    }
 
-        let text: string;
-        const hit = prev[file.id];
-        if (hit && hit.modifiedTime === file.modifiedTime) {
-          text = hit.text;
+    const results: Array<{ item: (typeof work)[number]; text: string } | null> = new Array(work.length).fill(null);
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < work.length) {
+        const i = cursor++;
+        const item = work[i]!;
+        const hit = prev[item.file.id];
+        if (hit && hit.modifiedTime === item.file.modifiedTime) {
+          results[i] = { item, text: hit.text };
           counts.cached++;
         } else {
           try {
-            text = (await this.fileText(file, route)) ?? '';
+            results[i] = { item, text: (await this.fileText(item.file, item.route)) ?? '' };
             counts.fetched++;
           } catch (err) {
             counts.failed++;
-            logger.warn(`Drive: skipping "${file.name}" (${file.id}): ${(err as Error).message}`);
-            continue;
+            logger.warn(`Drive: skipping "${item.file.name}" (${item.file.id}): ${(err as Error).message}`);
           }
         }
-        next[file.id] = { modifiedTime: file.modifiedTime, text };
-        if ((counts.fetched + counts.cached) % 500 === 0) {
-          logger.info(`Drive: ${counts.fetched + counts.cached} files read (${counts.fetched} fetched, ${counts.cached} cached), ${docs.length} kept so far.`);
+        const done = counts.fetched + counts.cached + counts.failed;
+        if (done % 500 === 0) {
+          logger.info(`Drive: ${done}/${work.length} files read (${counts.fetched} fetched, ${counts.cached} cached, ${counts.failed} failed).`);
         }
-
-        const clean = text.replace(/\r\n/g, '\n').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
-        if (clean.length < config.app.minPageChars) {
-          counts.empty++;
-          continue;
-        }
-        docs.push({
-          id: `drive:${file.id}`,
-          source: 'drive',
-          // Spreadsheets are data, not write-ups: rank them like Notion records.
-          kind: route.type === 'export' && route.mime === 'text/csv' ? 'record' : 'doc',
-          title: file.name.replace(/\.(pdf|docx|txt|md|csv)$/i, ''),
-          url: file.webViewLink ?? `https://drive.google.com/file/d/${file.id}/view`,
-          ancestors: index.pathOf(file),
-          cleanText: clean,
-          createdTime: file.createdTime,
-          lastEditedTime: file.modifiedTime,
-        });
       }
+    };
+    await Promise.all(Array.from({ length: config.gdrive.concurrency }, worker));
+
+    for (const r of results) {
+      if (!r) continue;
+      const { item, text } = r;
+      next[item.file.id] = { modifiedTime: item.file.modifiedTime, text };
+      const clean = text.replace(/\r\n/g, '\n').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+      if (clean.length < config.app.minPageChars) {
+        counts.empty++;
+        continue;
+      }
+      docs.push({
+        id: `drive:${item.file.id}`,
+        source: 'drive',
+        // Spreadsheets are data, not write-ups: rank them like Notion records.
+        kind: item.route.type === 'export' && item.route.mime === 'text/csv' ? 'record' : 'doc',
+        title: item.file.name.replace(/\.(pdf|docx|txt|md|csv)$/i, ''),
+        url: item.file.webViewLink ?? `https://drive.google.com/file/d/${item.file.id}/view`,
+        ancestors: item.index.pathOf(item.file),
+        cleanText: clean,
+        createdTime: item.file.createdTime,
+        lastEditedTime: item.file.modifiedTime,
+      });
     }
 
     logger.info(

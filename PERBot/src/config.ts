@@ -154,6 +154,8 @@ export const config = {
     excludeFolderNames: optionalList('GDRIVE_EXCLUDE_FOLDERS', ['Photos', 'Pictures', 'Media', 'Videos', 'Archive']),
     maxFileBytes: optionalNumber('GDRIVE_MAX_FILE_MB', 20) * 1_000_000,
     maxFiles: optionalNumber('GDRIVE_MAX_FILES', 20000),
+    // Parallel downloads/exports. Drive's per-user quota is generous; 6 keeps well under it.
+    concurrency: optionalNumber('GDRIVE_CONCURRENCY', 6),
     // Folders named "REVn" with n below this are skipped (default: two seasons before CURRENT_REV).
     // The FSAE drive holds ~66k files under REV7/REV8 alone; last two seasons + shared folders is the
     // useful slice, and anything older is "historical" for ranking anyway.
