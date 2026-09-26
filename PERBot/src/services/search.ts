@@ -96,6 +96,13 @@ export function parseQuery(input: string): ParsedQuery {
       filters.historical = /^(true|yes|1)$/i.test(value);
       continue;
     }
+    if (key === 'source' || key === 'in') {
+      const v = value.toLowerCase();
+      if (v === 'notion' || v === 'drive') {
+        filters.source = v;
+        continue;
+      }
+    }
     remaining.push(token);
   }
 
@@ -104,6 +111,7 @@ export function parseQuery(input: string): ParsedQuery {
 
 function passesFilters(parsed: ParsedQuery, page: PageRecord): boolean {
   const f = parsed.filters;
+  if (f.source && page.source !== f.source) return false;
   if (f.historical !== undefined && page.isHistorical !== f.historical) return false;
   if (f.season) {
     const n = Number(f.season.replace(/\D/g, ''));
@@ -137,13 +145,14 @@ function expandTerms(query: string): Array<{ term: string; weight: number }> {
 }
 
 function vectorTop(loaded: LoadedIndex, q: Float32Array, allowed: Uint8Array, topN: number) {
-  const { embeddings, dims, index } = loaded;
+  const { embeddings, scales, dims, index } = loaded;
   const scored: Array<{ idx: number; score: number }> = [];
   for (let c = 0; c < index.chunks.length; c++) {
     if (!allowed[c]) continue;
     const base = c * dims;
     let dot = 0;
     for (let d = 0; d < dims; d++) dot += q[d]! * embeddings[base + d]!;
+    dot *= scales[c]!;
     if (dot > 0.15) scored.push({ idx: c, score: dot });
   }
   scored.sort((a, b) => b.score - a.score);

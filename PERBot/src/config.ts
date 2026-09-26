@@ -74,7 +74,7 @@ export const config = {
     embeddingModel: optionalString('OPENAI_EMBEDDING_MODEL', 'text-embedding-3-small'),
     // text-embedding-3 models can be shortened; 768 dims halves the vector memory for a negligible
     // ranking loss (the bot holds every vector in RAM on a 512 MB worker).
-    embeddingDims: optionalNumber('OPENAI_EMBEDDING_DIMS', 768),
+    embeddingDims: optionalNumber('OPENAI_EMBEDDING_DIMS', 1536),
   },
   groq: {
     apiKey: process.env.GROQ_API_KEY?.trim() || '',
@@ -187,7 +187,7 @@ export const config = {
     // Two-file index: lean JSON (pages + chunk text) next to one raw Float32Array of embeddings.
     // The old single-file format grew past Node's max string length and could not be loaded.
     indexPath: path.resolve(optionalString('INDEX_PATH', './data/index.json')),
-    embeddingsPath: path.resolve(optionalString('EMBEDDINGS_PATH', './data/embeddings.f32')),
+    embeddingsPath: path.resolve(optionalString('EMBEDDINGS_PATH', './data/embeddings.i8')),
     buildCachePath: path.resolve(optionalString('INDEX_BUILD_CACHE_PATH', './data/build-cache.json')),
     statusPath: path.resolve(optionalString('INDEX_STATUS_PATH', './data/index-status.json')),
     chunkTargetChars: optionalNumber('CHUNK_TARGET_CHARS', 900),

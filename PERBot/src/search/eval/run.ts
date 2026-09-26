@@ -28,6 +28,10 @@ async function main(): Promise<void> {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const golden = JSON.parse(await fs.readFile(path.join(here, 'golden.json'), 'utf8')) as Golden[];
   const rerank = process.argv.includes('--rerank');
+  // `--source notion` scores the Notion golden set with Drive pages excluded (isolates ranking
+  // changes from corpus growth).
+  const sourceFilter = arg('--source');
+  const withSource = (query: string) => (sourceFilter ? `source:${sourceFilter} ${query}` : query);
   const indexPath = arg('--index') ?? config.app.indexPath;
   const embeddingsPath = arg('--embeddings') ?? config.app.embeddingsPath;
 
@@ -49,11 +53,11 @@ async function main(): Promise<void> {
     let titles: string[];
     let texts: string[];
     if (rerank) {
-      const res = await searchIndex(loaded, g.query, { rerank: true, topK: 10 });
+      const res = await searchIndex(loaded, withSource(g.query), { rerank: true, topK: 10 });
       titles = res.results.map((r) => r.page.title);
       texts = res.results.map((r) => r.chunk.text);
     } else {
-      const parsed = parseQuery(g.query);
+      const parsed = parseQuery(withSource(g.query));
       const q = await embedQuery(parsed.cleaned || parsed.raw);
       const ranked = rankPages(loaded, parsed, q).slice(0, 10);
       titles = ranked.map((r) => r.page.title);

@@ -10,6 +10,7 @@ import {
   loadBuildCache,
   readIndexFiles,
   saveBuildCache,
+  quantize,
   saveIndex,
   saveStatus,
 } from './services/index-store.js';
@@ -148,8 +149,10 @@ async function buildDriveDocuments(cache: BuildCache): Promise<{ docs: SourceDoc
   }
 }
 
-async function loadPreviousEmbeddings(): Promise<Map<string, Float32Array>> {
-  const reuse = new Map<string, Float32Array>();
+type StoredVector = { q: Int8Array; scale: number };
+
+async function loadPreviousEmbeddings(): Promise<Map<string, StoredVector>> {
+  const reuse = new Map<string, StoredVector>();
   if (!config.app.indexIncremental) return reuse;
   // On Render the bot has index + embeddings but never the build cache; fetch whatever is missing.
   await downloadBuildInputsFromRelease();
@@ -164,7 +167,8 @@ async function loadPreviousEmbeddings(): Promise<Map<string, Float32Array>> {
     }
     const dims = index.embeddingDims;
     for (let i = 0; i < index.chunks.length; i++) {
-      reuse.set(index.chunks[i]!.hash, embeddings.subarray(i * dims, (i + 1) * dims));
+      const chunk = index.chunks[i]!;
+      reuse.set(chunk.hash, { q: embeddings.subarray(i * dims, (i + 1) * dims), scale: chunk.scale });
     }
     logger.info(`Loaded ${reuse.size} previous embeddings for reuse.`);
   } catch (err) {
@@ -222,6 +226,7 @@ async function main(): Promise<void> {
         heading: piece.heading,
         text: piece.text,
         hash: sha1(embedText),
+        scale: 0,
       });
       embedInputs.push(embedText);
     });
@@ -229,9 +234,9 @@ async function main(): Promise<void> {
   logger.info(`Prepared ${chunks.length} chunks from ${pages.length} pages.`);
 
   // Reuse what we can, embed the rest.
-  const dims = previous.size ? previous.values().next().value!.length : 0;
+  const dims = previous.size ? previous.values().next().value!.q.length : 0;
   const toEmbed: number[] = [];
-  const vectors: Array<Float32Array | null> = chunks.map((c) => previous.get(c.hash) ?? null);
+  const vectors: Array<StoredVector | null> = chunks.map((c) => previous.get(c.hash) ?? null);
   vectors.forEach((v, i) => {
     if (!v) toEmbed.push(i);
   });
@@ -266,20 +271,21 @@ async function main(): Promise<void> {
     }
   );
   toEmbed.forEach((chunkIdx, k) => {
-    vectors[chunkIdx] = fresh[k]!;
+    vectors[chunkIdx] = quantize(fresh[k]!);
   });
 
-  const finalDims = dims || (vectors.find(Boolean)?.length ?? 0);
+  const finalDims = dims || (vectors.find(Boolean)?.q.length ?? 0);
   if (!finalDims) throw new Error('No embeddings produced.');
-  const embeddings = new Float32Array(chunks.length * finalDims);
+  const embeddings = new Int8Array(chunks.length * finalDims);
   vectors.forEach((v, i) => {
-    if (!v || v.length !== finalDims) throw new Error(`Chunk ${i} has no embedding of the expected size.`);
-    embeddings.set(v, i * finalDims);
+    if (!v || v.q.length !== finalDims) throw new Error(`Chunk ${i} has no embedding of the expected size.`);
+    embeddings.set(v.q, i * finalDims);
+    chunks[i]!.scale = v.scale;
   });
 
   await saveStatus({ state: 'indexing', phase: 'saving', startedAt, totalPages: pages.length, totalChunks: chunks.length });
   const index: SearchIndex = {
-    version: 2,
+    version: 3,
     generatedAt: new Date().toISOString(),
     currentRev: config.app.currentRev,
     embeddingModel: config.openai.embeddingModel,

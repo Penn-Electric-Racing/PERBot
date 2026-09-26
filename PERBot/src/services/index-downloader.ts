@@ -11,7 +11,7 @@ const GITHUB_API = 'https://api.github.com';
 
 export const RELEASE_ASSETS = {
   index: 'index.json.gz',
-  embeddings: 'embeddings.f32.gz',
+  embeddings: 'embeddings.i8.gz',
   buildCache: 'build-cache.json.gz',
 } as const;
 

@@ -48,7 +48,7 @@ jobs:
           CURRENT_REV: REV12
           INDEX_INCREMENTAL: ${{ inputs.full_rebuild && 'false' || 'true' }}
           INDEX_PATH: ./data/index.json
-          EMBEDDINGS_PATH: ./data/embeddings.f32
+          EMBEDDINGS_PATH: ./data/embeddings.i8
           INDEX_BUILD_CACHE_PATH: ./data/build-cache.json
           INDEX_STATUS_PATH: ./data/index-status.json
           NODE_OPTIONS: --max-old-space-size=4096
@@ -57,7 +57,7 @@ jobs:
       - name: Compress artifacts
         run: |
           gzip -9 -f data/index.json
-          gzip -9 -f data/embeddings.f32
+          gzip -9 -f data/embeddings.i8
           gzip -9 -f data/build-cache.json
 
       - name: Ensure release exists
@@ -74,6 +74,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload notion-index-latest data/index.json.gz data/embeddings.f32.gz data/build-cache.json.gz --clobber
+          gh release upload notion-index-latest data/index.json.gz data/embeddings.i8.gz data/build-cache.json.gz --clobber
+          gh release delete-asset notion-index-latest embeddings.f32.gz --yes 2>/dev/null || true
           # The legacy single-file asset (notion-index.json.gz) is left in place until the bot
           # that reads the v2 assets is deployed; delete it from the release by hand after that.

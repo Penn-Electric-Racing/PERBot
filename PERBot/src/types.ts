@@ -50,6 +50,7 @@ export interface ParsedQuery {
     season?: string;
     subsystem?: string;
     historical?: boolean;
+    source?: 'notion' | 'drive';
   };
 }
 
@@ -91,11 +92,17 @@ export interface ChunkRecord {
   text: string;
   /** sha1 of the exact string that was embedded; lets the nightly build reuse vectors. */
   hash: string;
+  /** int8 dequantization scale: float = int8 × scale (per-vector max-abs / 127). */
+  scale: number;
 }
 
-/** The JSON half of the index. Embeddings live beside it as one raw Float32Array file. */
+/**
+ * The JSON half of the index. Embeddings live beside it as one raw Int8Array file (chunk i at
+ * [i*dims, (i+1)*dims), dequantized with chunk.scale). int8 costs nothing measurable in ranking
+ * and is 4× smaller than float32, which is what lets the whole index sit in a 512 MB worker.
+ */
 export interface SearchIndex {
-  version: 2;
+  version: 3;
   generatedAt: string;
   currentRev: string;
   embeddingModel: string;

@@ -15,13 +15,24 @@ export interface BM25Index {
 const K1 = 1.2;
 const B = 0.75;
 
+/**
+ * Tokens that can never help a query and only bloat the postings map: PDF/telemetry noise such
+ * as hex blobs, long digit runs and base64-ish runs. Part numbers ("lm2596", "ad7606") survive.
+ */
+export function isIndexableTerm(t: string): boolean {
+  if (t.length > 24) return false;
+  if (t.length >= 9 && /^\d+$/.test(t)) return false;
+  if (t.length >= 16 && /^[0-9a-f]+$/.test(t)) return false;
+  return true;
+}
+
 export function buildBM25Index(docs: string[]): BM25Index {
   const docLen = new Float32Array(docs.length);
   const building = new Map<string, { docs: number[]; tfs: number[] }>();
   let total = 0;
 
   for (let i = 0; i < docs.length; i++) {
-    const tokens = tokenize(docs[i]!);
+    const tokens = tokenize(docs[i]!).filter(isIndexableTerm);
     docLen[i] = tokens.length;
     total += tokens.length;
     const tf = new Map<string, number>();

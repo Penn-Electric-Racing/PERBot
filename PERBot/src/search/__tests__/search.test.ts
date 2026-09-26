@@ -29,7 +29,7 @@ function page(id: string, title: string, path: string[], extra: Partial<PageReco
 /** Three tiny 4-d "embeddings" so vector and lexical signals can be controlled independently. */
 function fixture(): SearchIndex {
   return {
-    version: 2,
+    version: 3,
     generatedAt: '2026-01-01T00:00:00.000Z',
     currentRev: 'REV12',
     embeddingModel: 'test',
@@ -40,14 +40,14 @@ function fixture(): SearchIndex {
       page('meet', '11/5 Mechanical Meeting', ['Mechanical'], { inferredDocType: 'meeting_notes' }),
     ],
     chunks: [
-      { id: 'pcm11:0', pageId: 'pcm11', chunkIndex: 0, heading: null, text: 'The PCM translates pedal inputs into torque requests.', hash: 'a' },
-      { id: 'pcm8:0', pageId: 'pcm8', chunkIndex: 0, heading: null, text: 'The PCM senses brake angle and requests negative torque.', hash: 'b' },
-      { id: 'meet:0', pageId: 'meet', chunkIndex: 0, heading: null, text: 'PCM box wiring was discussed; epoxy ordered.', hash: 'c' },
+      { id: 'pcm11:0', pageId: 'pcm11', chunkIndex: 0, heading: null, text: 'The PCM translates pedal inputs into torque requests.', hash: 'a', scale: 1 / 127 },
+      { id: 'pcm8:0', pageId: 'pcm8', chunkIndex: 0, heading: null, text: 'The PCM senses brake angle and requests negative torque.', hash: 'b', scale: 1 / 127 },
+      { id: 'meet:0', pageId: 'meet', chunkIndex: 0, heading: null, text: 'PCM box wiring was discussed; epoxy ordered.', hash: 'c', scale: 1 / 127 },
     ],
   };
 }
 
-const EMB = new Float32Array([1, 0, 0, 0, 0.9, 0.1, 0, 0, 0.8, 0.2, 0, 0]);
+const EMB = Int8Array.from([127, 0, 0, 0, 114, 13, 0, 0, 102, 25, 0, 0]);
 
 test('parseQuery pulls out filters', () => {
   const p = parseQuery('rev:11 subsystem:PCM historical:false torque requests');

@@ -33,7 +33,7 @@ services:
       - key: INDEX_PATH
         value: ./data/index.json
       - key: EMBEDDINGS_PATH
-        value: ./data/embeddings.f32
+        value: ./data/embeddings.i8
       - key: INDEX_STATUS_PATH
         value: ./data/index-status.json
       - key: CURRENT_REV

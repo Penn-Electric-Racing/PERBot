@@ -18,7 +18,9 @@ import type { BuildCache, IndexStatus, PageRecord, SearchIndex } from '../types.
  */
 export interface LoadedIndex {
   index: SearchIndex;
-  embeddings: Float32Array;
+  /** int8 vectors; multiply a dot product by `scales[i]` to get the cosine (query is unit float). */
+  embeddings: Int8Array;
+  scales: Float32Array;
   dims: number;
   pageById: Map<string, PageRecord>;
   /** Chunk positions (into index.chunks / embeddings) for each page, in page order. */
@@ -47,7 +49,7 @@ async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> 
   await fs.rename(tempPath, filePath);
 }
 
-export async function saveIndex(index: SearchIndex, embeddings: Float32Array): Promise<void> {
+export async function saveIndex(index: SearchIndex, embeddings: Int8Array): Promise<void> {
   if (embeddings.length !== index.chunks.length * index.embeddingDims) {
     throw new Error(
       `Embedding buffer has ${embeddings.length} floats; expected ${index.chunks.length} × ${index.embeddingDims}.`
@@ -63,14 +65,13 @@ export async function saveIndex(index: SearchIndex, embeddings: Float32Array): P
 export async function readIndexFiles(
   indexPath = config.app.indexPath,
   embeddingsPath = config.app.embeddingsPath
-): Promise<{ index: SearchIndex; embeddings: Float32Array }> {
+): Promise<{ index: SearchIndex; embeddings: Int8Array }> {
   const index = JSON.parse(await fs.readFile(indexPath, 'utf8')) as SearchIndex;
-  if (index.version !== 2) {
-    throw new Error(`Unsupported index version ${String((index as { version?: unknown }).version)}; expected 2.`);
+  if (index.version !== 3) {
+    throw new Error(`Unsupported index version ${String((index as { version?: unknown }).version)}; expected 3.`);
   }
   const raw = await fs.readFile(embeddingsPath);
-  // Copy into a fresh, aligned Float32Array (a Buffer's byteOffset is not guaranteed to be 4-aligned).
-  const embeddings = new Float32Array(raw.byteLength / 4);
+  const embeddings = new Int8Array(raw.byteLength);
   Buffer.from(embeddings.buffer).set(raw);
   const expected = index.chunks.length * index.embeddingDims;
   if (embeddings.length !== expected) {
@@ -79,8 +80,19 @@ export async function readIndexFiles(
   return { index, embeddings };
 }
 
-export function assembleIndex(index: SearchIndex, embeddings: Float32Array): LoadedIndex {
+/** Per-vector int8 quantization: q = round(v / scale), scale = max|v| / 127. */
+export function quantize(vec: Float32Array): { q: Int8Array; scale: number } {
+  let max = 0;
+  for (let i = 0; i < vec.length; i++) max = Math.max(max, Math.abs(vec[i]!));
+  const scale = max / 127 || 1;
+  const q = new Int8Array(vec.length);
+  for (let i = 0; i < vec.length; i++) q[i] = Math.round(vec[i]! / scale);
+  return { q, scale };
+}
+
+export function assembleIndex(index: SearchIndex, embeddings: Int8Array): LoadedIndex {
   const pageById = new Map(index.pages.map((p) => [p.id, p]));
+  const scales = Float32Array.from(index.chunks, (c) => c.scale);
   const chunkIdxByPage = new Map<string, number[]>();
   const lexicalDocs: string[] = new Array(index.chunks.length);
 
@@ -98,6 +110,7 @@ export function assembleIndex(index: SearchIndex, embeddings: Float32Array): Loa
   return {
     index,
     embeddings,
+    scales,
     dims: index.embeddingDims,
     pageById,
     chunkIdxByPage,
