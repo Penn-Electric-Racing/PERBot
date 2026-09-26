@@ -18,7 +18,7 @@ services:
       - key: OPENAI_API_KEY
         sync: false
       - key: OPENAI_RESPONSE_MODEL
-        value: gpt-5
+        value: gpt-5-mini
       - key: OPENAI_EMBEDDING_MODEL
         value: text-embedding-3-small
       - key: GROQ_API_KEY
@@ -28,13 +28,15 @@ services:
       - key: GITHUB_REPO
         value: Penn-Electric-Racing/PERBot
       - key: INDEX_PATH
-        value: ./data/notion-index.json
+        value: ./data/index.json
+      - key: EMBEDDINGS_PATH
+        value: ./data/embeddings.f32
       - key: INDEX_STATUS_PATH
         value: ./data/index-status.json
       - key: CURRENT_REV
         value: REV12
       - key: TOP_K_RESULTS
-        value: 3
+        value: 5
       # BenBuys ordering helper (/benbuys done sends the requisition email from electric@)
       - key: BENBUYS_GMAIL_CLIENT_ID
         sync: false

@@ -60,13 +60,17 @@ export const config = {
     token: requireAny(['NOTION_TOKEN', 'NOTION_API_KEY']),
     apiVersion: optionalString('NOTION_API_VERSION', '2026-03-11'),
     allowedPageIds: optionalList('NOTION_ALLOWED_PAGE_IDS'),
+    // Database rows are skipped by the doc indexer unless they carry a real write-up. Data
+    // sources listed here are indexed as `record`s (title + property values) regardless.
+    indexDataSourceIds: optionalList('NOTION_INDEX_DATA_SOURCE_IDS'),
     // ⚙️ PERBot Job Log — per-day run records so late/duplicate cron fires never re-send
     // (see utils/schedule.ts). Empty disables dedup (with a warning).
     jobLogDataSourceId: optionalString('NOTION_JOB_LOG_DS_ID', 'db0c6a0d-e10b-4edf-97fb-6f381d15a465'),
   },
   openai: {
     apiKey: process.env.OPENAI_API_KEY?.trim() || '',
-    responseModel: optionalString('OPENAI_RESPONSE_MODEL', 'gpt-5'),
+    // The answer is written from the retrieved chunks; gpt-5-mini is plenty and ~10x cheaper/faster.
+    responseModel: optionalString('OPENAI_RESPONSE_MODEL', 'gpt-5-mini'),
     embeddingModel: optionalString('OPENAI_EMBEDDING_MODEL', 'text-embedding-3-small'),
   },
   groq: {
@@ -143,13 +147,29 @@ export const config = {
     indexReleaseTag: optionalString('GITHUB_INDEX_RELEASE_TAG', 'notion-index-latest'),
   },
   app: {
-    currentRev: optionalString('CURRENT_REV', 'REV11'),
-    topKResults: optionalNumber('TOP_K_RESULTS', 3),
-    indexPath: path.resolve(optionalString('INDEX_PATH', './data/notion-index.json')),
+    currentRev: optionalString('CURRENT_REV', 'REV12'),
+    topKResults: optionalNumber('TOP_K_RESULTS', 5),
+    // Two-file index: lean JSON (pages + chunk text) next to one raw Float32Array of embeddings.
+    // The old single-file format grew past Node's max string length and could not be loaded.
+    indexPath: path.resolve(optionalString('INDEX_PATH', './data/index.json')),
+    embeddingsPath: path.resolve(optionalString('EMBEDDINGS_PATH', './data/embeddings.f32')),
+    buildCachePath: path.resolve(optionalString('INDEX_BUILD_CACHE_PATH', './data/build-cache.json')),
     statusPath: path.resolve(optionalString('INDEX_STATUS_PATH', './data/index-status.json')),
-    maxChunkChars: optionalNumber('MAX_CHUNK_CHARS', 1200),
-    chunkOverlapChars: optionalNumber('CHUNK_OVERLAP_CHARS', 200),
-    maxResultsToSummarize: optionalNumber('MAX_RESULTS_TO_SUMMARIZE', 3),
+    chunkTargetChars: optionalNumber('CHUNK_TARGET_CHARS', 900),
+    chunkMaxChars: optionalNumber('CHUNK_MAX_CHARS', 1400),
+    chunkMinChars: optionalNumber('CHUNK_MIN_CHARS', 250),
+    // Database rows need at least this much cleaned body text to be indexed as a doc.
+    minRecordBodyChars: optionalNumber('MIN_RECORD_BODY_CHARS', 300),
+    // Any page needs at least this much cleaned text to be worth a chunk.
+    minPageChars: optionalNumber('MIN_PAGE_CHARS', 80),
+    maxResultsToSummarize: optionalNumber('MAX_RESULTS_TO_SUMMARIZE', 5),
+    // Score multiplier for pages older than last season when the query doesn't ask for history.
+    // Swept on the golden set 2026-09-25: 0.7–0.8 best (hit@1 93%), 0.6 hurts.
+    historicalPenalty: optionalNumber('SEARCH_HISTORICAL_PENALTY', 0.7),
+    // Reuse the previous release's page markdown + embeddings for unchanged content.
+    indexIncremental: optionalString('INDEX_INCREMENTAL', 'true') === 'true',
+    // How often the running bot checks the release for a fresher index (0 disables).
+    indexRefreshMinutes: optionalNumber('INDEX_REFRESH_MINUTES', 60),
     indexRateLimitMs: optionalNumber('INDEX_RATE_LIMIT_MS', 375),
     indexerHeapMb: optionalNumber('INDEXER_HEAP_MB', 1536),
     autoBootstrapOnMissingIndex: optionalString('AUTO_BOOTSTRAP_ON_MISSING_INDEX', 'true') === 'true',

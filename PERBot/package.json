@@ -22,7 +22,9 @@
     "benbuys:prep": "tsx src/benbuys/cli.ts prep",
     "benbuys:email": "tsx src/benbuys/cli.ts email",
     "test": "node --import tsx --test \"src/**/*.test.ts\"",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "search:eval": "tsx src/search/eval/run.ts",
+    "search:convert-legacy": "node --max-old-space-size=8192 scripts/convert-legacy-index.mjs"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

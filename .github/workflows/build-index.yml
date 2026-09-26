@@ -2,6 +2,11 @@ name: Build Notion Index
 
 on:
   workflow_dispatch:
+    inputs:
+      full_rebuild:
+        description: 'Ignore the previous index and re-fetch + re-embed everything'
+        type: boolean
+        default: false
   schedule:
     - cron: '0 4 * * *' # 4 AM UTC daily
 
@@ -27,20 +32,31 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Incremental build: the indexer downloads the previous release's index, embeddings and
+      # raw-markdown cache, re-fetches only pages whose last_edited_time changed, and re-embeds
+      # only chunks whose text changed. A full rebuild (input above) skips that.
       - name: Build Notion index
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
           # Slack tokens are required by config.ts at load time but unused by the indexer
           SLACK_BOT_TOKEN: unused
           SLACK_APP_TOKEN: unused
-          INDEX_PATH: ./data/notion-index.json
+          CURRENT_REV: REV12
+          INDEX_INCREMENTAL: ${{ inputs.full_rebuild && 'false' || 'true' }}
+          INDEX_PATH: ./data/index.json
+          EMBEDDINGS_PATH: ./data/embeddings.f32
+          INDEX_BUILD_CACHE_PATH: ./data/build-cache.json
           INDEX_STATUS_PATH: ./data/index-status.json
           NODE_OPTIONS: --max-old-space-size=4096
         run: npm run index
 
-      - name: Compress index
-        run: gzip -9 data/notion-index.json
+      - name: Compress artifacts
+        run: |
+          gzip -9 -f data/index.json
+          gzip -9 -f data/embeddings.f32
+          gzip -9 -f data/build-cache.json
 
       - name: Ensure release exists
         env:
@@ -55,4 +71,7 @@ jobs:
       - name: Upload index to release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload notion-index-latest data/notion-index.json.gz --clobber
+        run: |
+          gh release upload notion-index-latest data/index.json.gz data/embeddings.f32.gz data/build-cache.json.gz --clobber
+          # The legacy single-file asset (notion-index.json.gz) is left in place until the bot
+          # that reads the v2 assets is deployed; delete it from the release by hand after that.

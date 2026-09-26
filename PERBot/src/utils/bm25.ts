@@ -1,56 +1,82 @@
 import { tokenize } from './text.js';
 
-export interface BM25Corpus {
-  idf: Map<string, number>;
+/**
+ * BM25 over an inverted index built once at load time. The previous version re-tokenized
+ * every document on every query; with ~15k chunks that was the slow part of `/dt`.
+ */
+export interface BM25Index {
+  docCount: number;
   avgDocLen: number;
+  docLen: Float32Array;
+  /** Per term: matching doc positions and term frequencies, packed as typed arrays. */
+  postings: Map<string, { docs: Uint32Array; tfs: Uint16Array }>;
 }
 
-const K1 = 1.5;
+const K1 = 1.2;
 const B = 0.75;
 
-export function buildBM25Corpus(docs: string[]): BM25Corpus {
-  const N = docs.length;
-  if (N === 0) return { idf: new Map(), avgDocLen: 0 };
+export function buildBM25Index(docs: string[]): BM25Index {
+  const docLen = new Float32Array(docs.length);
+  const building = new Map<string, { docs: number[]; tfs: number[] }>();
+  let total = 0;
 
-  const df = new Map<string, number>();
-  let totalLen = 0;
-
-  for (const doc of docs) {
-    const tokens = tokenize(doc);
-    totalLen += tokens.length;
-    for (const term of new Set(tokens)) {
-      df.set(term, (df.get(term) ?? 0) + 1);
+  for (let i = 0; i < docs.length; i++) {
+    const tokens = tokenize(docs[i]!);
+    docLen[i] = tokens.length;
+    total += tokens.length;
+    const tf = new Map<string, number>();
+    for (const t of tokens) tf.set(t, (tf.get(t) ?? 0) + 1);
+    for (const [term, count] of tf) {
+      let p = building.get(term);
+      if (!p) {
+        p = { docs: [], tfs: [] };
+        building.set(term, p);
+      }
+      p.docs.push(i);
+      p.tfs.push(Math.min(count, 65535));
     }
   }
 
-  const idf = new Map<string, number>();
-  for (const [term, freq] of df) {
-    idf.set(term, Math.log((N - freq + 0.5) / (freq + 0.5) + 1));
+  // Pack into typed arrays: ~2M postings as plain JS arrays cost >100 MB of heap on Render.
+  const postings = new Map<string, { docs: Uint32Array; tfs: Uint16Array }>();
+  for (const [term, p] of building) {
+    postings.set(term, { docs: Uint32Array.from(p.docs), tfs: Uint16Array.from(p.tfs) });
   }
+  building.clear();
 
-  return { idf, avgDocLen: totalLen / N };
+  return { docCount: docs.length, avgDocLen: docs.length ? total / docs.length : 0, docLen, postings };
 }
 
-export function bm25Score(
-  queryTerms: string[],
-  doc: string,
-  corpus: BM25Corpus
-): number {
-  const tokens = tokenize(doc);
-  const docLen = tokens.length;
+export function idf(index: BM25Index, term: string): number {
+  const p = index.postings.get(term);
+  const df = p ? p.docs.length : 0;
+  return Math.log((index.docCount - df + 0.5) / (df + 0.5) + 1);
+}
 
-  const termFreq = new Map<string, number>();
-  for (const t of tokens) termFreq.set(t, (termFreq.get(t) ?? 0) + 1);
-
-  let score = 0;
-  for (const term of queryTerms) {
-    const tf = termFreq.get(term) ?? 0;
-    if (tf === 0) continue;
-    const idf = corpus.idf.get(term) ?? 0;
-    const numerator = tf * (K1 + 1);
-    const denominator = tf + K1 * (1 - B + B * (docLen / corpus.avgDocLen));
-    score += idf * (numerator / denominator);
+/**
+ * Scores every document that contains at least one query term. `weights` lets glossary
+ * expansions count for less than the words the person actually typed.
+ */
+export function bm25Query(
+  index: BM25Index,
+  terms: Array<{ term: string; weight: number }>,
+  topN: number
+): Array<{ idx: number; score: number }> {
+  const scores = new Map<number, number>();
+  for (const { term, weight } of terms) {
+    const p = index.postings.get(term);
+    if (!p) continue;
+    const termIdf = idf(index, term);
+    for (let k = 0; k < p.docs.length; k++) {
+      const d = p.docs[k]!;
+      const tf = p.tfs[k]!;
+      const denom = tf + K1 * (1 - B + (B * index.docLen[d]!) / index.avgDocLen);
+      const s = termIdf * ((tf * (K1 + 1)) / denom) * weight;
+      scores.set(d, (scores.get(d) ?? 0) + s);
+    }
   }
-
-  return score;
+  return [...scores.entries()]
+    .map(([idx, score]) => ({ idx, score }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, topN);
 }
