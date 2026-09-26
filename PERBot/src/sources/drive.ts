@@ -246,8 +246,15 @@ export class DriveService {
     return text.length > cap ? `${text.slice(0, cap)}\n[… truncated …]` : text;
   }
 
-  /** Lists, extracts (or reuses cached text for) and packages every indexable Drive file. */
-  async buildDocuments(cache: BuildCache): Promise<{ docs: SourceDocument[]; cache: BuildCache['drive'] }> {
+  /**
+   * Lists, extracts (or reuses cached text for) and packages every indexable Drive file.
+   * `onProgress` receives the partial text cache every 500 files so a killed first run can
+   * resume instead of starting over (the first pass over the FSAE drive takes hours).
+   */
+  async buildDocuments(
+    cache: BuildCache,
+    onProgress?: (partial: NonNullable<BuildCache['drive']>) => Promise<void>
+  ): Promise<{ docs: SourceDocument[]; cache: BuildCache['drive'] }> {
     const { driveIds, folderIds, excludeFolderNames, maxFileBytes, maxFiles, minRev } = config.gdrive;
     const prev = cache.drive ?? {};
     const next: NonNullable<BuildCache['drive']> = {};
@@ -320,6 +327,11 @@ export class DriveService {
         const done = counts.fetched + counts.cached + counts.failed;
         if (done % 500 === 0) {
           logger.info(`Drive: ${done}/${work.length} files read (${counts.fetched} fetched, ${counts.cached} cached, ${counts.failed} failed).`);
+          if (onProgress) {
+            const partial: NonNullable<BuildCache['drive']> = { ...prev };
+            for (const r of results) if (r) partial[r.item.file.id] = { modifiedTime: r.item.file.modifiedTime, text: r.text };
+            await onProgress(partial).catch((err) => logger.warn('Drive: partial cache save failed.', err));
+          }
         }
       }
     };

@@ -138,7 +138,9 @@ async function buildDriveDocuments(cache: BuildCache): Promise<{ docs: SourceDoc
     if (!key) return { docs: [], cache: cache.drive };
     const auth = new ServiceAccountAuth(key, ['https://www.googleapis.com/auth/drive.readonly']);
     logger.info(`Google Drive source: indexing as ${auth.email}.`);
-    return await new DriveService(auth).buildDocuments(cache);
+    return await new DriveService(auth).buildDocuments(cache, async (partial) => {
+      await saveBuildCache({ ...cache, drive: partial });
+    });
   } catch (err) {
     // A Drive outage must not take the Notion index down with it; keep last night's Drive text.
     logger.error('Google Drive indexing failed; continuing with Notion only.', err);
