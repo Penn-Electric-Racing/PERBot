@@ -8,7 +8,8 @@ export interface BM25Index {
   docCount: number;
   avgDocLen: number;
   docLen: Float32Array;
-  postings: Map<string, { docs: number[]; tfs: number[] }>;
+  /** Per term: matching doc positions and term frequencies, packed as typed arrays. */
+  postings: Map<string, { docs: Uint32Array; tfs: Uint16Array }>;
 }
 
 const K1 = 1.2;
@@ -16,7 +17,7 @@ const B = 0.75;
 
 export function buildBM25Index(docs: string[]): BM25Index {
   const docLen = new Float32Array(docs.length);
-  const postings = new Map<string, { docs: number[]; tfs: number[] }>();
+  const building = new Map<string, { docs: number[]; tfs: number[] }>();
   let total = 0;
 
   for (let i = 0; i < docs.length; i++) {
@@ -26,15 +27,22 @@ export function buildBM25Index(docs: string[]): BM25Index {
     const tf = new Map<string, number>();
     for (const t of tokens) tf.set(t, (tf.get(t) ?? 0) + 1);
     for (const [term, count] of tf) {
-      let p = postings.get(term);
+      let p = building.get(term);
       if (!p) {
         p = { docs: [], tfs: [] };
-        postings.set(term, p);
+        building.set(term, p);
       }
       p.docs.push(i);
-      p.tfs.push(count);
+      p.tfs.push(Math.min(count, 65535));
     }
   }
+
+  // Pack into typed arrays: ~2M postings as plain JS arrays cost >100 MB of heap on Render.
+  const postings = new Map<string, { docs: Uint32Array; tfs: Uint16Array }>();
+  for (const [term, p] of building) {
+    postings.set(term, { docs: Uint32Array.from(p.docs), tfs: Uint16Array.from(p.tfs) });
+  }
+  building.clear();
 
   return { docCount: docs.length, avgDocLen: docs.length ? total / docs.length : 0, docLen, postings };
 }
