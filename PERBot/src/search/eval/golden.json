@@ -1,0 +1,325 @@
+[
+  {
+    "query": "tell me about PCM",
+    "expect": [
+      "REV11 PCM Documentation",
+      "Powertrain Control Module"
+    ]
+  },
+  {
+    "query": "how does the DAQ-DASH work",
+    "expect": [
+      "DAQ-DASH",
+      "DAQDASH"
+    ]
+  },
+  {
+    "query": "tell me about the automatic purchasing system",
+    "expect": [
+      "Streamlining Digikey Ordering",
+      "Purchasing",
+      "PEFS",
+      "BenBuys Automation"
+    ]
+  },
+  {
+    "query": "how do I set up the dev environment",
+    "expect": [
+      "Setting Up The Dev Environment"
+    ]
+  },
+  {
+    "query": "git usage guide",
+    "expect": [
+      "Git Usage Guide",
+      "Version Control"
+    ]
+  },
+  {
+    "query": "FreeRTOS tasks and priorities",
+    "expect": [
+      "FreeRTOS"
+    ]
+  },
+  {
+    "query": "e-fuses",
+    "expect": [
+      "E-fuses"
+    ]
+  },
+  {
+    "query": "altium shortcuts",
+    "expect": [
+      "Altium Shortcuts"
+    ]
+  },
+  {
+    "query": "REV12 dependency map",
+    "expect": [
+      "REV12 Dependency Map"
+    ]
+  },
+  {
+    "query": "decentralized daq",
+    "expect": [
+      "DAQ-DASH",
+      "DAQDASH",
+      "Data Acquisition"
+    ]
+  },
+  {
+    "query": "what glue do we use to bond the substack frame walls",
+    "expect": [
+      "Substack assembly"
+    ]
+  },
+  {
+    "query": "how do the boards inside the PCM box connect to each other",
+    "expect": [
+      "Powertrain Control Module Box",
+      "Powertrain Control Module",
+      "PCM Documentation",
+      "PCM Connector Board",
+      "PCM-PDU Connector"
+    ]
+  },
+  {
+    "query": "which ADC does the DAQ use for its analog inputs",
+    "expect": [
+      "DAQDASH Circuit Design",
+      "DAQDASH Design Documentation",
+      "DAQ"
+    ]
+  },
+  {
+    "query": "what can the purchaser role do in JLCPCB",
+    "expect": [
+      "JLCPCB Organization Management"
+    ]
+  },
+  {
+    "query": "why do FETs lose power when switching",
+    "expect": [
+      "FET Loss Explained",
+      "FETs"
+    ]
+  },
+  {
+    "query": "no voltage coming out of the charge cart during precharge",
+    "expect": [
+      "REV11 Secondary Testing Log",
+      "Charging Workflow",
+      "Charger"
+    ]
+  },
+  {
+    "query": "who designed the DAQ-DASH",
+    "expect": [
+      "DAQ-DASH",
+      "DAQDASH"
+    ]
+  },
+  {
+    "query": "how do I get access to B11",
+    "expect": [
+      "Teamwide Information",
+      "Mechanical Meeting",
+      "REV11 Updates",
+      "Rookie Onboarding",
+      "General Practices"
+    ]
+  },
+  {
+    "query": "how does regen braking work on the car",
+    "expect": [
+      "PCM REV8",
+      "Powertrain Control Module",
+      "Energy Storage",
+      "BMS Design",
+      "Control Algorithms",
+      "Braking System"
+    ]
+  },
+  {
+    "query": "what is the sponsorship semester goal",
+    "expect": [
+      "Sponsorship CRM",
+      "PERBot Sponsorship"
+    ]
+  },
+  {
+    "query": "how do we flash firmware onto a board",
+    "expect": [
+      "Firmware",
+      "Drivers",
+      "Codebase Guide",
+      "How-To Guides",
+      "Compiling",
+      "Flashing"
+    ]
+  },
+  {
+    "query": "which cells does the accumulator use",
+    "expect": [
+      "Energy Storage",
+      "Energus",
+      "Accumulator"
+    ]
+  },
+  {
+    "query": "what is torque vectoring and where is it implemented",
+    "expect": [
+      "PCM",
+      "Drivetrain Summary",
+      "Software Glossary",
+      "DTI Software Reference",
+      "Control Algorithms"
+    ]
+  },
+  {
+    "query": "what sensors does the PCM read",
+    "expect": [
+      "REV11 PCM Documentation",
+      "PCM Code Contract",
+      "Powertrain Control Module"
+    ]
+  },
+  {
+    "query": "how does the per-thread watchdog work on our boards",
+    "expect": [
+      "Board Architecture",
+      "Firmware",
+      "FreeRTOS"
+    ]
+  },
+  {
+    "query": "how are CAN variables shared between boards",
+    "expect": [
+      "Board Architecture",
+      "Firmware",
+      "CAN"
+    ]
+  },
+  {
+    "query": "how do I insert heatsets into the substack parts",
+    "expect": [
+      "Substack assembly"
+    ]
+  },
+  {
+    "query": "what does the DHAB current sensor measure",
+    "expect": [
+      "BMS Pinout",
+      "BMS Design Documentation",
+      "Secondary",
+      "PCM Documentation",
+      "Shunt vs DHAB",
+      "Current"
+    ]
+  },
+  {
+    "query": "when does the brake light turn on",
+    "expect": [
+      "REV11 PCM Documentation",
+      "PCM",
+      "TS Turn On"
+    ]
+  },
+  {
+    "query": "what planetary gearset does the drivetrain use",
+    "expect": [
+      "Drivetrain",
+      "Gearbox Design",
+      "Gear Analysis",
+      "Edgerton Gear",
+      "Motor Selection",
+      "Planetary Gearset"
+    ]
+  },
+  {
+    "query": "which seat belt harness do we use",
+    "expect": [
+      "Cockpit and Ergonomics",
+      "Mockpit"
+    ]
+  },
+  {
+    "query": "what does the PCM do when it gets an implausible pedal reading",
+    "expect": [
+      "REV11 PCM Documentation",
+      "PCM Code Contract",
+      "BSPD"
+    ]
+  },
+  {
+    "query": "how do I set up the raspberry pi",
+    "expect": [
+      "Pi Setup",
+      "Raspberry Pi"
+    ]
+  },
+  {
+    "query": "how do we use Hunter to find sponsor contacts",
+    "expect": [
+      "How to Use PERBot Sponsorship"
+    ]
+  },
+  {
+    "query": "how does the ready to drive sound get triggered",
+    "expect": [
+      "PCM Documentation",
+      "PCM Code Contract",
+      "Software Glossary",
+      "car turn on"
+    ]
+  },
+  {
+    "query": "what is the shutdown circuit",
+    "expect": [
+      "BMS Design Documentation",
+      "BSPD",
+      "ele rookie notes",
+      "Software Glossary",
+      "Autonomous Rules",
+      "Safety",
+      "Shutdown Circuit"
+    ]
+  },
+  {
+    "query": "what wheel speed sensors are on the car",
+    "expect": [
+      "Data Acquisition",
+      "PCM Documentation",
+      "PCM Code Contract",
+      "Comms Protocols"
+    ]
+  },
+  {
+    "query": "how do I use the TL-1 lathe",
+    "expect": [
+      "TL-1 Guide"
+    ]
+  },
+  {
+    "query": "what should a new electrical member read first",
+    "expect": [
+      "ele rookie notes",
+      "Start Here",
+      "General Home",
+      "Electrical",
+      "Rookie Onboarding",
+      "New Member",
+      "Rookie"
+    ]
+  },
+  {
+    "query": "how does our lap sim work",
+    "expect": [
+      "Tech Spec: VD",
+      "Power Limiting Plan",
+      "VD Simulations",
+      "lapSim",
+      "Lap Sim"
+    ]
+  }
+]
