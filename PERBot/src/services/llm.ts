@@ -46,6 +46,7 @@ async function createEmbeddingWithRetry(openai: OpenAI, texts: string[]) {
         model: config.openai.embeddingModel,
         input: texts,
         encoding_format: 'float',
+        dimensions: config.openai.embeddingDims,
       });
     } catch (err: unknown) {
       const status = (err as { status?: number })?.status;

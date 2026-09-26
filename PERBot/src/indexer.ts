@@ -156,8 +156,10 @@ async function loadPreviousEmbeddings(): Promise<Map<string, Float32Array>> {
   if (!(await indexExists())) return reuse;
   try {
     const { index, embeddings } = await readIndexFiles();
-    if (index.embeddingModel !== config.openai.embeddingModel) {
-      logger.info(`Previous index used ${index.embeddingModel}; re-embedding everything with ${config.openai.embeddingModel}.`);
+    if (index.embeddingModel !== config.openai.embeddingModel || index.embeddingDims !== config.openai.embeddingDims) {
+      logger.info(
+        `Previous index used ${index.embeddingModel}@${index.embeddingDims}; re-embedding everything with ${config.openai.embeddingModel}@${config.openai.embeddingDims}.`
+      );
       return reuse;
     }
     const dims = index.embeddingDims;
@@ -201,7 +203,15 @@ async function main(): Promise<void> {
     });
     if (pieces.length === 0) continue;
     // Cap chunks per document so one 200-page datasheet can't dominate the index or the memory budget.
-    if (pieces.length > config.app.maxChunksPerDoc) pieces.length = config.app.maxChunksPerDoc;
+    const cap =
+      doc.source !== 'drive'
+        ? config.app.maxChunksPerDoc
+        : doc.kind === 'record'
+          ? config.gdrive.recordMaxChunks
+          : doc.ancestors.some((a) => /datasheet/i.test(a))
+            ? config.gdrive.datasheetMaxChunks
+            : config.gdrive.maxChunksPerDoc;
+    if (pieces.length > cap) pieces.length = cap;
     pages.push(page);
     pieces.forEach((piece, chunkIndex) => {
       const embedText = buildEmbedText(page.title, doc.ancestors, piece.heading, piece.text);

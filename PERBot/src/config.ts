@@ -72,6 +72,9 @@ export const config = {
     // The answer is written from the retrieved chunks; gpt-5-mini is plenty and ~10x cheaper/faster.
     responseModel: optionalString('OPENAI_RESPONSE_MODEL', 'gpt-5-mini'),
     embeddingModel: optionalString('OPENAI_EMBEDDING_MODEL', 'text-embedding-3-small'),
+    // text-embedding-3 models can be shortened; 768 dims halves the vector memory for a negligible
+    // ranking loss (the bot holds every vector in RAM on a 512 MB worker).
+    embeddingDims: optionalNumber('OPENAI_EMBEDDING_DIMS', 768),
   },
   groq: {
     apiKey: process.env.GROQ_API_KEY?.trim() || '',
@@ -151,7 +154,17 @@ export const config = {
     // Extra folders (any drive) shared with the service account, walked recursively.
     folderIds: optionalList('GDRIVE_FOLDER_IDS'),
     // Subtrees under a folder with one of these names are skipped (case-insensitive).
-    excludeFolderNames: optionalList('GDRIVE_EXCLUDE_FOLDERS', ['Photos', 'Pictures', 'Media', 'Videos', 'Archive']),
+    // Media, raw telemetry logs, and the textbook/other-team dumps under Common Resources: none of
+    // it is PER documentation, and together it was 60% of the Drive chunks on the first full run.
+    excludeFolderNames: optionalList('GDRIVE_EXCLUDE_FOLDERS', [
+      'Photos', 'Pictures', 'Media', 'Videos', 'Archive', 'logs',
+      'D_TEXTBOOKS', 'Springer Books', 'y_RESOURCES-TEAMS', 'y_RESOURCES-OTHER',
+    ]),
+    // Chunk caps per Drive document (Notion uses MAX_CHUNKS_PER_DOC). Datasheets are matched by a
+    // folder named like "datasheet"; records are spreadsheets.
+    maxChunksPerDoc: optionalNumber('GDRIVE_MAX_CHUNKS_PER_DOC', 20),
+    datasheetMaxChunks: optionalNumber('GDRIVE_DATASHEET_MAX_CHUNKS', 8),
+    recordMaxChunks: optionalNumber('GDRIVE_RECORD_MAX_CHUNKS', 4),
     maxFileBytes: optionalNumber('GDRIVE_MAX_FILE_MB', 20) * 1_000_000,
     maxFiles: optionalNumber('GDRIVE_MAX_FILES', 20000),
     // Parallel downloads/exports. Drive's per-user quota is generous; 6 keeps well under it.
