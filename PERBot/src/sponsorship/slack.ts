@@ -11,7 +11,7 @@ import { dealListBlocks } from './dealBlocks.js';
 import { computeQuotaResults, currentAuditWindow, formatQuotaStanding } from './jobs/quotaAudit.js';
 import { announceWonNow, totalRaised } from './jobs/winPost.js';
 import { SponsorNotion } from './notion.js';
-import { fitScore, impactScore, priorityScore, quadrant, SponsorScores } from './scoring.js';
+import { compareForRank, fitScore, impactScore, priorityScore, quadrant, SponsorScores } from './scoring.js';
 import { BankLeadRow, CATEGORIES, Category, EnrichResult, PipelineRow, STAGES, Stage, WonKind } from './types.js';
 
 const notion = new SponsorNotion();
@@ -36,7 +36,7 @@ const USAGE = [
   '• `/sponsor won <company> <amount> [cash|in-kind|discount] [note]` — mark a deal Won + post it to #operations',
   '• `/sponsor stage <company> <stage>` — move a deal (Prospect / Contacted / In talks / Won / Lost)',
   '• `/sponsor score <company> contact:<0-3> teams:<0-3>` — set a prospect’s human scores (also `market:`/`value:`/`need:`)',
-  '• `/sponsor rank [category]` — top prospects by Priority (Fit × Impact), with their quadrant',
+  '• `/sponsor rank [category]` — top prospects by Priority (Fit × Impact), with their quadrant; 🏁 FSAE-alumni ties first',
   '• `/sponsor find <what we need>` — search the *unclaimed* Bank for leads matching a need (e.g. `find cooling jackets for our motor`)',
   '• `/sponsor scout <what we need>` — hunt for *new* companies not in the Bank yet (AI-suggested, homepage-checked; add keepers with `/sponsor add`)',
   '• `/sponsor leaderboard` — who’s raised what: $ won + active deals per person (only you see it)',
@@ -169,6 +169,9 @@ function formatAddResult(result: EnrichResult): string {
   ];
   if (c.suggestedAngle) lines.push(`• *Angle:* ${c.suggestedAngle}`);
   lines.push(`• *Contact:* ${contactLine}`);
+  if (result.fsae?.ties) {
+    lines.push(`• 🏁 *FSAE ties:* ${result.fsae.people.map((p) => p.name).join(', ')} (Formula SAE / Formula Student history). This row ranks first in \`/sponsor rank\`.`);
+  }
   if (result.needsReview) lines.push(`• ⚠️ *Needs review:* ${result.reviewReason}`);
   if (result.assignment?.dealUrl) {
     lines.push(`• *Assigned:* ${result.assignment.assignees.join(', ')} → <${result.assignment.dealUrl}|Pipeline deal> (Prospect)`);
@@ -527,17 +530,19 @@ async function handleRank(respond: RespondFn, arg: string): Promise<void> {
     return;
   }
 
-  // Highest Priority first; tie-break on Fit so a warmer lead edges out a colder one.
-  const ranked = rows
-    .map((r) => ({ r, priority: priorityScore(r.scores), fit: fitScore(r.scores), impact: impactScore(r.scores) }))
-    .sort((a, b) => b.priority - a.priority || b.fit - a.fit)
-    .slice(0, RANK_LIMIT);
+  // FSAE ties first, then highest Priority; tie-break on Fit so a warmer lead edges out a colder one.
+  const ranked = [...rows]
+    .sort(compareForRank)
+    .slice(0, RANK_LIMIT)
+    .map((r) => ({ r, priority: priorityScore(r.scores), fit: fitScore(r.scores), impact: impactScore(r.scores) }));
 
   const header = category ? `*Top prospects — ${category}* (by Priority = Fit × Impact)` : '*Top prospects* (by Priority = Fit × Impact)';
   const lines = ranked.map(({ r, priority, fit, impact }, i) => {
     const provisional = r.scores.contactStrength == null || r.scores.sponsorsOtherTeams == null ? ' _(unscored)_' : '';
-    return `${i + 1}. <${r.url}|${r.company || 'Untitled'}> — *${priority}* ${quadrant(r.scores)}  ·  fit ${fit}/9 · impact ${impact}/6${provisional}`;
+    const fsae = r.fsaeTies ? '🏁 ' : '';
+    return `${i + 1}. ${fsae}<${r.url}|${r.company || 'Untitled'}> — *${priority}* ${quadrant(r.scores)}  ·  fit ${fit}/9 · impact ${impact}/6${provisional}`;
   });
+  if (ranked.some((x) => x.r.fsaeTies)) lines.push('_🏁 = someone there has Formula SAE / Formula Student history (see FSAE evidence in the row). These are listed first._');
   if (unmatched) lines.unshift(`_(couldn't match category "${unmatched}" — ranking all categories)_`);
   const hint = ranked.some((x) => x.priority === 0)
     ? '\n_Rows show low/zero Priority until their Contact strength + Sponsors other teams are scored in Notion._'

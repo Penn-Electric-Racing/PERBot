@@ -49,7 +49,7 @@ function suggestedWaitMs(err: unknown): number | null {
 }
 
 /** One forced-JSON Groq chat call, retrying rate limits on the free-tier TPM window. */
-async function chatJson(system: string, user: string): Promise<Record<string, unknown>> {
+export async function chatJson(system: string, user: string): Promise<Record<string, unknown>> {
   const groq = getSponsorGroqClient();
   for (let attempt = 0; ; attempt++) {
     try {

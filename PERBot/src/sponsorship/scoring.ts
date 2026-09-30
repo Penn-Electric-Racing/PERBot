@@ -67,3 +67,19 @@ export function tier(s: SponsorScores): string {
   if (p >= TIER2_PRIORITY) return 'Tier 2';
   return 'Tier 3';
 }
+
+/**
+ * `/sponsor rank` order: rows with FSAE ties first (someone there raced FSAE — the
+ * warmest cold lead), then Priority, then Fit. Flagging is a tier, not a score bump,
+ * so the Priority formula in Notion stays the same.
+ */
+export function compareForRank(
+  a: { fsaeTies: boolean; scores: SponsorScores },
+  b: { fsaeTies: boolean; scores: SponsorScores }
+): number {
+  return (
+    Number(b.fsaeTies) - Number(a.fsaeTies) ||
+    priorityScore(b.scores) - priorityScore(a.scores) ||
+    fitScore(b.scores) - fitScore(a.scores)
+  );
+}

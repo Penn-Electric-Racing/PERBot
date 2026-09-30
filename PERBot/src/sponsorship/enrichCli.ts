@@ -39,6 +39,9 @@ async function main(): Promise<void> {
     console.log(`   Fit:      ${c.fitReason}`);
     console.log(`   Angle:    ${c.suggestedAngle || '(none)'}`);
     console.log(`   Contact:  ${contact}`);
+    if (result.fsae === null) console.log(`   FSAE:     scan failed (run \`npm run fsae-scan\` to retry)`);
+    else if (result.fsae.ties) console.log(`   FSAE:     🏁 ${result.fsae.people.map((p) => `${p.name}: "${p.quote}"`).join('; ')}`);
+    else console.log(`   FSAE:     no ties found (${result.fsae.pagesScanned.length} pages scanned)`);
     if (result.needsReview) console.log(`   ⚠️  Needs review: ${result.reviewReason}`);
     console.log(`   Row:      ${result.bankPageUrl}\n`);
   } catch (err) {

@@ -13,6 +13,7 @@
     "draft": "tsx src/sponsorship/draftCli.ts",
     "find": "tsx src/sponsorship/discoveryCli.ts find",
     "scout": "tsx src/sponsorship/discoveryCli.ts scout",
+    "fsae-scan": "tsx src/sponsorship/fsaeScanCli.ts",
     "job:sponsor-win": "tsx src/sponsorship/jobs/winPost.ts",
     "job:sponsor-stale": "tsx src/sponsorship/jobs/staleDm.ts",
     "job:sponsor-reply": "tsx src/sponsorship/jobs/replyDm.ts",
