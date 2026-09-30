@@ -7,6 +7,7 @@
  * drift here silently drops values on write. Update these if the Notion options change.
  */
 
+import type { FsaeScan } from './fsaeTies.js';
 import type { SponsorScores } from './scoring.js';
 
 /**
@@ -109,6 +110,10 @@ export interface BankLeadRow {
   hasPipelineDeal: boolean;
   /** The five priority sub-scores (0–3, null when unscored) — see scoring.ts. */
   scores: SponsorScores;
+  /** Someone at the company has verified FSAE/Formula Student history (fsaeTies.ts) — ranks first. */
+  fsaeTies: boolean;
+  /** Date the FSAE-ties scan last ran on this row; null = never scanned. */
+  fsaeScannedAt: string | null;
 }
 
 /** A parsed Pipeline deal row (subset of properties the commands + jobs use). */
@@ -184,6 +189,8 @@ export interface BankRowInput {
   status?: BankStatus;
   /** Notion user IDs to set on 'Claimed by' (directed add). */
   claimedByNotionIds?: string[];
+  /** FSAE-ties scan result; omitted when the scan failed (row stays unscanned). */
+  fsae?: FsaeScan;
 }
 
 /** Everything needed to open one Pipeline deal (directed add / graduation). */
@@ -233,6 +240,8 @@ export type EnrichResult =
       bankPageUrl: string;
       classification: CompanyClassification;
       contact: HunterContact | null;
+      /** Null when the FSAE-ties scan failed (the row is left for the backfill to retry). */
+      fsae: FsaeScan | null;
       needsReview: boolean;
       reviewReason?: string;
       assignment?: AssignmentInfo;

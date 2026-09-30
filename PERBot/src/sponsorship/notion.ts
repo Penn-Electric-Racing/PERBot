@@ -1,7 +1,9 @@
 import { Client } from '@notionhq/client';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
+import { todayIsoET } from './dates.js';
 import { extractHostname } from './domain.js';
+import { FsaeScan, formatFsaeEvidence } from './fsaeTies.js';
 import type { SponsorScores } from './scoring.js';
 import {
   BankLeadRow,
@@ -89,8 +91,24 @@ function readEmail(prop: any): string {
 function readUrl(prop: any): string {
   return typeof prop?.url === 'string' ? prop.url : '';
 }
+function readCheckbox(prop: any): boolean {
+  return prop?.checkbox === true;
+}
 function readRelationCount(prop: any): number {
   return (prop?.relation ?? []).length;
+}
+
+/** Bank columns written by the FSAE-ties scan (created on demand by ensureFsaeColumns). */
+export const FSAE_TIES_PROP = 'FSAE ties';
+export const FSAE_EVIDENCE_PROP = 'FSAE evidence';
+export const FSAE_SCANNED_PROP = 'FSAE scanned';
+
+function fsaeProperties(scan: FsaeScan, dateIso: string): Record<string, any> {
+  return {
+    [FSAE_TIES_PROP]: { checkbox: scan.ties },
+    [FSAE_EVIDENCE_PROP]: { rich_text: [{ text: { content: formatFsaeEvidence(scan) } }] },
+    [FSAE_SCANNED_PROP]: { date: { start: dateIso } },
+  };
 }
 
 /** Pipeline date property PERBot stamps the first time a deal leaves Prospect. */
@@ -126,6 +144,8 @@ function parseBankRow(page: any): BankLeadRow {
       valueBand: readNumber(p['Value band']),
       categoryNeed: readNumber(p['Category need']),
     },
+    fsaeTies: readCheckbox(p[FSAE_TIES_PROP]),
+    fsaeScannedAt: readDate(p[FSAE_SCANNED_PROP]),
   };
 }
 
@@ -219,6 +239,7 @@ export class SponsorNotion {
     if (input.claimedByNotionIds?.length) {
       properties['Claimed by'] = { people: input.claimedByNotionIds.map((id) => ({ id })) };
     }
+    if (input.fsae) Object.assign(properties, fsaeProperties(input.fsae, todayIsoET()));
 
     const result: any = await this.client.pages.create({
       parent: { type: 'data_source_id', data_source_id: config.sponsorship.bankDataSourceId },
@@ -289,6 +310,33 @@ export class SponsorNotion {
       cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
     } while (cursor);
     return hostnames;
+  }
+
+  /** Write an FSAE-ties scan result onto an existing Bank row. */
+  async writeFsaeScan(pageId: string, scan: FsaeScan, dateIso: string): Promise<void> {
+    await this.client.pages.update({ page_id: pageId, properties: fsaeProperties(scan, dateIso) as any });
+  }
+
+  /**
+   * Add the three FSAE columns to the Bank if they're missing. Idempotent; existing
+   * columns (and anything a human renamed around them) are left alone.
+   */
+  async ensureFsaeColumns(): Promise<string[]> {
+    const ds: any = await this.client.dataSources.retrieve({ data_source_id: config.sponsorship.bankDataSourceId });
+    const have = new Set(Object.keys(ds?.properties ?? {}));
+    const wanted: Record<string, any> = {
+      [FSAE_TIES_PROP]: { checkbox: {} },
+      [FSAE_EVIDENCE_PROP]: { rich_text: {} },
+      [FSAE_SCANNED_PROP]: { date: {} },
+    };
+    const missing = Object.keys(wanted).filter((k) => !have.has(k));
+    if (missing.length) {
+      await this.client.dataSources.update({
+        data_source_id: config.sponsorship.bankDataSourceId,
+        properties: Object.fromEntries(missing.map((k) => [k, wanted[k]])) as any,
+      });
+    }
+    return missing;
   }
 
   /**

@@ -11,7 +11,7 @@ import { logger } from '../utils/logger.js';
 const MAX_TEXT_CHARS = 6000;
 const FETCH_TIMEOUT_MS = 12_000;
 
-function stripHtml(html: string): string {
+export function stripHtml(html: string): string {
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
@@ -28,7 +28,8 @@ function stripHtml(html: string): string {
     .trim();
 }
 
-async function fetchText(url: string): Promise<string> {
+/** Raw HTML (or plain text) of `url`, '' on any failure or non-text response. */
+export async function fetchHtml(url: string): Promise<string> {
   try {
     const res = await fetch(url, {
       redirect: 'follow',
@@ -38,11 +39,15 @@ async function fetchText(url: string): Promise<string> {
     if (!res.ok) return '';
     const contentType = res.headers.get('content-type') ?? '';
     if (!contentType.includes('text/html') && !contentType.includes('text/plain')) return '';
-    return stripHtml(await res.text());
+    return await res.text();
   } catch (err) {
     logger.warn(`Homepage fetch failed for ${url}`, err);
     return '';
   }
+}
+
+async function fetchText(url: string): Promise<string> {
+  return stripHtml(await fetchHtml(url));
 }
 
 /**

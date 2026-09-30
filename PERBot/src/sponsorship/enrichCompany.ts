@@ -1,6 +1,7 @@
 import { logger } from '../utils/logger.js';
 import { classifyCompanyFit } from './classify.js';
 import { extractHostname, looksLikeDomain, toCanonicalUrl } from './domain.js';
+import { FsaeScan, scanFsaeTies } from './fsaeTies.js';
 import { fetchCompanyText } from './homepage.js';
 import { isoDaysFromNowET } from './dates.js';
 import { findContactByDomain, resolveByCompany } from './hunter.js';
@@ -38,6 +39,9 @@ export interface EnrichOptions {
  *   2. Dedupe against the Bank by domain — BEFORE any Hunter spend on re-runs.
  *   3. Fetch homepage/about text (deterministic).
  *   4. Groq → structured JSON classification (forced schema, validated).
+ *   4b. FSAE-ties scan: leadership/team pages → anyone with Formula SAE / Formula
+ *      Student history (fsaeTies.ts). Best-effort — a failure leaves the row unscanned
+ *      for `npm run fsae-scan` to pick up; it never blocks the add.
  *   5. Hunter → contact + verified email + confidence (only source of contact data).
  *   6. Create the Bank row: Status=Available, Relationship=New; flag Needs Review
  *      when the contact is missing/low-confidence/unverified.
@@ -153,6 +157,14 @@ export async function enrichCompany(
   const classification = await classifyCompanyFit(company, canonical, companyText, opts.knownAsk);
   if (opts.knownAsk) classification.suggestedAngle = opts.knownAsk;
 
+  // Step 4b — FSAE ties: a few more page fetches, plus one Groq call only if a page mentions FSAE.
+  let fsae: FsaeScan | null = null;
+  try {
+    fsae = await scanFsaeTies(company, hostname);
+  } catch (err) {
+    logger.warn(`FSAE-ties scan failed for ${canonical}; leaving row unscanned.`, err);
+  }
+
   // Step 5 — contact. A requester-provided contact is authoritative (not LLM-invented),
   // so it replaces the Hunter lookup; otherwise fall back to Hunter.
   let contact: HunterContact | null;
@@ -185,6 +197,7 @@ export async function enrichCompany(
     reviewReason: reason,
     status: assigned ? 'Graduated' : 'Available',
     claimedByNotionIds: assigned ? assigneeNotionIds : undefined,
+    fsae: fsae ?? undefined,
   });
 
   // Step 7 — directed add: open the Pipeline deal (Prospect) owned by the DRI(s).
@@ -210,6 +223,7 @@ export async function enrichCompany(
     bankPageUrl: page.url,
     classification,
     contact,
+    fsae,
     needsReview,
     reviewReason: reason,
     assignment,
