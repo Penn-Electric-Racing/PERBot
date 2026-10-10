@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { row as purchasingRow } from '../../benbuys/__tests__/helpers.js';
 import { buildReply, decodeValue, encodeValue, leadTimeLine, packageKey, settleBlocks, targetIds, theseValue } from '../blocks.js';
 import { parseExtraction } from '../extract.js';
-import { matchSlip, vendorKey } from '../match.js';
+import { matchSlip, partCodes as partCodesOf, vendorKey } from '../match.js';
 import type { ArrivalRow, Extraction, SlipLine } from '../types.js';
 
 function row(o: Partial<ArrivalRow> & { partNumber: string }): ArrivalRow {
@@ -34,6 +34,27 @@ test('vendorKey: spellings collapse; unknown stays empty', () => {
   assert.equal(vendorKey('www.mcmaster.com'), 'mcmaster');
   assert.equal(vendorKey('Digi-Key Electronics'), 'digikey');
   assert.equal(vendorKey(null), '');
+  assert.equal(vendorKey('Eurotech Distributors, Inc.'), 'eurotech');
+  assert.equal(vendorKey('eurotech direct'), 'eurotech');
+});
+
+test('matchSlip: free-text rows match on a shared model code (real Eurotech bill of lading, 2026-09-21)', () => {
+  const coroflex = row({ partNumber: '5 meters of FHLR2GCB2G (3x2.5mm²)', vendor: 'Eurotech Direct', link: '' });
+  const plain = row({ partNumber: '5 meters of 2x 6mm^2', vendor: 'eurotech direct', link: '' });
+  const digikey = row({ partNumber: 'FHLR2GCB2G', vendor: 'DigiKey' });
+  const m = matchSlip(
+    slip(
+      [
+        line('P500031', 5, { description: 'Coroflex 9-2641 FHLR2GCB2G 3x2.5mm² ORG' }),
+        line('P500023', 5, { description: 'Coroflex 9-2641 FHLR2GCB2G 2x6mm² ORG' }),
+      ],
+      { vendor: 'Eurotech Distributors, Inc.' }
+    ),
+    [coroflex, plain, digikey]
+  );
+  // Line 1 → the coroflex row; line 2 shares the code too but that row is taken; never the DigiKey row.
+  assert.deepEqual(m.lines.map((l) => l.row?.id ?? null), [coroflex.id, null]);
+  assert.deepEqual([...partCodesOf('3x2.5mm² 5888694 FHLR2GCB2G LM358DR')], ['FHLR2GCB2G', 'LM358DR']);
 });
 
 test('matchSlip: part numbers pick the order; whole order on the slip', () => {
@@ -145,9 +166,12 @@ test('buildReply: whole order → Confirm + Wrong; partial → These N / All M /
   assert.match(JSON.stringify(partial.blocks), /1 more item on this order not in this box/);
 });
 
-test('buildReply: unreadable → retake; readable but unmatched → no buttons', () => {
+test('buildReply: unreadable or label-only → ask for the slip in the thread; unmatched lines → no buttons', () => {
   const blurry = buildReply(slip([], { legible: false }), matchSlip(slip([]), []), BASE);
-  assert.match(JSON.stringify(blurry.blocks), /Retake it/);
+  assert.match(JSON.stringify(blurry.blocks), /couldn’t read part numbers.*packing slip/);
+  const label = slip([], { orderNumbers: [{ kind: 'purchase_order', value: '5888694' }], trackingNumbers: ['545438704811'] });
+  const labelReply = buildReply(label, matchSlip(label, [row({ partNumber: 'A-ND' })]), BASE);
+  assert.match(JSON.stringify(labelReply.blocks), /Got the label.*reply here with a photo of the \*packing slip\*/);
   const unknown = buildReply(slip([line('NOPE-ND')]), matchSlip(slip([line('NOPE-ND')]), [row({ partNumber: 'A-ND' })]), BASE);
   assert.ok(!unknown.blocks.some((bl) => bl.type === 'actions'));
   assert.match(JSON.stringify(unknown.blocks), /NOPE-ND/);

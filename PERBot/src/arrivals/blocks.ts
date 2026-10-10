@@ -125,12 +125,16 @@ export interface Reply {
   blocks: any[];
 }
 
-const RETAKE =
-  ':camera: I couldn’t read this one. Retake it with the *packing slip* flat, in focus, and filling the frame — the sheet that lists part numbers, not just the shipping label.';
+const SLIP_PLEASE =
+  'To log it in Purchasing, reply here with a photo of the *packing slip* from inside the box (the sheet that lists part numbers), flat and in focus.';
 
 export function buildReply(extraction: Extraction, match: SlipMatch, base: { u: string; ts: string }): Reply {
-  if (!extraction.isShippingDocument || !extraction.legible) {
-    return { text: 'Could not read that packing slip — please retake it.', blocks: [{ type: 'section', text: { type: 'mrkdwn', text: RETAKE } }] };
+  // Most photos in the channel are the outside of the box: a label, no item lines. Ask for the slip
+  // in the thread (thread replies are read too) rather than reporting a non-match.
+  const labelOnly = match.lines.length === 0 && match.orderRows.length === 0;
+  if (!extraction.isShippingDocument || !extraction.legible || labelOnly) {
+    const lead = extraction.legible && extraction.isShippingDocument ? ':package: Got the label.' : ':camera: I couldn’t read part numbers in this one.';
+    return { text: 'Packing slip photo needed', blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `${lead} ${SLIP_PLEASE}` } }] };
   }
 
   const unmatchedLines = match.lines.filter((l) => !l.row);

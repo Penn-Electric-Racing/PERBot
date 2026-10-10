@@ -11,6 +11,8 @@ import type { ArrivalRow, Extraction, LineMatch, SlipLine, SlipMatch } from './t
  *     (normalized the way `/benbuys prep` normalizes). This is the workhorse — every row has one.
  *  3. The line's customer reference against the row's sanitized description, since `/benbuys prep`
  *     writes that description (truncated) into DigiKey's reference column.
+ *  4. A shared model code (`partCodes`) between the slip line and a free-text row — many non-DigiKey
+ *     rows hold a description, not a catalog number, in `Cat. or model no.`.
  * Rows from a different vendor are never candidates. Among several rows for one part, the one in
  * the slip's dominant order wins, then an equal quantity, then the oldest order (first in, first out).
  */
@@ -25,16 +27,16 @@ const VENDOR_ALIASES: [RegExp, string][] = [
   [/^send-?cut-?send/, 'sendcutsend'],
 ];
 
-/** "McMaster-Carr Supply Co." / "mcmaster carr" / "www.mcmaster.com" → "mcmaster". "" when unknown. */
+/**
+ * "McMaster-Carr Supply Co." / "mcmaster carr" / "www.mcmaster.com" → "mcmaster". Vendors without an
+ * alias key on their first word, so "Eurotech Distributors, Inc." and "eurotech direct" agree. "" = unknown.
+ */
 export function vendorKey(raw: string | null | undefined): string {
-  const cleaned = (raw ?? '')
-    .toLowerCase()
-    .replace(/^https?:\/\//, '')
-    .replace(/^www\./, '')
-    .replace(/[^a-z0-9-]+/g, '');
-  if (!cleaned) return '';
-  for (const [re, key] of VENDOR_ALIASES) if (re.test(cleaned)) return key;
-  return cleaned.replace(/-/g, '');
+  const lower = (raw ?? '').toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').trim();
+  const joined = lower.replace(/[^a-z0-9-]+/g, '');
+  if (!joined) return '';
+  for (const [re, key] of VENDOR_ALIASES) if (re.test(joined)) return key;
+  return lower.split(/[^a-z0-9]+/).find((w) => w && w !== 'the') ?? '';
 }
 
 /** The row's vendor from its Vendor text, else its product link's domain. */
@@ -62,6 +64,20 @@ function normalizeRef(s: string | null | undefined): string {
   return (s ?? '').toUpperCase().replace(/[^A-Z0-9]+/g, '');
 }
 
+/**
+ * Model-number-like tokens: 6+ letters/digits with at least one of each ("FHLR2GCB2G", "LM358DR").
+ * Pure numbers, plain words, and short sizes ("3x2.5mm") are too common to identify a part.
+ */
+export function partCodes(...texts: (string | null | undefined)[]): Set<string> {
+  const codes = new Set<string>();
+  for (const t of texts) {
+    for (const tok of (t ?? '').toUpperCase().split(/[^A-Z0-9]+/)) {
+      if (tok.length >= 6 && /[A-Z]/.test(tok) && /\d/.test(tok)) codes.add(tok);
+    }
+  }
+  return codes;
+}
+
 function lineMatchesRow(line: SlipLine, row: ArrivalRow): boolean {
   const rowPn = normalizePartNumber(row.partNumber);
   if (rowPn) {
@@ -71,7 +87,13 @@ function lineMatchesRow(line: SlipLine, row: ArrivalRow): boolean {
   }
   // A truncated reference must still carry real signal — 8+ characters, like reference.ts's floor.
   const ref = normalizeRef(line.customerReference);
-  return ref.length >= 8 && normalizeRef(row.sanitizedDescription).startsWith(ref);
+  if (ref.length >= 8 && normalizeRef(row.sanitizedDescription).startsWith(ref)) return true;
+  // Free-text rows ("5 meters of FHLR2GCB2G (3x2.5mm²)") share a model code with the slip's description.
+  const rowCodes = partCodes(row.partNumber, row.name);
+  for (const code of partCodes(line.vendorPartNumber, line.manufacturerPartNumber, line.description)) {
+    if (rowCodes.has(code)) return true;
+  }
+  return false;
 }
 
 function orderTime(row: ArrivalRow): string {
