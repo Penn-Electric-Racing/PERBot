@@ -29,6 +29,7 @@ export function parseArrivalRow(page: any): ArrivalRow {
     vendor: text(p['Vendor']),
     runId: text(p['Run ID']),
     arrived: p['Arrived?']?.status?.name ?? '',
+    exported: Boolean(p['Exported?']?.checkbox),
     submittedAt: p['Submitted at']?.date?.start ?? null,
     orderedAt: p['Last Email Update']?.date?.start ?? null,
   };

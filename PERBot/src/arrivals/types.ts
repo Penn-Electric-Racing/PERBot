@@ -1,15 +1,21 @@
 /**
  * Package arrivals — shared types.
  *
- * Someone posts a photo of a packing slip in the arrivals channel → a vision model reads it
- * into an `Extraction` → `matchSlip` finds the open Purchasing (PEFS) rows it belongs to →
- * PERBot replies in the thread with buttons. Nothing is written to Notion until a human taps
- * one (Week 1 = suggest-only).
+ * A photo posted in the arrivals channel → a vision model reads the scene into a `Scan` (one
+ * `Extraction` per visible package) → each package is resolved against open Purchasing (PEFS)
+ * orders → PERBot replies in the thread with buttons, or stays silent. Nothing is written to
+ * Notion until a human taps a button.
+ *
+ * Shaped by #packages history (2026-07 → 10): of 19 photos, 1 showed a packing slip; 7 were a
+ * shipping label, 4 the contents, 4 several packages at once, 2 not a delivery at all. So the
+ * vendor (label, box branding, message text), the addressee, and item hints carry most of the signal.
  */
 
 import type { PurchasingRow } from '../benbuys/types.js';
 
 export type OrderNumberKind = 'purchase_order' | 'sales_order' | 'invoice' | 'customer_reference' | 'other';
+
+export type Scene = 'packing_slip' | 'shipping_label' | 'contents' | 'several_packages' | 'not_a_delivery';
 
 export interface SlipLine {
   /** The vendor's own catalog number (DigiKey `…-ND`, a McMaster number). */
@@ -22,16 +28,27 @@ export interface SlipLine {
   customerReference: string | null;
 }
 
-/** What the vision model read off the photo(s). Prices are deliberately never extracted. */
+/** What the vision model read about ONE package. Prices are deliberately never extracted. */
 export interface Extraction {
-  /** False for a box with no slip/label, a random photo, etc. */
-  isShippingDocument: boolean;
-  /** False when the text is too blurry/cropped to trust. */
-  legible: boolean;
+  /** The shipper: label FROM line, box branding, or the message text ("Jlc picked up"). */
   vendor: string | null;
+  /** The person named on the label (SHIP TO / ATTN / consignee), not the university. */
+  addressee: string | null;
+  /** ISO date printed on the label/slip, if any. */
+  shipDate: string | null;
   orderNumbers: { kind: OrderNumberKind; value: string }[];
   trackingNumbers: string[];
+  /** Item lines from a packing slip or a contents label. */
   lines: SlipLine[];
+  /** Short names of what's inside, from the message text or visible contents ("cooling tube"). */
+  itemHints: string[];
+}
+
+export interface Scan {
+  scene: Scene;
+  /** False when labels/slips are present but too blurry, cropped, or far away to read. */
+  legible: boolean;
+  packages: Extraction[];
 }
 
 /** A Purchasing row plus the fields arrivals needs on top of what BenBuys reads. */
@@ -40,6 +57,8 @@ export interface ArrivalRow extends PurchasingRow {
   runId: string;
   /** `Arrived?` status name: No / Ready for Pickup / Yes. */
   arrived: string;
+  /** `Exported?` — the row went out on an order (255 of 257 REV12 rows). */
+  exported: boolean;
   /** `Submitted at` — when the request was filed (internal lead-time start). */
   submittedAt: string | null;
   /** `Last Email Update` — when the order went out (vendor lead-time start). */
@@ -63,3 +82,20 @@ export interface SlipMatch {
   matchedRows: ArrivalRow[];
   lines: LineMatch[];
 }
+
+/** Open rows grouped into the order they went out on (`Run ID`, else vendor + submit day). */
+export interface OpenOrder {
+  key: string;
+  runId: string | null;
+  rows: ArrivalRow[];
+  vendor: string;
+  requesters: string[];
+  /** When it was ordered (or requested, if no order date), ISO. */
+  date: string | null;
+}
+
+/** How a package was resolved; `pkg` indexes `Scan.packages` (a message naming three items can yield three matches). */
+export type Resolution =
+  | { pkg: number; kind: 'match'; match: SlipMatch; evidence: string | null }
+  | { pkg: number; kind: 'choose'; orders: OpenOrder[]; vendor: string }
+  | { pkg: number; kind: 'none' };
