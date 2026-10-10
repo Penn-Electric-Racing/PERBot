@@ -133,6 +133,8 @@ export function stem(word: string): string {
   }
 }
 
+const VENDOR_WORDS = 'digikey digi key mcmaster carr jlcpcb jlc jlccnc amazon mouser xometry sendcutsend eurotech';
+
 /** Words too common to tie a package to an item on their own (stored stemmed). */
 const STOP = new Set(
   ['the', 'and', 'for', 'with', 'from', 'here', 'this', 'that', 'our', 'new', 'some', 'stock', 'part', 'kit', 'set', 'pack', 'piece',
@@ -157,6 +159,8 @@ export function terms(...texts: (string | null | undefined)[]): Set<string> {
  */
 export function groundPicks(picks: Pick[], pkg: Extraction): Pick[] {
   const evidence = terms(...pkg.itemHints, ...pkg.lines.flatMap((l) => [l.description, l.vendorPartNumber, l.manufacturerPartNumber]));
+  // A vendor's name is not evidence about an item: "PCBs (JLCPCB)" must not ground a row called "JLCPCB Order 1".
+  for (const v of terms(pkg.vendor, ...picks.flatMap((p) => p.order.rows.map((r) => r.vendor)), VENDOR_WORDS)) evidence.delete(v);
   const codes = new Set(pkg.lines.flatMap((l) => [l.vendorPartNumber, l.manufacturerPartNumber]).filter(Boolean).map((c) => c!.toUpperCase()));
   const grounded = (row: ArrivalRow) => {
     if (codes.has(row.partNumber.trim().toUpperCase())) return true;

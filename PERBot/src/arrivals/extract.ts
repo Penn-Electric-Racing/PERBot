@@ -128,7 +128,7 @@ const GENERIC_HINT = /^(?:(?:small|large|medium|big|multiple|some|various|assort
 const PACKAGING = /\b(?:box(?:es)?|envelopes?|mailers?|packages?|parcels?|corrugated?|cardboard|poster|padded|bubble|tape|labels?|pallets?|packing)\b/i;
 
 export function isSpecificHint(hint: string): boolean {
-  const h = hint.trim();
+  const h = hint.replace(/\([^)]*\)/g, ' ').replace(/\s+/g, ' ').trim(); // "PCBs (JLCPCB)" is still just "PCBs"
   return h.length >= 3 && !GENERIC_HINT.test(h) && !PACKAGING.test(h);
 }
 

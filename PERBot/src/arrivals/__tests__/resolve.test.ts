@@ -191,6 +191,10 @@ test('groundPicks: a picked row must share a word stem with the package evidence
   assert.equal(groundPicks([pick(tubing)], pkg([], { itemHints: ['cooling tube'] })).length, 1);
   assert.equal(groundPicks([pick(tubing)], pkg([line('X', 1, { description: 'clear tubing 10ft' })])).length, 1);
   assert.deepEqual(['soldering', 'solder', 'wiring', 'wire', 'tubes', 'bus'].map(stem), ['sold', 'sold', 'wir', 'wir', 'tub', 'bus']);
+
+  // Backtest run 2: "PCBs (JLCPCB)" grounded "JLCPCB Order 1" through the vendor's own name.
+  const [jlc] = groupOrders([row({ partNumber: 'JLC', name: 'JLCPCB Order 1', runId: 'J1', vendor: 'JLCPCB', link: '' })]);
+  assert.deepEqual(groundPicks([pick(jlc)], pkg([], { vendor: 'JLCPCB', itemHints: ['PCBs (JLCPCB)'] })), []);
 });
 
 test('pile photos: a pick-list only when the message names the vendor, once per vendor', async () => {

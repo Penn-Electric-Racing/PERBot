@@ -102,7 +102,7 @@ test('parseScan: tolerates junk; not_a_delivery drops packages; bad dates and em
   assert.equal(p.lines.length, 1);
   assert.equal(p.lines[0]!.quantityShipped, null);
   assert.deepEqual(p.itemHints, ['cooling tube']);
-  const hints = parseScan({ scene: 'contents', legible: true, packages: [{ item_hints: ['cardboard poster/tube', 'DigiKey box', 'PCBs', 'heat fins', 'steering rack'] }] });
+  const hints = parseScan({ scene: 'contents', legible: true, packages: [{ item_hints: ['cardboard poster/tube', 'DigiKey box', 'PCBs', 'PCBs (JLCPCB)', 'heat fins', 'steering rack'] }] });
   assert.deepEqual(hints.packages[0]!.itemHints, ['heat fins', 'steering rack']);
   assert.deepEqual(parseScan({ scene: 'not_a_delivery', packages: [{ vendor: 'x' }] }).packages, []);
   assert.equal(parseScan(null).scene, 'not_a_delivery');
