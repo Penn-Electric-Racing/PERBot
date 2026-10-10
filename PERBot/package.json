@@ -22,6 +22,7 @@
     "job:ops-digest": "tsx src/opsTasks/digest.ts",
     "benbuys:prep": "tsx src/benbuys/cli.ts prep",
     "benbuys:email": "tsx src/benbuys/cli.ts email",
+    "arrivals:try": "tsx src/arrivals/cli.ts",
     "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "check": "tsc --noEmit",
     "search:eval": "tsx src/search/eval/run.ts",
