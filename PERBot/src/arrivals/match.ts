@@ -27,6 +27,23 @@ const VENDOR_ALIASES: [RegExp, string][] = [
   [/^send-?cut-?send/, 'sendcutsend'],
 ];
 
+const VENDOR_NAMES: Record<string, string> = {
+  digikey: 'DigiKey',
+  mcmaster: 'McMaster-Carr',
+  mouser: 'Mouser',
+  amazon: 'Amazon',
+  jlcpcb: 'JLCPCB',
+  xometry: 'Xometry',
+  sendcutsend: 'SendCutSend',
+};
+
+/** How to write a vendor in a reply: canonical for the common ones, else as given minus "Inc."/"LLC". */
+export function vendorDisplay(raw: string | null | undefined): string {
+  const known = VENDOR_NAMES[vendorKey(raw)];
+  if (known) return known;
+  return (raw ?? '').replace(/,?\s*(inc\.?|llc|ltd\.?|co\.)$/i, '').trim();
+}
+
 /**
  * "McMaster-Carr Supply Co." / "mcmaster carr" / "www.mcmaster.com" → "mcmaster". Vendors without an
  * alias key on their first word, so "Eurotech Distributors, Inc." and "eurotech direct" agree. "" = unknown.
@@ -50,7 +67,7 @@ export function rowVendorKey(row: ArrivalRow): string {
   }
 }
 
-function vendorsCompatible(a: string, b: string): boolean {
+export function vendorsCompatible(a: string, b: string): boolean {
   return !a || !b || a === b || a.startsWith(b) || b.startsWith(a);
 }
 
@@ -143,13 +160,17 @@ export function matchSlip(extraction: Extraction, openRows: ArrivalRow[]): SlipM
 
   const matchedRows = matches.flatMap((m) => (m.row ? [m.row] : []));
   const order = runId ?? uniqueTop(matchedRows.map((r) => (r.runId ? [r.runId] : []))) ?? matchedRows.find((r) => r.runId)?.runId ?? null;
-  const orderRows = order ? pool.filter((r) => r.runId === order) : [];
+  // PEFS export runs (PERPO-…) batch several vendors; the box is one vendor's slice of the run. Name
+  // the run in button values only when the slice IS the whole run (click time re-reads the run).
+  const run = order ? openRows.filter((r) => r.runId === order) : [];
+  const sliceVendor = rowVendorKey(matchedRows.find((r) => r.runId === order) ?? run[0] ?? ({} as ArrivalRow));
+  const orderRows = run.filter((r) => vendorsCompatible(sliceVendor, rowVendorKey(r)));
 
   let confidence: SlipMatch['confidence'] = 'none';
   if (exactRunId) confidence = 'exact';
   else if (matchedRows.length > 0) confidence = matchedRows.length * 2 >= lines.length ? 'strong' : 'weak';
 
-  return { confidence, runId: order, orderRows, matchedRows, lines: matches };
+  return { confidence, runId: orderRows.length === run.length ? order : null, orderRows, matchedRows, lines: matches };
 }
 
 /** The value appearing in the most groups, or null when nothing appears or the top is tied. */
