@@ -144,6 +144,13 @@ export const config = {
       signatureName: optionalString('BENBUYS_DIGIKEY_SIGNATURE', 'Katherine Shen'),
     },
   },
+  arrivals: {
+    // Packing-slip photos posted here are matched to open Purchasing rows (same DB + season as
+    // BenBuys). Channel name or id; empty disables the listener.
+    channel: optionalString('ARRIVALS_CHANNEL', ''),
+    // Must accept images — Groq's gpt-oss-120b doesn't, so this is an OpenAI model.
+    visionModel: optionalString('ARRIVALS_VISION_MODEL', 'gpt-5-mini'),
+  },
   gdrive: {
     // Google Shared Drive source for /dt (Phase 5). A service account key, as raw JSON or base64
     // (secret `GDRIVE_SERVICE_ACCOUNT_JSON`) or a file path. Unset ⇒ the Drive source is skipped.
