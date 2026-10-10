@@ -249,3 +249,4 @@ Recommended Slack slash commands:
 - `/dt`
 - `/reindex`
 - `/indexstatus`
+- `/race`: the REV12 members' time trial leaderboard (`/race`, `/race all`, `/race share`). Needs `RACE_SUPABASE_URL` and `RACE_SUPABASE_SERVICE_KEY` (the Supabase project behind race.pennelectricracing.com; the service_role key stays on the server). Without them `/race` just links to the game.
