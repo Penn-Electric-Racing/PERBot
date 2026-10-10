@@ -40,6 +40,11 @@ services:
         value: REV12
       - key: TOP_K_RESULTS
         value: 5
+      # /race: REV12 members' time trial leaderboard (Supabase project per-race; service_role key)
+      - key: RACE_SUPABASE_URL
+        sync: false
+      - key: RACE_SUPABASE_SERVICE_KEY
+        sync: false
       # BenBuys ordering helper (/benbuys done sends the requisition email from electric@)
       - key: BENBUYS_GMAIL_CLIENT_ID
         sync: false

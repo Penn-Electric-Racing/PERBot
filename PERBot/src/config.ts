@@ -144,6 +144,13 @@ export const config = {
       signatureName: optionalString('BENBUYS_DIGIKEY_SIGNATURE', 'Katherine Shen'),
     },
   },
+  race: {
+    // /race: the REV12 members' time trial leaderboard (Supabase). The service_role key is a server secret;
+    // unset ⇒ /race just links to the game.
+    supabaseUrl: optionalString('RACE_SUPABASE_URL', ''),
+    serviceKey: process.env.RACE_SUPABASE_SERVICE_KEY?.trim() || '',
+    siteUrl: optionalString('RACE_SITE_URL', 'https://race.pennelectricracing.com'),
+  },
   arrivals: {
     // Packing-slip photos posted here are matched to open Purchasing rows (same DB + season as
     // BenBuys). Channel name or id; empty disables the listener.
