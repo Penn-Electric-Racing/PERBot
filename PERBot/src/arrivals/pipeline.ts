@@ -1,6 +1,6 @@
 import type { WebClient } from '@slack/web-api';
 import { config } from '../config.js';
-import { buildReply, type Reply } from './blocks.js';
+import { buildReply, type People, type Reply } from './blocks.js';
 import { scanPhotos, type SlipImage } from './extract.js';
 import { resolveScan, type Picker } from './resolve.js';
 import type { ArrivalRow, Resolution, Scan } from './types.js';
@@ -24,6 +24,8 @@ export interface DeliveryMessage {
   parentText?: string;
   inThread: boolean;
   images: SlipImage[];
+  /** Requesters → Slack ids, so the reply can @-mention them. */
+  people?: People;
 }
 
 export interface DeliveryResult {
@@ -35,7 +37,7 @@ export interface DeliveryResult {
 export async function processDelivery(msg: DeliveryMessage, openRows: ArrivalRow[], picker?: Picker): Promise<DeliveryResult> {
   const scan = await scanPhotos(msg.images, { text: msg.text, parentText: msg.parentText });
   const resolutions = await resolveScan(scan, openRows, new Date(Number(msg.ts) * 1000), [msg.parentText, msg.text].filter(Boolean).join('\n'), picker);
-  return { scan, resolutions, reply: buildReply(scan, resolutions, { u: msg.user, ts: msg.ts, inThread: msg.inThread, text: msg.text }) };
+  return { scan, resolutions, reply: buildReply(scan, resolutions, { u: msg.user, ts: msg.ts, inThread: msg.inThread, text: msg.text, people: msg.people }) };
 }
 
 // --- Slack plumbing shared by the listener and the backtest -----------------------------------

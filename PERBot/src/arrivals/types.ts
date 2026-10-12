@@ -96,6 +96,15 @@ export interface OpenOrder {
 
 /** How a package was resolved; `pkg` indexes `Scan.packages` (a message naming three items can yield three matches). */
 export type Resolution =
-  | { pkg: number; kind: 'match'; match: SlipMatch; evidence: string | null }
+  | {
+      pkg: number;
+      kind: 'match';
+      match: SlipMatch;
+      evidence: string | null;
+      /** `OpenOrder.key` of the matched order, when it is one open order. */
+      key?: string | null;
+      /** The vendor's other open orders, offered as "Other <vendor> orders…" in case the match is wrong. */
+      alternatives?: OpenOrder[];
+    }
   | { pkg: number; kind: 'choose'; orders: OpenOrder[]; vendor: string }
   | { pkg: number; kind: 'none' };

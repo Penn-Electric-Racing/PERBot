@@ -6,11 +6,14 @@ import { vendorDisplay, vendorKey, vendorsCompatible } from './match.js';
  * Replies name requesters, vendors, and items only — never prices (the scan doesn't read them,
  * and Notion's cost columns are never rendered).
  *
- * One section per package the photo resolved:
- *   match  → the rows it shows. Whole order: [✅ Confirm arrived] [Wrong order];
- *            part of one: [✅ These N arrived] [📦 All M arrived] [Wrong order]
- *   choose → vendor known, order not: up to 3 likely orders as buttons + [None of these]
- * Rows not tapped stay `Arrived? = No` — that IS the partial-shipment record.
+ * One card per package the photo resolved — a single order, never a wall of candidates:
+ *   headline   "Probably @Mike's Mouser order from Oct 5" (requesters @-mentioned, so the people
+ *              who know what's in the box see it) or, vendor-only, "Is it @Mike's order from Oct 5?"
+ *   items      the order's rows as checkboxes, the ones this box shows already ticked (≤ 10 rows;
+ *              bigger orders fall back to a linked list + [These N arrived] [All M arrived])
+ *   actions    [Mark arrived] [Wrong order] [Other <vendor> orders… ▾]
+ * Picking another order swaps the card in place; marking turns it into a receipt with [Undo].
+ * Rows left unticked stay `Arrived? = No` — that IS the partial-shipment record.
  *
  * When to say nothing (from #packages history, where most photos are banter, pickup proof, or
  * piles of boxes): not a delivery; a thread reply without a specific match; anything unresolved
@@ -20,11 +23,21 @@ import { vendorDisplay, vendorKey, vendorsCompatible } from './match.js';
 export const ARRIVAL_ACTION_IDS = {
   these: 'arrival_these',
   all: 'arrival_all',
+  /** Legacy pick-list buttons (`arrival_order:<i>`) on replies posted before cards. */
   order: 'arrival_order',
   wrong: 'arrival_wrong',
+  /** Marks the ticked checkboxes of the card. */
+  mark: 'arrival_mark',
+  /** The checkboxes themselves — toggling one only needs an ack. */
+  items: 'arrival_items',
+  /** "Other <vendor> orders…" select — swaps the card to that order. */
+  other: 'arrival_other',
+  undo: 'arrival_undo',
 } as const;
-/** Buttons in one block need distinct action ids, so pick-list buttons carry a `:n` suffix. */
-export const ARRIVAL_ACTION_RE = /^arrival_(these|all|order|wrong)(?::\d+)?$/;
+/** Buttons in one block need distinct action ids, so legacy pick-list buttons carry a `:n` suffix. */
+export const ARRIVAL_ACTION_RE = /^arrival_(these|all|order|wrong|mark|items|other|undo)(?::\d+)?$/;
+/** Every block of a card carries `arrival_<part>:<package index>`. */
+const CARD_BLOCK_RE = /^arrival_(head|items|list|note|actions|done|choice|reminded):(\d+)/;
 export const ACTIONS_BLOCK_PREFIX = 'arrival_actions:';
 /** One section per candidate order in a pick-list: `arrival_choice:<package>:<order>`. */
 export const CHOICE_BLOCK_PREFIX = 'arrival_choice:';
@@ -33,9 +46,11 @@ export const CHOICE_BLOCK_PREFIX = 'arrival_choice:';
 const MAX_VALUE_CHARS = 2000;
 const MAX_LISTED = 15;
 const MAX_PACKAGES = 4;
-const MAX_CHOICES = 3;
-/** Items listed under each candidate order. */
-const CHOICE_ITEMS = 4;
+/** Slack's limit on checkbox options. */
+const MAX_OPTIONS = 10;
+const MAX_ALTERNATIVES = 10;
+/** Items listed on a card too big for checkboxes. */
+const CARD_LISTED = 8;
 
 export interface ArrivalButtonValue {
   /** Slack user who posted the photo (→ Received by). */
@@ -47,11 +62,19 @@ export interface ArrivalButtonValue {
   x?: string[];
   /** Row ids included explicitly. */
   r?: string[];
+  /** `OpenOrder.key` of the card's order (to rebuild it after Undo, and for reminders). */
+  k?: string;
+  /** Undo only: when the rows were marked (epoch s), and which were `Ready for Pickup` before. */
+  t?: number;
+  p?: string[];
 }
 
 type Base = { u: string; ts: string };
 
-const compact = (id: string) => id.replace(/-/g, '');
+/** Notion person name → Slack user id (see people.ts). */
+export type People = Map<string, string>;
+
+export const compact = (id: string) => id.replace(/-/g, '');
 
 export function encodeValue(v: ArrivalButtonValue): string {
   return JSON.stringify(v);
@@ -62,7 +85,16 @@ export function decodeValue(raw: string | undefined): ArrivalButtonValue | null 
     const v = JSON.parse(raw ?? '');
     if (typeof v?.u !== 'string' || typeof v?.ts !== 'string') return null;
     const ids = (a: unknown) => (Array.isArray(a) ? a.filter((s): s is string => typeof s === 'string') : undefined);
-    return { u: v.u, ts: v.ts, g: typeof v.g === 'string' ? v.g : undefined, x: ids(v.x), r: ids(v.r) };
+    return {
+      u: v.u,
+      ts: v.ts,
+      g: typeof v.g === 'string' ? v.g : undefined,
+      x: ids(v.x),
+      r: ids(v.r),
+      k: typeof v.k === 'string' ? v.k : undefined,
+      t: typeof v.t === 'number' ? v.t : undefined,
+      p: ids(v.p),
+    };
   } catch {
     return null;
   }
@@ -107,10 +139,21 @@ function names(requesters: string[], max = 2): string {
   return first.length > max ? `${first.slice(0, max).join(', ')} +${first.length - max}` : first.join(' and ');
 }
 
-/** "*Mike*'s *DigiKey* order from *Oct 5*" / "the *DigiKey* order from *Oct 5*". */
-function orderPhrase(rows: ArrivalRow[], vendor: string, date: string | null): string {
-  const who = names(rows.flatMap((r) => r.pointOfContact));
-  return `${who ? `*${who}*'s` : 'the'} *${vendor}* order${date ? ` from *${date}*` : ''}`;
+/**
+ * "<@U1> and <@U2>" / "<@U1>, *Ana* +3" / "*Mike*" — requesters as Slack mentions where we know
+ * them, so the reply pings the people who can tell what's in the box. At most `max` are named.
+ */
+export function who(requesters: string[], people?: People, max = 2): string {
+  const unique = [...new Set(requesters.filter(Boolean))];
+  if (unique.length === 0) return '';
+  const shown = unique.slice(0, max).map((n) => (people?.get(n) ? `<@${people.get(n)}>` : `*${firstName(n)}*`));
+  return unique.length > max ? `${shown.join(', ')} +${unique.length - max}` : shown.join(' and ');
+}
+
+/** "<@Mike>'s *DigiKey* order from *Oct 5*" / "the *DigiKey* order from *Oct 5*". */
+function orderPhrase(rows: ArrivalRow[], vendor: string, date: string | null, people?: People): string {
+  const whom = who(rows.flatMap((r) => r.pointOfContact), people);
+  return `${whom ? `${whom}'s` : 'the'} *${vendor}* order${date ? ` from *${date}*` : ''}`;
 }
 
 export function shortDate(iso: string | null): string | null {
@@ -150,24 +193,127 @@ function button(text: string, actionId: string, value: ArrivalButtonValue, style
   return { type: 'button', text: { type: 'plain_text', text: text.slice(0, 75), emoji: true }, action_id: actionId, value: encoded, ...(style ? { style } : {}) };
 }
 
-function actions(index: number, elements: (any | null)[]): any {
-  const present = elements.filter(Boolean);
-  if (present.length <= 1) return { type: 'context', elements: [{ type: 'mrkdwn', text: 'Too many items to confirm from Slack — mark them in Notion.' }] };
-  return { type: 'actions', block_id: `${ACTIONS_BLOCK_PREFIX}${index}`, elements: present };
-}
-
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
-function matchBlocks(index: number, match: SlipMatch, evidence: string | null, vendorHint: string | null, base: Base): any[] {
-  const contextRows = match.orderRows.length ? match.orderRows : match.matchedRows;
-  const date = shortDate(earliest(contextRows.map((r) => r.orderedAt ?? r.submittedAt)));
+/** The row's Notion page, short enough for a 75-char checkbox description. */
+function notionLink(row: ArrivalRow): string | null {
+  if (row.url && row.url.length <= 60) return row.url;
+  return row.id ? `https://notion.so/${compact(row.id)}` : row.url || null;
+}
+
+/** A checkbox: "Bus Transceivers Single… `74LVC1T45GW` ×3", with a Notion link underneath (Slack caps both at 75). */
+function option(row: ArrivalRow): any {
+  const qty = row.quantity > 0 ? ` ×${row.quantity}` : '';
+  const code = shownCode(row);
+  const tail = `${code ? ` \`${code}\`` : ''}${qty}`;
+  const name = clean(row.name || row.partNumber, Math.max(20, 72 - tail.length)) || 'item';
+  const text = `${name}${tail}`.length <= 75 ? `${name}${tail}` : `${name}${qty}`;
+  const link = notionLink(row);
+  return { text: { type: 'mrkdwn', text }, value: compact(row.id), ...(link ? { description: { type: 'mrkdwn', text: `<${link}|Open in Notion ↗>` } } : {}) };
+}
+
+/** "Theodor +7 · Sep 29 · Secondary and Inverter HVDC…" — plain text for a select option. */
+function orderOptionLabel(o: OpenOrder): string {
+  const first = o.rows[0] ? clean(o.rows[0].name || o.rows[0].partNumber, 30) : '';
+  return [names(o.requesters, 1) || 'No contact', shortDate(o.date) ?? 'no date', plural(o.rows.length, 'item'), first].filter(Boolean).join(' · ');
+}
+
+function otherOrders(alternatives: OpenOrder[], vendor: string): any | null {
+  const options = alternatives
+    .filter((o) => o.key.length <= 150)
+    .slice(0, MAX_ALTERNATIVES)
+    .map((o) => ({ text: { type: 'plain_text', text: orderOptionLabel(o).slice(0, 75) }, value: o.key }));
+  if (!options.length) return null;
+  return { type: 'static_select', action_id: ARRIVAL_ACTION_IDS.other, placeholder: { type: 'plain_text', text: `Other ${vendor} orders (${options.length})…`.slice(0, 150) }, options };
+}
+
+export interface CardInput {
+  headline: string;
+  /** The order's open rows — what "all arrived" means. */
+  rows: ArrivalRow[];
+  /** Pre-ticked: the rows this box shows. */
+  checked: ArrivalRow[];
+  /** Matched rows from outside the order (ticked too). */
+  extras?: ArrivalRow[];
+  key: string | null;
+  runId: string | null;
+  vendor: string;
+  notes?: string[];
+  alternatives?: OpenOrder[];
+  wrongLabel?: string;
+}
+
+/** One package's card. Block ids carry the package index so a tap settles only its own card. */
+export function orderCard(index: number, card: CardInput, base: Base): any[] {
+  const id = (part: string) => `arrival_${part}:${index}`;
+  const extras = card.extras ?? [];
+  const ticked = [...new Map([...card.checked, ...extras].map((r) => [r.id, r])).values()];
+  const tickedIds = new Set(ticked.map((r) => r.id));
+  const all = [...ticked, ...card.rows.filter((r) => !tickedIds.has(r.id))];
+  const value: ArrivalButtonValue = { ...base, ...(card.key ? { k: card.key } : {}) };
+  const notes = [...(card.notes ?? [])];
+  const blocks: any[] = [{ type: 'section', block_id: id('head'), text: { type: 'mrkdwn', text: card.headline } }];
+  const elements: (any | null)[] = [];
+
+  const shown = all.length <= MAX_OPTIONS ? all : ticked.length && ticked.length <= MAX_OPTIONS ? ticked : null;
+  if (shown) {
+    const options = shown.map(option);
+    const initial = options.filter((_o, i) => tickedIds.has(shown[i]!.id));
+    blocks.push({
+      type: 'actions',
+      block_id: id('items'),
+      elements: [{ type: 'checkboxes', action_id: ARRIVAL_ACTION_IDS.items, options, ...(initial.length ? { initial_options: initial } : {}) }],
+    });
+    elements.push(button('Mark arrived', ARRIVAL_ACTION_IDS.mark, value, 'primary'));
+    if (shown.length < all.length) {
+      notes.push(`${plural(all.length - shown.length, 'more item')} on this order not listed`);
+      elements.push(button(`All ${card.rows.length} arrived`, ARRIVAL_ACTION_IDS.all, { ...orderValue(card.rows, card.runId, base, extras), ...(card.key ? { k: card.key } : {}) }));
+    }
+  } else {
+    // Too many rows to tick one by one: list them and offer the two whole-set buttons.
+    const listed = (ticked.length ? ticked : all).slice(0, CARD_LISTED).map((r) => itemLine(r));
+    const more = (ticked.length ? ticked : all).length - listed.length;
+    if (more > 0) listed.push(`• …and ${more} more`);
+    blocks.push({ type: 'section', block_id: id('list'), text: { type: 'mrkdwn', text: listed.join('\n') } });
+    const these = ticked.length && ticked.length < all.length
+      ? button(`These ${ticked.length} arrived`, ARRIVAL_ACTION_IDS.these, { ...base, r: ticked.map((r) => compact(r.id)) }, 'primary')
+      : null;
+    elements.push(these, button(`All ${card.rows.length} arrived`, ARRIVAL_ACTION_IDS.all, orderValue(card.rows, card.runId, base, extras), these ? undefined : 'primary'));
+  }
+
+  elements.push(button(card.wrongLabel ?? 'Wrong order', ARRIVAL_ACTION_IDS.wrong, base));
+  elements.push(otherOrders(card.alternatives ?? [], card.vendor));
+  if (notes.length) blocks.push({ type: 'context', block_id: id('note'), elements: [{ type: 'mrkdwn', text: notes.join(' · ') }] });
+  const present = elements.filter(Boolean);
+  if (!present.some((e) => e.type === 'button' && e.action_id !== ARRIVAL_ACTION_IDS.wrong)) {
+    blocks.push({ type: 'context', block_id: id('note'), elements: [{ type: 'mrkdwn', text: 'Too many items to confirm from Slack — mark them in Notion.' }] });
+  }
+  blocks.push({ type: 'actions', block_id: id('actions'), elements: present });
+  return blocks;
+}
+
+function vendorName(rows: ArrivalRow[], hint: string | null): string {
   // The label's spelling when it agrees with Notion ("Eurotech Distributors" over "eurotech direct"); Notion's when
   // the label names someone else (a UPS Store re-ship, a fulfiller).
-  const rowVendor = match.matchedRows.find((r) => r.vendor)?.vendor || contextRows.find((r) => r.vendor)?.vendor || '';
-  const agree = !!vendorHint && (!rowVendor || vendorsCompatible(vendorKey(vendorHint), vendorKey(rowVendor)));
+  const rowVendor = rows.find((r) => r.vendor)?.vendor || '';
+  const agree = !!hint && (!rowVendor || vendorsCompatible(vendorKey(hint), vendorKey(rowVendor)));
   const titled = /[A-Z]/.test(rowVendor) ? rowVendor : rowVendor.replace(/(^|\s)[a-z]/g, (c) => c.toUpperCase());
-  const vendor = clean(vendorDisplay(agree ? vendorHint : titled) || 'vendor', 40);
-  const order = orderPhrase(contextRows, vendor, date);
+  return clean(vendorDisplay(agree ? hint : titled) || 'vendor', 40);
+}
+
+/** A package matched to an order — by part numbers, a requisition number, or the model's grounded pick. */
+export function matchCard(
+  index: number,
+  res: { match: SlipMatch; evidence: string | null; key?: string | null; alternatives?: OpenOrder[] },
+  vendorHint: string | null,
+  base: Base,
+  people?: People
+): any[] {
+  const { match, evidence } = res;
+  const contextRows = match.orderRows.length ? match.orderRows : match.matchedRows;
+  const date = shortDate(earliest(contextRows.map((r) => r.orderedAt ?? r.submittedAt)));
+  const vendor = vendorName([...match.matchedRows, ...contextRows], vendorHint);
+  const order = orderPhrase(contextRows, vendor, date, people);
   const n = match.matchedRows.length;
   const total = match.orderRows.length;
   const matched = new Set(match.matchedRows.map((r) => r.id));
@@ -185,83 +331,53 @@ function matchBlocks(index: number, match: SlipMatch, evidence: string | null, v
     headline = `:package: Looks like ${order}: *${n} of ${wholeOrder ? n : total}* items on this slip.`;
   }
 
-  const listed = match.matchedRows.slice(0, MAX_LISTED).map((r) => itemLine(r));
-  if (match.matchedRows.length > MAX_LISTED) listed.push(`• …and ${match.matchedRows.length - MAX_LISTED} more`);
-
-  const blocks: any[] = [{ type: 'section', text: { type: 'mrkdwn', text: headline } }];
-  if (listed.length) blocks.push({ type: 'section', text: { type: 'mrkdwn', text: listed.join('\n') } });
-
   const unmatchedPns = match.lines
     .filter((l) => !l.row)
     .map((l) => l.line.vendorPartNumber ?? l.line.manufacturerPartNumber ?? l.line.customerReference)
     .filter((s): s is string => !!s);
   const notes: string[] = [];
   if (evidence) notes.push(`:mag: ${clean(evidence, 160)}`);
-  if (!wholeOrder) notes.push(`${plural(total - match.orderRows.filter((r) => matched.has(r.id)).length, 'more item')} on this order not in this box`);
   if (unmatchedPns.length) notes.push(`not found in Purchasing: ${unmatchedPns.slice(0, 6).join(', ')}${unmatchedPns.length > 6 ? '…' : ''}`);
-  if (notes.length) blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: notes.join(' · ') }] });
 
-  const buttons =
-    wholeOrder || n === 0
-      ? [
-          n
-            ? button('Confirm arrived', ARRIVAL_ACTION_IDS.these, theseValue(match, base), 'primary')
-            : button(`All ${total} arrived`, ARRIVAL_ACTION_IDS.all, orderValue(match.orderRows, match.runId, base), 'primary'),
-        ]
-      : [
-          button(`These ${n} arrived`, ARRIVAL_ACTION_IDS.these, theseValue(match, base), 'primary'),
-          button(`All ${total} arrived`, ARRIVAL_ACTION_IDS.all, orderValue(match.orderRows, match.runId, base, extras)),
-        ];
-  buttons.push(button('Wrong order', ARRIVAL_ACTION_IDS.wrong, base));
-  blocks.push(actions(index, buttons));
-  return blocks;
+  return orderCard(
+    index,
+    {
+      headline,
+      rows: match.orderRows.length ? match.orderRows : match.matchedRows,
+      checked: n ? match.matchedRows.filter((r) => !extras.includes(r)) : match.orderRows,
+      extras,
+      key: res.key ?? null,
+      runId: match.runId,
+      vendor,
+      notes,
+      alternatives: res.alternatives,
+    },
+    base
+  );
 }
 
-/** "*Mike, Ana +1* · Oct 5 · 5 items" */
-function orderLabel(o: OpenOrder): string {
-  const who = names(o.requesters) || 'No point of contact';
-  return `*${who}* · ${shortDate(o.date) ?? 'no date'} · ${plural(o.rows.length, 'item')}`;
-}
-
-/** The order's items, each linked to its Notion row, then "+N more". */
-function orderItems(o: OpenOrder): string {
-  const lines = o.rows.slice(0, CHOICE_ITEMS).map((r) => itemLine(r, 48));
-  if (o.rows.length > CHOICE_ITEMS) lines.push(`_+${o.rows.length - CHOICE_ITEMS} more_`);
-  return lines.join('\n');
-}
-
-/**
- * Vendor known, order not. Each candidate is its own section — who, when, its items linked to Notion —
- * with a "This one" button beside it; [None of these] underneath. One candidate: [Yes][No] instead.
- */
-function chooseBlocks(index: number, orders: OpenOrder[], vendor: string, base: Base): any[] {
-  const shown = orders.slice(0, MAX_CHOICES);
+/** Vendor known, order not: the most plausible order as a card, the rest in the "Other … orders" select. */
+export function guessCard(index: number, order: OpenOrder, alternatives: OpenOrder[], vendor: string, base: Base, people?: People, lead = ''): any[] {
   const v = clean(vendorDisplay(vendor) || vendor, 40);
-  const choiceId = (i: number) => `${CHOICE_BLOCK_PREFIX}${index}:${i}`;
-  const value = (o: OpenOrder) => orderValue(o.rows, o.runId, base);
-
-  if (shown.length === 1) {
-    const only = shown[0]!;
-    const who = names(only.rows.flatMap((r) => r.pointOfContact));
-    const when = shortDate(only.date);
-    return [
-      { type: 'section', text: { type: 'mrkdwn', text: `:package: A *${v}* package. There’s one open ${v} order${who ? ` (*${who}*’s)` : ''}${when ? ` from *${when}*` : ''}. Is it this one?` } },
-      { type: 'section', block_id: choiceId(0), text: { type: 'mrkdwn', text: orderItems(only) } },
-      actions(index, [
-        button(`Yes — ${plural(only.rows.length, 'item')} arrived`, `${ARRIVAL_ACTION_IDS.order}:0`, value(only), 'primary'),
-        button('No', ARRIVAL_ACTION_IDS.wrong, base),
-      ]),
-    ];
-  }
-
-  const blocks: any[] = [{ type: 'section', text: { type: 'mrkdwn', text: `:package: A *${v}* package. Which order is it? Tap the one that arrived.` } }];
-  shown.forEach((o, i) => {
-    const pick = button('This one', `${ARRIVAL_ACTION_IDS.order}:${i}`, value(o));
-    const tooBig = pick ? '' : '\n_Too many items to confirm from Slack — mark them in Notion._';
-    blocks.push({ type: 'section', block_id: choiceId(i), text: { type: 'mrkdwn', text: `${orderLabel(o)}\n${orderItems(o)}${tooBig}` }, ...(pick ? { accessory: pick } : {}) });
-  });
-  blocks.push({ type: 'actions', block_id: `${ACTIONS_BLOCK_PREFIX}${index}`, elements: [button('None of these', ARRIVAL_ACTION_IDS.wrong, base)] });
-  return blocks;
+  const whom = who(order.rows.flatMap((r) => r.pointOfContact), people);
+  const when = shortDate(order.date);
+  const headline = alternatives.length
+    ? `${lead}:package: A *${v}* package. Is it ${whom ? `${whom}’s` : 'the'} order${when ? ` from *${when}*` : ''}?`
+    : `${lead}:package: A *${v}* package. There’s one open ${v} order${whom ? ` (${whom}’s)` : ''}${when ? ` from *${when}*` : ''}. Is it this one?`;
+  return orderCard(
+    index,
+    {
+      headline,
+      rows: order.rows,
+      checked: order.rows,
+      key: order.key,
+      runId: order.runId,
+      vendor: v,
+      alternatives,
+      wrongLabel: alternatives.length ? 'None of these' : 'No',
+    },
+    base
+  );
 }
 
 export interface Reply {
@@ -274,6 +390,8 @@ export interface ReplyContext extends Base {
   inThread: boolean;
   /** The message posted with the photo. */
   text?: string;
+  /** Requesters → Slack ids, for @-mentions. */
+  people?: People;
 }
 
 /** "Jlc picked up" names JLCPCB: the poster is talking about this vendor's delivery. */
@@ -282,7 +400,7 @@ export function textNamesVendor(text: string | undefined, vendor: string): boole
   return !!key && (text ?? '').split(/[^A-Za-z0-9-]+/).some((w) => w.length >= 3 && vendorKey(w) === key);
 }
 
-const SLIP_PLEASE = 'If it’s ours, reply here with a photo of the *packing slip* from inside the box (the sheet that lists part numbers), or mark it in Notion.';
+const SLIP_PLEASE = 'If it’s ours, reply here with a photo of the *packing slip* or a *bag label* (anything with part numbers), or mark it in Notion.';
 
 /** The thread reply for one delivery photo, or null to stay silent. */
 export function buildReply(scan: Scan, resolutions: Resolution[], ctx: ReplyContext): Reply | null {
@@ -297,11 +415,11 @@ export function buildReply(scan: Scan, resolutions: Resolution[], ctx: ReplyCont
   for (const res of resolutions) {
     if (sections.length >= MAX_PACKAGES) break;
     const pkg = scan.packages[res.pkg];
-    if (res.kind === 'match') sections.push(matchBlocks(sections.length, res.match, res.evidence, pkg?.vendor ?? null, base));
+    if (res.kind === 'match') sections.push(matchCard(sections.length, res, pkg?.vendor ?? null, base, ctx.people));
     if (res.kind !== 'choose' || ctx.inThread || chosen.has(vendorKey(res.vendor))) continue;
     if (scan.scene === 'several_packages' && !textNamesVendor(ctx.text, res.vendor)) continue;
     chosen.add(vendorKey(res.vendor));
-    sections.push(chooseBlocks(sections.length, res.orders, res.vendor, base));
+    sections.push(guessCard(sections.length, res.orders[0]!, res.orders.slice(1), res.vendor, base, ctx.people));
   }
 
   if (sections.length === 0) {
@@ -364,4 +482,83 @@ export function settleBlocks(blocks: any[], blockId: string, outcome: string, ch
 export function packageKey(pkg: { vendor: string | null; trackingNumbers: string[] }): string | null {
   const tracking = pkg.trackingNumbers.map((t) => t.replace(/\s+/g, '').toUpperCase()).sort()[0];
   return tracking ? `${vendorKey(pkg.vendor)}:${tracking}` : null;
+}
+
+/** The package index a card block belongs to (`arrival_items:2` → 2), or null for other blocks. */
+export function cardIndex(blockId: string | undefined): number | null {
+  const m = (blockId ?? '').match(CARD_BLOCK_RE);
+  return m ? Number(m[2]) : null;
+}
+
+/** True when the message's card `index` is a new-style card (has a head block). */
+export function isCard(blocks: any[], index: number): boolean {
+  return blocks.some((b) => b?.block_id === `arrival_head:${index}`);
+}
+
+/** Swap card `index` for `replacement` in place (another order picked, or rebuilt after Undo). */
+export function replaceCard(blocks: any[], index: number, replacement: any[]): any[] {
+  const out: any[] = [];
+  let inserted = false;
+  for (const b of blocks) {
+    if (cardIndex(b?.block_id) !== index) {
+      out.push(b);
+      continue;
+    }
+    if (!inserted) out.push(...replacement);
+    inserted = true;
+  }
+  return inserted ? out : [...out, ...replacement];
+}
+
+/**
+ * Settle card `index` after a tap. The headline stays; the checkboxes become a linked list of what
+ * was marked; the buttons become the outcome line, plus [Undo] when there is something to undo.
+ */
+export function settleCard(blocks: any[], index: number, outcome: string, marked: ArrivalRow[] = [], undo: ArrivalButtonValue | null = null): any[] {
+  const id = (part: string) => `arrival_${part}:${index}`;
+  const out: any[] = [];
+  let listed = false;
+  for (const b of blocks) {
+    const part = cardIndex(b?.block_id) === index ? (b.block_id as string).split(':')[0]!.replace('arrival_', '') : null;
+    if (!part || part === 'head') {
+      out.push(b);
+    } else if ((part === 'items' || part === 'list') && !listed && marked.length) {
+      const lines = marked.slice(0, MAX_LISTED).map((r) => itemLine(r));
+      if (marked.length > MAX_LISTED) lines.push(`• …and ${marked.length - MAX_LISTED} more`);
+      out.push({ type: 'section', block_id: id('list'), text: { type: 'mrkdwn', text: lines.join('\n') } });
+      listed = true;
+    } else if (part === 'actions') {
+      out.push({ type: 'context', block_id: id('note'), elements: [{ type: 'mrkdwn', text: outcome }] });
+      const undoButton = undo ? button('Undo', ARRIVAL_ACTION_IDS.undo, undo) : null;
+      if (undoButton) out.push({ type: 'actions', block_id: id('done'), elements: [undoButton] });
+    }
+    // items/list (nothing marked), note, done, choice, reminded: dropped.
+  }
+  return out;
+}
+
+/** The DM a requester gets once their order is confirmed. */
+export function arrivalDm(rows: ArrivalRow[], ctx: { clicker: string; poster: string; permalink: string | null; arrivedAtIso: string }): string {
+  const vendor = vendorName(rows, null);
+  const lines = rows.slice(0, 8).map((r) => itemLine(r, 50));
+  if (rows.length > 8) lines.push(`• …and ${rows.length - 8} more`);
+  const by = ctx.clicker === ctx.poster ? `<@${ctx.poster}>` : `<@${ctx.poster}> (confirmed by <@${ctx.clicker}>)`;
+  const lead = leadTimeLine(rows, ctx.arrivedAtIso);
+  return [
+    `:package: Your *${vendor}* order is here — ${plural(rows.length, 'item')} received by ${by}:`,
+    ...lines,
+    ...(lead ? [lead] : []),
+    ...(ctx.permalink ? [`<${ctx.permalink}|See the photo in #packages>`] : []),
+  ].join('\n');
+}
+
+/** The one reminder a likely requester gets when a card sat untapped. */
+export function reminderDm(order: OpenOrder, replyLink: string | null): string {
+  const vendor = vendorName(order.rows, null);
+  const items = order.rows.slice(0, 3).map((r) => clean(r.name || r.partNumber, 40)).join(', ');
+  const more = order.rows.length > 3 ? ` +${order.rows.length - 3}` : '';
+  return (
+    `:package: A *${vendor}* package in #packages might be yours (${items}${more}). ` +
+    `Nobody has confirmed it yet — ${replyLink ? `<${replyLink}|take a look>` : 'take a look'} and tap *Mark arrived* or *Wrong order*.`
+  );
 }

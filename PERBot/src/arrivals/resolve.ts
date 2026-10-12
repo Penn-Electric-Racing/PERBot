@@ -37,24 +37,32 @@ export async function resolvePackage(
   messageText: string,
   picker: Picker = pickOrders
 ): Promise<Unindexed[]> {
+  const orders = groupOrders(rows);
+  const vendorOrders = ordersForVendor(orders, pkg.vendor);
+  // The matched order's key, and the vendor's other open orders as a fallback list.
+  const around = (match: SlipMatch) => {
+    const ids = new Set(match.orderRows.map((r) => r.id));
+    const home = orders.find((o) => o.rows.some((r) => ids.has(r.id)));
+    const sameVendor = home ? ordersForVendor(orders, home.vendor) : vendorOrders;
+    return { key: home?.key ?? null, alternatives: rankOrders(sameVendor.filter((o) => o !== home), pkg, asOf) };
+  };
+
   let weak: SlipMatch | null = null;
   if (pkg.lines.length || pkg.orderNumbers.length) {
     const match = matchSlip(pkg, rows);
-    if (match.confidence === 'exact' || match.confidence === 'strong') return [{ kind: 'match', match, evidence: null }];
+    if (match.confidence === 'exact' || match.confidence === 'strong') return [{ kind: 'match', match, evidence: null, ...around(match) }];
     if (match.confidence === 'weak') weak = match;
   }
 
-  const orders = groupOrders(rows);
-  const vendorOrders = ordersForVendor(orders, pkg.vendor);
   const hasEvidence = pkg.itemHints.length > 0 || pkg.lines.some((l) => l.description);
   // A vendor with no open orders is often a misread (the carrier, a fulfiller): let the evidence decide.
   const pool = vendorOrders.length ? vendorOrders : orders;
   if (hasEvidence && pool.length) {
     const picks = await picker(pkg, rankOrders(pool, pkg, asOf), messageText);
-    if (picks.length) return picks.map((p) => ({ kind: 'match', match: pickToMatch(p), evidence: p.evidence }));
+    if (picks.length) return picks.map((p) => ({ kind: 'match', match: pickToMatch(p), evidence: p.evidence, ...around(pickToMatch(p)) }));
   }
 
-  if (weak) return [{ kind: 'match', match: weak, evidence: null }];
+  if (weak) return [{ kind: 'match', match: weak, evidence: null, ...around(weak) }];
   if (vendorOrders.length) return [{ kind: 'choose', orders: rankOrders(vendorOrders, pkg, asOf), vendor: pkg.vendor! }];
   return [{ kind: 'none' }];
 }

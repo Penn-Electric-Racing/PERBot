@@ -6,7 +6,7 @@ import type { ArrivalRow } from './types.js';
 
 /**
  * Purchasing (PEFS) access for package arrivals. Reads open rows (`Arrived?` ≠ Yes) for the
- * season; the only write is `markArrived`, and it touches ONLY the arrival columns:
+ * season; the only writes are `markArrived` (and its `unmarkArrived` undo), touching ONLY the arrival columns:
  *
  *   Arrived? (status: No / Ready for Pickup / Yes) — exists today; 256 of 257 REV12 rows read "No"
  *   Arrived at (date) · Received by (person) · Arrival photo (url) — Week-0 columns
@@ -112,6 +112,16 @@ export class ArrivalsNotion {
       properties['Received by'] = { people: [{ id: write.receivedByNotionId }] };
     }
     if (columns.has('Arrival photo') && write.photoUrl) properties['Arrival photo'] = { url: write.photoUrl };
+    await this.client.pages.update({ page_id: pageId, properties } as any);
+  }
+
+  /** Undo `markArrived`: the status goes back to what it was and the arrival columns are cleared. */
+  async unmarkArrived(pageId: string, previousStatus: string): Promise<void> {
+    const columns = await this.existingColumns();
+    const properties: Record<string, any> = { 'Arrived?': { status: { name: previousStatus || 'No' } } };
+    if (columns.has('Arrived at')) properties['Arrived at'] = { date: null };
+    if (columns.has('Received by')) properties['Received by'] = { people: [] };
+    if (columns.has('Arrival photo')) properties['Arrival photo'] = { url: null };
     await this.client.pages.update({ page_id: pageId, properties } as any);
   }
 
