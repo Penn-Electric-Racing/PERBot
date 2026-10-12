@@ -62,7 +62,13 @@ export async function resolvePackage(
 export async function resolveScan(scan: Scan, openRows: ArrivalRow[], asOf: Date, messageText: string, picker?: Picker): Promise<Resolution[]> {
   if (scan.scene === 'not_a_delivery') return [];
   // A pile photo with nothing said: any "hints" are the model describing boxes. Part numbers still count.
-  const packagesIn = scan.scene === 'several_packages' && !messageText.trim() ? scan.packages.map((p) => ({ ...p, itemHints: [] })) : scan.packages;
+  // With a message, its items belong to the pile, not to whichever box the model filed them under
+  // ("mouser parts and cooling fittings" → the fittings are likely the Amazon box): every package
+  // sees them all. groundPicks still requires an item of the picked order to share a word, and rows
+  // one package claims aren't offered to the next.
+  const pile = scan.scene === 'several_packages';
+  const pileHints = [...new Set(scan.packages.flatMap((p) => p.itemHints))];
+  const packagesIn = !pile ? scan.packages : scan.packages.map((p) => ({ ...p, itemHints: messageText.trim() ? pileHints : [] }));
   let rows = eligibleRows(openRows, asOf);
   const out: Resolution[] = [];
   for (const [i, pkg] of packagesIn.entries()) {

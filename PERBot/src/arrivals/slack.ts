@@ -101,6 +101,82 @@ export async function handlePhoto(client: WebClient, event: any): Promise<void> 
   }
 }
 
+// --- Catch-up sweep ---------------------------------------------------------------------------
+// Socket Mode drops events while the bot is down (deploys, restarts) or reconnecting, and a missed
+// photo never gets another event. So at startup and every 15 minutes, re-read the channel's recent
+// photo posts and handle any PERBot hasn't answered — the listener's own `seen` set keeps a photo
+// from being handled twice in one process.
+
+const SWEEP_WINDOW_MS = 36 * 3_600_000;
+const SWEEP_EVERY_MS = 15 * 60_000;
+/** Leave fresh posts to the live listener (its event may still be in flight). */
+const SWEEP_MIN_AGE_MS = 2 * 60_000;
+
+let ownBotId: Promise<string | null> | null = null;
+function botId(client: WebClient): Promise<string | null> {
+  if (!ownBotId) {
+    ownBotId = client.auth.test().then(
+      (r: any) => (r?.bot_id as string) ?? null,
+      () => (ownBotId = null)
+    );
+  }
+  return ownBotId;
+}
+
+/** A human photo post. */
+export function isPhotoPost(m: any): boolean {
+  return !m?.bot_id && !!m?.user && m?.subtype !== 'message_changed' && Array.isArray(m?.files) && m.files.some(isImage);
+}
+
+/** PERBot already replied in the photo's thread after it was posted. */
+export function alreadyAnswered(photo: any, threadMessages: any[], bot: string | null): boolean {
+  return !!bot && threadMessages.some((m) => m?.bot_id === bot && Number(m.ts) > Number(photo.ts));
+}
+
+/** Photo posts since `oldest` (top level, and replies in those threads) with each one's thread. */
+export async function recentPhotoPosts(client: WebClient, channel: string, oldest: string): Promise<{ msg: any; thread: any[] }[]> {
+  const top: any[] = [];
+  let cursor: string | undefined;
+  do {
+    const res: any = await client.conversations.history({ channel, oldest, limit: 200, cursor });
+    top.push(...(res.messages ?? []));
+    cursor = res.response_metadata?.next_cursor || undefined;
+  } while (cursor);
+
+  const out: { msg: any; thread: any[] }[] = [];
+  for (const m of top) {
+    const thread: any[] = m.reply_count ? ((await client.conversations.replies({ channel, ts: m.ts, limit: 200 })) as any).messages ?? [m] : [m];
+    for (const t of thread) if (isPhotoPost(t) && Number(t.ts) >= Number(oldest)) out.push({ msg: t, thread });
+  }
+  return out.sort((a, b) => Number(a.msg.ts) - Number(b.msg.ts));
+}
+
+let sweeping = false;
+async function sweep(client: WebClient): Promise<void> {
+  if (sweeping) return;
+  sweeping = true;
+  try {
+    const channel = await arrivalsChannelId(client);
+    if (!channel) return;
+    const bot = await botId(client);
+    const oldest = ((Date.now() - SWEEP_WINDOW_MS) / 1000).toFixed(6);
+    const freshCutoff = (Date.now() - SWEEP_MIN_AGE_MS) / 1000;
+    for (const { msg, thread } of await recentPhotoPosts(client, channel, oldest)) {
+      const id = `${channel}:${msg.ts}`;
+      if (seen.has(id) || Number(msg.ts) > freshCutoff) continue;
+      seen.add(id);
+      cap(seen);
+      if (alreadyAnswered(msg, thread, bot)) continue;
+      logger.info(`Arrivals: catching up on a missed photo ${msg.ts}`);
+      await handlePhoto(client, { ...msg, channel });
+    }
+  } catch (err) {
+    logger.warn('Arrivals: catch-up sweep failed', err);
+  } finally {
+    sweeping = false;
+  }
+}
+
 // --- Click handling ---------------------------------------------------------------------------
 
 let peopleIndex: { at: number; index: Promise<Indexed[]> } | null = null;
@@ -135,10 +211,12 @@ export function registerArrivals(app: App): void {
   }
 
   logger.info(`Arrivals: listening for delivery photos in "${config.arrivals.channel}".`);
+  setTimeout(() => void sweep(app.client), 30_000);
+  setInterval(() => void sweep(app.client), SWEEP_EVERY_MS);
 
   app.event('message', async ({ event, client }) => {
     const e = event as any;
-    if (e.bot_id || !e.user || e.subtype === 'message_changed' || !Array.isArray(e.files) || !e.files.some(isImage)) return;
+    if (!isPhotoPost(e)) return;
     const arrivals = await arrivalsChannelId(client).catch((err) => {
       logger.error('Arrivals: could not resolve the channel', err);
       return null;
@@ -160,6 +238,9 @@ export function registerArrivals(app: App): void {
     const channel = (body as any)?.channel?.id as string | undefined;
     const existing: any[] = (body as any)?.message?.blocks ?? [];
     if (!value || !clicker || !channel) return;
+    // Which candidate of a pick-list was tapped (`arrival_order:<i>`): it stays visible once settled.
+    const chosenMatch = actionId.match(/^arrival_order:(\d+)$/);
+    const chosen = chosenMatch ? Number(chosenMatch[1]) : undefined;
 
     if (actionId === ARRIVAL_ACTION_IDS.wrong) {
       await respond({
@@ -198,7 +279,7 @@ export function registerArrivals(app: App): void {
       if (failed.length) parts.push(`⚠️ ${failed.length} failed — set Arrived? in Notion`);
       const lead = leadTimeLine(rows, arrivedAt);
       const outcome = parts.join(' · ') + (lead ? `\n${lead}` : '');
-      await respond({ replace_original: true, text: `${done} items marked arrived`, blocks: settleBlocks(existing, blockId, outcome) });
+      await respond({ replace_original: true, text: `${done} items marked arrived`, blocks: settleBlocks(existing, blockId, outcome, chosen) });
       logger.info(`Arrivals: ${clicker} ${actionId} → ${done} marked, ${already.length} already, ${failed.length} failed.`);
     } catch (err) {
       logger.error(`Arrivals: ${actionId} failed`, err);

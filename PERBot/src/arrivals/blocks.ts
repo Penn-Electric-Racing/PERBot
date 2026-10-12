@@ -26,12 +26,16 @@ export const ARRIVAL_ACTION_IDS = {
 /** Buttons in one block need distinct action ids, so pick-list buttons carry a `:n` suffix. */
 export const ARRIVAL_ACTION_RE = /^arrival_(these|all|order|wrong)(?::\d+)?$/;
 export const ACTIONS_BLOCK_PREFIX = 'arrival_actions:';
+/** One section per candidate order in a pick-list: `arrival_choice:<package>:<order>`. */
+export const CHOICE_BLOCK_PREFIX = 'arrival_choice:';
 
 /** Slack caps a button value at 2000 chars. */
 const MAX_VALUE_CHARS = 2000;
 const MAX_LISTED = 15;
 const MAX_PACKAGES = 4;
 const MAX_CHOICES = 3;
+/** Items listed under each candidate order. */
+const CHOICE_ITEMS = 4;
 
 export interface ArrivalButtonValue {
   /** Slack user who posted the photo (→ Received by). */
@@ -125,10 +129,19 @@ function clean(s: string, max: number): string {
   return full.length <= max ? full : `${full.slice(0, max).replace(/[\s,;(]+\S*$/, '')}…`;
 }
 
-function itemLine(row: ArrivalRow): string {
-  const name = clean(row.name || row.partNumber, 60);
+/** A catalog number worth showing next to the name — what's printed on the bag ("SN74LVC245APWR"), not free text. */
+function shownCode(row: ArrivalRow): string | null {
+  const pn = row.partNumber.trim();
+  if (!pn || pn.length > 30 || /\s/.test(pn) || !/\d/.test(pn)) return null;
+  return row.name && row.name.toUpperCase().includes(pn.toUpperCase()) ? null : clean(pn, 30);
+}
+
+/** "• <notion|Bus Transceivers Single 8-bit…> `SN74LVC245APWR` ×2" — the name links to the Purchasing row. */
+function itemLine(row: ArrivalRow, max = 60): string {
+  const name = clean(row.name || row.partNumber, max) || 'item';
+  const code = shownCode(row);
   const qty = row.quantity > 0 ? ` ×${row.quantity}` : '';
-  return row.url ? `• <${row.url}|${name}>${qty}` : `• ${name}${qty}`;
+  return `• ${row.url ? `<${row.url}|${name}>` : name}${code ? ` \`${code}\`` : ''}${qty}`;
 }
 
 function button(text: string, actionId: string, value: ArrivalButtonValue, style?: 'primary' | 'danger'): any | null {
@@ -172,7 +185,7 @@ function matchBlocks(index: number, match: SlipMatch, evidence: string | null, v
     headline = `:package: Looks like ${order}: *${n} of ${wholeOrder ? n : total}* items on this slip.`;
   }
 
-  const listed = match.matchedRows.slice(0, MAX_LISTED).map(itemLine);
+  const listed = match.matchedRows.slice(0, MAX_LISTED).map((r) => itemLine(r));
   if (match.matchedRows.length > MAX_LISTED) listed.push(`• …and ${match.matchedRows.length - MAX_LISTED} more`);
 
   const blocks: any[] = [{ type: 'section', text: { type: 'mrkdwn', text: headline } }];
@@ -204,40 +217,51 @@ function matchBlocks(index: number, match: SlipMatch, evidence: string | null, v
   return blocks;
 }
 
+/** "*Mike, Ana +1* · Oct 5 · 5 items" */
 function orderLabel(o: OpenOrder): string {
-  const who = names(o.requesters, 1) || 'No requester';
-  return `${who} · ${shortDate(o.date) ?? 'no date'} · ${plural(o.rows.length, 'item')}`;
+  const who = names(o.requesters) || 'No point of contact';
+  return `*${who}* · ${shortDate(o.date) ?? 'no date'} · ${plural(o.rows.length, 'item')}`;
 }
 
+/** The order's items, each linked to its Notion row, then "+N more". */
+function orderItems(o: OpenOrder): string {
+  const lines = o.rows.slice(0, CHOICE_ITEMS).map((r) => itemLine(r, 48));
+  if (o.rows.length > CHOICE_ITEMS) lines.push(`_+${o.rows.length - CHOICE_ITEMS} more_`);
+  return lines.join('\n');
+}
+
+/**
+ * Vendor known, order not. Each candidate is its own section — who, when, its items linked to Notion —
+ * with a "This one" button beside it; [None of these] underneath. One candidate: [Yes][No] instead.
+ */
 function chooseBlocks(index: number, orders: OpenOrder[], vendor: string, base: Base): any[] {
   const shown = orders.slice(0, MAX_CHOICES);
   const v = clean(vendorDisplay(vendor) || vendor, 40);
-  const only = shown[0]!;
-  const who = names(only.rows.flatMap((r) => r.pointOfContact));
-  const when = shortDate(only.date);
-  const headline =
-    shown.length === 1
-      ? `:package: A *${v}* package. There’s one open ${v} order${who ? ` (*${who}*’s)` : ''}${when ? ` from *${when}*` : ''}. Is it this one?`
-      : `:package: A *${v}* package. Which order is it?`;
-  const lines = shown.map((o) => {
-    const items = o.rows.slice(0, 3).map((r) => clean(r.name || r.partNumber, 40));
-    const more = o.rows.length > 3 ? ` +${o.rows.length - 3}` : '';
-    return `• *${orderLabel(o)}* — ${items.join(', ')}${more}`;
+  const choiceId = (i: number) => `${CHOICE_BLOCK_PREFIX}${index}:${i}`;
+  const value = (o: OpenOrder) => orderValue(o.rows, o.runId, base);
+
+  if (shown.length === 1) {
+    const only = shown[0]!;
+    const who = names(only.rows.flatMap((r) => r.pointOfContact));
+    const when = shortDate(only.date);
+    return [
+      { type: 'section', text: { type: 'mrkdwn', text: `:package: A *${v}* package. There’s one open ${v} order${who ? ` (*${who}*’s)` : ''}${when ? ` from *${when}*` : ''}. Is it this one?` } },
+      { type: 'section', block_id: choiceId(0), text: { type: 'mrkdwn', text: orderItems(only) } },
+      actions(index, [
+        button(`Yes — ${plural(only.rows.length, 'item')} arrived`, `${ARRIVAL_ACTION_IDS.order}:0`, value(only), 'primary'),
+        button('No', ARRIVAL_ACTION_IDS.wrong, base),
+      ]),
+    ];
+  }
+
+  const blocks: any[] = [{ type: 'section', text: { type: 'mrkdwn', text: `:package: A *${v}* package. Which order is it? Tap the one that arrived.` } }];
+  shown.forEach((o, i) => {
+    const pick = button('This one', `${ARRIVAL_ACTION_IDS.order}:${i}`, value(o));
+    const tooBig = pick ? '' : '\n_Too many items to confirm from Slack — mark them in Notion._';
+    blocks.push({ type: 'section', block_id: choiceId(i), text: { type: 'mrkdwn', text: `${orderLabel(o)}\n${orderItems(o)}${tooBig}` }, ...(pick ? { accessory: pick } : {}) });
   });
-  const buttons = shown.map((o, i) =>
-    button(
-      shown.length === 1 ? `Yes — ${plural(o.rows.length, 'item')} arrived` : orderLabel(o),
-      `${ARRIVAL_ACTION_IDS.order}:${i}`,
-      orderValue(o.rows, o.runId, base),
-      shown.length === 1 ? 'primary' : undefined
-    )
-  );
-  buttons.push(button(shown.length === 1 ? 'No' : 'None of these', ARRIVAL_ACTION_IDS.wrong, base));
-  return [
-    { type: 'section', text: { type: 'mrkdwn', text: headline } },
-    { type: 'section', text: { type: 'mrkdwn', text: lines.join('\n') } },
-    actions(index, buttons),
-  ];
+  blocks.push({ type: 'actions', block_id: `${ACTIONS_BLOCK_PREFIX}${index}`, elements: [button('None of these', ARRIVAL_ACTION_IDS.wrong, base)] });
+  return blocks;
 }
 
 export interface Reply {
@@ -313,9 +337,27 @@ export function leadTimeLine(rows: ArrivalRow[], arrivedAtIso: string): string |
   return line[0]!.toUpperCase() + line.slice(1);
 }
 
-/** Swap one package's buttons for a one-line outcome, keeping the rest of the reply. */
-export function settleBlocks(blocks: any[], blockId: string, outcome: string): any[] {
-  return blocks.map((b) => (b?.block_id === blockId ? { type: 'context', elements: [{ type: 'mrkdwn', text: outcome }] } : b));
+/**
+ * Settle one package after a tap: its buttons become a one-line outcome. In a pick-list the chosen
+ * order stays (without its button) and the other candidates go; `chosen` is the tapped order's
+ * index (`arrival_order:<i>`), absent for Wrong order / None of these. Other packages are untouched.
+ */
+export function settleBlocks(blocks: any[], blockId: string, outcome: string, chosen?: number): any[] {
+  const pkgIndex = blockId.match(/^arrival_(?:actions|choice):(\d+)/)?.[1];
+  if (pkgIndex === undefined) return blocks;
+  const actionsId = `${ACTIONS_BLOCK_PREFIX}${pkgIndex}`;
+  const choicePrefix = `${CHOICE_BLOCK_PREFIX}${pkgIndex}:`;
+  const out: any[] = [];
+  for (const b of blocks) {
+    const id: string = b?.block_id ?? '';
+    if (id === actionsId) out.push({ type: 'context', elements: [{ type: 'mrkdwn', text: outcome }] });
+    else if (id.startsWith(choicePrefix)) {
+      if (Number(id.slice(choicePrefix.length)) !== chosen) continue;
+      const { accessory: _accessory, ...kept } = b;
+      out.push(kept);
+    } else out.push(b);
+  }
+  return out;
 }
 
 /** Two photos of the same box share vendor + tracking number. */
