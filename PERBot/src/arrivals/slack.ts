@@ -50,7 +50,7 @@ function cap(coll: Set<string> | Map<string, string>): void {
   if (coll.size > 500) coll.delete(coll.keys().next().value!);
 }
 
-async function handlePhoto(client: WebClient, event: any): Promise<void> {
+export async function handlePhoto(client: WebClient, event: any): Promise<void> {
   const threadTs = event.thread_ts ?? event.ts;
   const inThread = Boolean(event.thread_ts && event.thread_ts !== event.ts);
   const reply = (text: string, blocks?: any[]) =>
@@ -134,10 +134,16 @@ export function registerArrivals(app: App): void {
     return;
   }
 
+  logger.info(`Arrivals: listening for delivery photos in "${config.arrivals.channel}".`);
+
   app.event('message', async ({ event, client }) => {
     const e = event as any;
     if (e.bot_id || !e.user || e.subtype === 'message_changed' || !Array.isArray(e.files) || !e.files.some(isImage)) return;
-    if (e.channel !== (await arrivalsChannelId(client))) return;
+    const arrivals = await arrivalsChannelId(client).catch((err) => {
+      logger.error('Arrivals: could not resolve the channel', err);
+      return null;
+    });
+    if (e.channel !== arrivals) return;
     const id = `${e.channel}:${e.ts}`;
     if (seen.has(id)) return;
     seen.add(id);

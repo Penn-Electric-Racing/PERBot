@@ -6,6 +6,7 @@ import { resolveChannelId } from '../sponsorship/jobs/shared.js';
 import type { Reply } from './blocks.js';
 import { ArrivalsNotion } from './notion.js';
 import { isImage, loadImages, processDelivery, withNames, type DeliveryMessage, type DeliveryResult } from './pipeline.js';
+import { handlePhoto } from './slack.js';
 import type { ArrivalRow } from './types.js';
 
 /**
@@ -17,6 +18,8 @@ import type { ArrivalRow } from './types.js';
  *   npm run arrivals:backtest -- [--limit 30]                               replay ARRIVALS_CHANNEL's history:
  *       every human photo (threads too), matched against orders as of when it was posted, printing
  *       what PERBot would have replied — or that it would have stayed silent.
+ *   npm run arrivals:post -- <ts|permalink> [--force]                       the one mode that WRITES to Slack:
+ *       posts the reply the live bot missed into that message's thread (see postMissed).
  */
 
 const TYPES: Record<string, string> = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' };
@@ -127,8 +130,45 @@ async function backtest(args: string[], openRows: ArrivalRow[]): Promise<void> {
   console.log('Outcomes:', JSON.stringify(tally));
 }
 
+/**
+ * Post the reply the live bot missed (it was down, or the event never arrived): runs the same handler
+ * as the listener on one message and replies in its thread as PERBot. Taps on the buttons are handled
+ * by the deployed bot, so run this only once the deploy is healthy. Refuses if PERBot already replied.
+ */
+async function postMissed(args: string[]): Promise<void> {
+  const force = args.includes('--force');
+  const ts = args.find((a) => a !== '--force')?.match(/p?(\d{10})\.?(\d{6})/);
+  if (!ts) throw new Error('Usage: npm run arrivals:post -- <message ts or permalink> [--force]');
+  const messageTs = `${ts[1]}.${ts[2]}`;
+  const client = new WebClient(config.slack.botToken);
+  const channel = await resolveChannelId(client, config.arrivals.channel || 'packages');
+  if (!channel) throw new Error('ARRIVALS_CHANNEL not found');
+
+  const res: any = await client.conversations.history({ channel, latest: messageTs, oldest: messageTs, inclusive: true, limit: 1 });
+  let msg = res.messages?.[0];
+  if (!msg) {
+    // A thread reply: permalinks carry the parent as ?thread_ts=…
+    const parent = args.join(' ').match(/thread_ts=(\d+\.\d+)/)?.[1];
+    if (!parent) throw new Error(`No top-level message ${messageTs} in the channel; for a thread reply pass its permalink.`);
+    const thread: any = await client.conversations.replies({ channel, ts: parent, latest: messageTs, oldest: messageTs, inclusive: true, limit: 1 });
+    msg = (thread.messages ?? []).find((m: any) => m.ts === messageTs);
+    if (!msg) throw new Error(`Message ${messageTs} not found.`);
+  }
+  if (!(msg.files ?? []).some(isImage)) throw new Error('That message has no photo.');
+
+  const me: any = await client.auth.test();
+  const threadTs = msg.thread_ts ?? msg.ts;
+  const thread: any = await client.conversations.replies({ channel, ts: threadTs, limit: 200 });
+  const answered = (thread.messages ?? []).some((m: any) => m.bot_id === me.bot_id && Number(m.ts) > Number(msg.ts));
+  if (answered && !force) throw new Error('PERBot already replied in that thread (pass --force to post anyway).');
+
+  await handlePhoto(client, { ...msg, channel });
+  console.log(`Done — check the thread on ${messageTs}.`);
+}
+
 async function main(): Promise<void> {
   const [mode, ...args] = process.argv.slice(2);
+  if (mode === 'post') return postMissed(args);
   const openRows = await new ArrivalsNotion().openRows();
   console.log(`${openRows.length} open Purchasing rows.\n`);
   if (mode === 'backtest') await backtest(args, openRows);

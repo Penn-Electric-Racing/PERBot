@@ -24,6 +24,7 @@
     "benbuys:email": "tsx src/benbuys/cli.ts email",
     "arrivals:try": "tsx src/arrivals/cli.ts try",
     "arrivals:backtest": "tsx src/arrivals/cli.ts backtest",
+    "arrivals:post": "tsx src/arrivals/cli.ts post",
     "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "check": "tsc --noEmit",
     "search:eval": "tsx src/search/eval/run.ts",
