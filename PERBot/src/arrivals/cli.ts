@@ -6,6 +6,7 @@ import { resolveChannelId } from '../sponsorship/jobs/shared.js';
 import type { Reply } from './blocks.js';
 import { ArrivalsNotion } from './notion.js';
 import { isImage, loadImages, parentText, processDelivery, withNames, type DeliveryMessage, type DeliveryResult } from './pipeline.js';
+import { peopleMap } from './people.js';
 import { alreadyAnswered, handlePhoto, isPhotoPost } from './slack.js';
 import type { ArrivalRow } from './types.js';
 
@@ -37,7 +38,18 @@ function render(reply: Reply | null): string {
     .map((b) => {
       if (b.type === 'section') return b.text.text;
       if (b.type === 'context') return `  ${b.elements.map((e: any) => e.text).join(' ')}`;
-      if (b.type === 'actions') return `  [${b.elements.map((e: any) => e.text.text).join('] [')}]`;
+      if (b.type === 'actions') {
+        return b.elements
+          .map((e: any) => {
+            if (e.type === 'checkboxes') {
+              const ticked = new Set((e.initial_options ?? []).map((o: any) => o.value));
+              return e.options.map((o: any) => `  ${ticked.has(o.value) ? '☑' : '☐'} ${o.text.text}${o.description ? `  (${o.description.text})` : ''}`).join('\n');
+            }
+            if (e.type === 'static_select') return `  [▾ ${e.placeholder.text}: ${e.options.map((o: any) => o.text.text).join(' | ')}]`;
+            return `  [${e.text.text}]`;
+          })
+          .join('\n');
+      }
       return b.type === 'divider' ? '  ---' : '';
     })
     .join('\n')
@@ -164,7 +176,7 @@ async function postMissed(args: string[]): Promise<void> {
     // Rebuild PERBot's earlier reply in place (e.g. after a layout change) — never one someone already tapped.
     const earlier = (thread.messages ?? []).find((m: any) => m.bot_id === me.bot_id && Number(m.ts) > Number(msg.ts));
     if (!earlier) throw new Error('No PERBot reply to replace in that thread.');
-    if (!(earlier.blocks ?? []).some((b: any) => b.type === 'actions' || b.accessory)) throw new Error('That reply was already settled; leaving it alone.');
+    if (!(earlier.blocks ?? []).some((b: any) => /^arrival_(actions|choice):/.test(b.block_id ?? ''))) throw new Error('That reply was already settled; leaving it alone.');
     const result = await processDelivery(
       {
         ts: msg.ts,
@@ -173,6 +185,7 @@ async function postMissed(args: string[]): Promise<void> {
         parentText: msg.thread_ts && msg.thread_ts !== msg.ts ? await parentText(client, channel, msg.thread_ts) : undefined,
         inThread: Boolean(msg.thread_ts && msg.thread_ts !== msg.ts),
         images: await loadImages(client, msg.files),
+        people: await peopleMap(client, new ArrivalsNotion()),
       },
       await new ArrivalsNotion().openRows()
     );

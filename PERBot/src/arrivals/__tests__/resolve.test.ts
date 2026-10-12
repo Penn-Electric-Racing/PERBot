@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildReply, settleBlocks, textNamesVendor } from '../blocks.js';
+import { arrivalDm, buildReply, replaceCard, settleCard, textNamesVendor, who } from '../blocks.js';
 import { addresseeMatches, eligibleRows, groupOrders, ordersForVendor, rankOrders } from '../orders.js';
 import { buildPickPrompt, groundPicks, parsePicks, stem } from '../pick.js';
 import { resolvePackage, resolveScan, type Picker } from '../resolve.js';
@@ -122,7 +122,7 @@ test('buildReply policy: silent for non-deliveries and unresolved thread photos;
   const res = await resolveScan(label, rows, OCT10, 'Digikey here', noPick);
   const choose = buildReply(label, res, top)!;
   assert.match(JSON.stringify(choose.blocks), /one open DigiKey order \(\*Mike\*’s\) from \*Sep 28\*/);
-  assert.ok(choose.blocks.some((b) => b.type === 'actions' && b.elements[0].action_id === 'arrival_order:0'));
+  assert.equal(choose.blocks.find((b) => b.block_id === 'arrival_actions:0').elements[0].action_id, 'arrival_mark');
   assert.equal(buildReply(label, res, thread), null);
 
   // Contents photo with nothing to go on: silent even at top level.
@@ -158,11 +158,16 @@ test('buildReply: specific matches reply even in threads; a pile photo gets matc
   assert.match(json, /Probably the \*McMaster-Carr\* order/);
   assert.match(json, /:mag: message says cooling tube/);
   assert.doesNotMatch(json, /123\.45|9\.99|\$|Which order/);
-  const actionBlocks = reply.blocks.filter((b) => b.type === 'actions');
+  const actionBlocks = reply.blocks.filter((b) => b.block_id?.startsWith('arrival_actions:'));
   assert.deepEqual(actionBlocks.map((b) => b.block_id), ['arrival_actions:0', 'arrival_actions:1']);
-  assert.deepEqual(actionBlocks[0].elements.map((e: any) => e.text.text), ['These 1 arrived', 'All 2 arrived', 'Wrong order']);
+  assert.deepEqual(actionBlocks[0].elements.map((e: any) => e.text?.text ?? e.type), ['Mark arrived', 'Wrong order']);
+  // The slip showed A-ND only: it's ticked, its order-mate B-ND is listed unticked.
+  const boxes = reply.blocks.find((b) => b.block_id === 'arrival_items:0').elements[0];
+  assert.equal(boxes.options.length, 2);
+  assert.equal(boxes.options[0].text.text, 'Hall sensor ×1');
+  assert.deepEqual(boxes.initial_options.map((o: any) => o.text.text), ['Hall sensor ×1']);
 
-  assert.equal(buildReply(pile, res, { ...BASE, inThread: true })!.blocks.filter((b) => b.type === 'actions').length, 2);
+  assert.equal(buildReply(pile, res, { ...BASE, inThread: true })!.blocks.filter((b) => b.block_id?.startsWith('arrival_actions:')).length, 2);
 });
 
 test('buildReply: one-order pick-list reads naturally; mixed-vendor PEFS runs never go by Run ID', async () => {
@@ -175,10 +180,9 @@ test('buildReply: one-order pick-list reads naturally; mixed-vendor PEFS runs ne
   const reply = buildReply(label, res, { ...BASE, inThread: false })!;
   const json = JSON.stringify(reply.blocks);
   assert.match(json, /A \*McMaster-Carr\* package\. There’s one open McMaster-Carr order from \*Sep 28\*\. Is it this one\?/);
-  assert.match(json, /Yes — 1 item arrived/);
-  const value = JSON.parse(reply.blocks.find((b) => b.type === 'actions').elements[0].value);
-  assert.equal(value.g, undefined); // PERPO-1 also holds the Amazon row
-  assert.equal(value.r.length, 1);
+  assert.deepEqual(reply.blocks.find((b) => b.block_id === 'arrival_actions:0').elements.map((e: any) => e.text.text), ['Mark arrived', 'No']);
+  // PERPO-1 also holds the Amazon row: only the McMaster row is offered.
+  assert.deepEqual(reply.blocks.find((b) => b.block_id === 'arrival_items:0').elements[0].options.map((o: any) => o.text.text), ['Firewall tube ×1']);
 });
 
 test('groundPicks: a picked row must share a word stem with the package evidence (backtest false positives)', () => {
@@ -204,31 +208,61 @@ test('pile photos: a pick-list only when the message names the vendor, once per 
   assert.ok(textNamesVendor('Jlc picked up', 'JLCPCB'));
   assert.ok(!textNamesVendor('picked up', 'JLCPCB'));
   const named = buildReply(pile, res, { ...BASE, inThread: false, text: 'Jlc picked up' })!;
-  assert.equal(named.blocks.filter((b) => b.type === 'actions').length, 1);
+  assert.equal(named.blocks.filter((b) => b.block_id?.startsWith('arrival_actions:')).length, 1);
   assert.equal(buildReply(pile, res, { ...BASE, inThread: false, text: '' }), null);
 });
 
-test('pick-list: one section per order with its items linked to Notion; tapping keeps only the chosen order', async () => {
+test('guess card: top order with requesters @-mentioned, items as checkboxes, the rest in a select; settle + swap', async () => {
   const rows = [
-    row({ partNumber: 'SN74LVC245APWR', name: 'Bus Transceivers Single 8-bit', runId: 'M1', vendor: 'Mouser', pointOfContact: ['Mike Song'], url: 'https://notion.so/r1', quantity: 2 }),
+    row({ partNumber: 'SN74LVC245APWR', name: 'Bus Transceivers Single 8-bit', runId: 'M1', vendor: 'Mouser', pointOfContact: ['Mike Song', 'Ana Li'], url: 'https://notion.so/r1', quantity: 2 }),
     ...['A1', 'A2', 'A3', 'A4', 'A5'].map((pn) => row({ partNumber: `${pn}-X1`, name: `Cap ${pn}`, runId: 'M1', vendor: 'Mouser', pointOfContact: ['Mike Song'] })),
-    row({ partNumber: 'HV-PLUG-2', name: 'Secondary HVDC Plug', runId: 'M2', vendor: 'Mouser', pointOfContact: [], url: 'https://notion.so/r2' }),
+    row({ partNumber: 'HV-PLUG-2', name: 'Secondary HVDC Plug', runId: 'M2', vendor: 'Mouser', pointOfContact: [], url: 'https://notion.so/r2', orderedAt: '2026-09-20T15:00:00.000Z' }),
   ];
+  const people = new Map([['Mike Song', 'U_MIKE']]);
   const label = scan('shipping_label', [pkg([], { vendor: 'Mouser Electronics' })]);
-  const reply = buildReply(label, await resolveScan(label, rows, OCT10, 'mouser here', noPick), { ...BASE, inThread: false })!;
-  const choices = reply.blocks.filter((b) => b.block_id?.startsWith('arrival_choice:0:'));
-  assert.equal(choices.length, 2);
-  assert.match(choices[0].text.text, /^\*Mike\* · Sep 28 · 6 items\n• <https:\/\/notion\.so\/r1\|Bus Transceivers Single 8-bit> `SN74LVC245APWR` ×2/);
-  assert.match(choices[0].text.text, /_\+2 more_$/);
-  assert.match(choices[1].text.text, /^\*No point of contact\*/);
-  assert.deepEqual(choices.map((b) => [b.accessory.text.text, b.accessory.action_id]), [['This one', 'arrival_order:0'], ['This one', 'arrival_order:1']]);
-  const none = reply.blocks.find((b) => b.block_id === 'arrival_actions:0');
-  assert.deepEqual(none.elements.map((e: any) => e.text.text), ['None of these']);
+  const reply = buildReply(label, await resolveScan(label, rows, OCT10, 'mouser here', noPick), { ...BASE, inThread: false, people })!;
 
-  const settled = settleBlocks(reply.blocks, 'arrival_choice:0:1', 'done', 1);
-  assert.deepEqual(settled.filter((b) => b.block_id?.startsWith('arrival_choice')).map((b) => [b.block_id, 'accessory' in b]), [['arrival_choice:0:1', false]]);
-  assert.equal(settled.at(-1).elements[0].text, 'done');
-  assert.equal(settleBlocks(reply.blocks, 'arrival_actions:0', 'nope').filter((b) => b.block_id?.startsWith('arrival_choice')).length, 0);
+  const head = reply.blocks.find((b) => b.block_id === 'arrival_head:0').text.text;
+  assert.equal(head, ':package: A *Mouser* package. Is it <@U_MIKE> and *Ana*’s order from *Sep 28*?');
+  const boxes = reply.blocks.find((b) => b.block_id === 'arrival_items:0').elements[0];
+  assert.equal(boxes.options.length, 6);
+  assert.equal(boxes.initial_options.length, 6);
+  assert.deepEqual(boxes.options[0].text, { type: 'mrkdwn', text: 'Bus Transceivers Single 8-bit `SN74LVC245APWR` ×2' });
+  assert.equal(boxes.options[0].description.text, '<https://notion.so/r1|Open in Notion ↗>');
+  // A long app.notion.com URL falls back to the short notion.so/<id> form.
+  const long = row({ partNumber: 'X1', id: '3f0560bc-c039-8185-9ee4-e08d9394ffaa', url: `https://app.notion.com/p/${'x'.repeat(80)}` });
+  const longCard = buildReply(scan('shipping_label', [pkg([], { vendor: 'DigiKey' })]), [{ pkg: 0, kind: 'choose', orders: groupOrders([long]), vendor: 'DigiKey' }], { ...BASE, inThread: false })!;
+  assert.equal(longCard.blocks.find((b) => b.block_id === 'arrival_items:0').elements[0].options[0].description.text, '<https://notion.so/3f0560bcc03981859ee4e08d9394ffaa|Open in Notion ↗>');
+  assert.ok(boxes.options.every((o: any) => o.text.text.length <= 75 && (o.description?.text.length ?? 0) <= 75));
+
+  const actions = reply.blocks.find((b) => b.block_id === 'arrival_actions:0').elements;
+  assert.deepEqual(actions.map((e: any) => e.text?.text ?? e.placeholder.text), ['Mark arrived', 'None of these', 'Other Mouser orders (1)…']);
+  assert.deepEqual(actions[2].options.map((o: any) => [o.text.text, o.value]), [['No contact · Sep 20 · 1 item · Secondary HVDC Plug', 'M2|mouser']]);
+  assert.equal(JSON.parse(actions[0].value).k, 'M1|mouser');
+
+  // Marked: checkboxes → linked receipt, buttons → outcome + Undo; the headline stays.
+  const undo = { ...BASE, r: ['a'], k: 'M1|mouser', t: 1 };
+  const settled = settleCard(reply.blocks, 0, 'done', [rows[0]!], undo);
+  assert.deepEqual(settled.map((b) => b.block_id), ['arrival_head:0', 'arrival_list:0', 'arrival_note:0', 'arrival_done:0']);
+  assert.match(settled[1].text.text, /<https:\/\/notion\.so\/r1\|Bus Transceivers Single 8-bit> `SN74LVC245APWR` ×2/);
+  assert.equal(settled[3].elements[0].action_id, 'arrival_undo');
+  assert.deepEqual(settleCard(reply.blocks, 0, 'nope').map((b) => b.block_id), ['arrival_head:0', 'arrival_note:0']);
+
+  // "Other orders…" swaps just this card.
+  const swapped = replaceCard([{ type: 'divider' }, ...reply.blocks], 0, [{ type: 'section', block_id: 'arrival_head:0' }]);
+  assert.deepEqual(swapped.map((b) => b.block_id ?? b.type), ['divider', 'arrival_head:0']);
+});
+
+test('who + DMs: mentions where known, first names otherwise; DM lists the requester’s items and lead time', () => {
+  const people = new Map([['Mike Song', 'U_MIKE']]);
+  assert.equal(who(['Mike Song', 'Ana Li', 'Bo Chen'], people), '<@U_MIKE>, *Ana* +1');
+  assert.equal(who([], people), '');
+  const r = row({ partNumber: 'A12-ND', name: 'Hall sensor', vendor: 'DigiKey', url: 'https://notion.so/x', quantity: 4 });
+  const dm = arrivalDm([r], { clicker: 'U_C', poster: 'U_P', permalink: 'https://slack/p', arrivedAtIso: '2026-10-10T16:00:00.000Z' });
+  assert.match(dm, /^:package: Your \*DigiKey\* order is here — 1 item received by <@U_P> \(confirmed by <@U_C>\):/);
+  assert.match(dm, /<https:\/\/notion\.so\/x\|Hall sensor> `A12-ND` ×4/);
+  assert.match(dm, /12 days/);
+  assert.match(dm, /<https:\/\/slack\/p\|See the photo in #packages>/);
 });
 
 test('pile photos: the message’s items reach every package, not just the one the model filed them under', async () => {
