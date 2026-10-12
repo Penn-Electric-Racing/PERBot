@@ -52,3 +52,11 @@ services:
         sync: false
       - key: BENBUYS_GMAIL_REFRESH_TOKEN
         sync: false
+      # /parts part finder: a search API key (DuckDuckGo blocks Render's IPs) and an LLM.
+      # Groq (GROQ_API_KEY above) works; Gemini's free tier is much faster for this job.
+      - key: SERPER_API_KEY
+        sync: false
+      - key: BRAVE_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false

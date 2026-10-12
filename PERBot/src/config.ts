@@ -144,6 +144,23 @@ export const config = {
       signatureName: optionalString('BENBUYS_DIGIKEY_SIGNATURE', 'Katherine Shen'),
     },
   },
+  parts: {
+    // /parts part finder (src/partFinder). Search keys are read by search.ts directly:
+    // BRAVE_API_KEY / SERPER_API_KEY / GOOGLE_API_KEY + GOOGLE_CSE_ID (DuckDuckGo needs none
+    // but challenges Render's IPs, so set one). LLM: Gemini if GEMINI_API_KEY, else Groq.
+    geminiApiKey: process.env.GEMINI_API_KEY?.trim() || '',
+    openrouterApiKey: process.env.OPENROUTER_API_KEY?.trim() || '',
+    llmProvider: optionalString('PARTS_LLM_PROVIDER', ''),
+    llmModel: optionalString('PARTS_LLM_MODEL', ''),
+    // Requests per minute to the LLM (0 = the provider's free-tier default).
+    llmRpm: optionalNumber('PARTS_LLM_RPM', 0),
+    // Search results read per /parts call, and options shown.
+    pool: optionalNumber('PARTS_POOL', 15),
+    top: optionalNumber('PARTS_TOP', 5),
+    perSupplier: optionalNumber('PARTS_PER_SUPPLIER', 2),
+    // Partial ranking-weight overrides as JSON, e.g. {"outOfStock": 2} (see partFinder/rank.ts).
+    weightsJson: optionalString('PARTS_WEIGHTS_JSON', ''),
+  },
   race: {
     // /race: the REV12 members' time trial leaderboard (Supabase). The service_role key is a server secret;
     // unset ⇒ /race just links to the game.

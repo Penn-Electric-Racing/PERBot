@@ -250,3 +250,51 @@ Recommended Slack slash commands:
 - `/reindex`
 - `/indexstatus`
 - `/race`: the REV12 members' time trial leaderboard (`/race`, `/race all`, `/race share`). Needs `RACE_SUPABASE_URL` and `RACE_SUPABASE_SERVICE_KEY` (the Supabase project behind race.pennelectricracing.com; the service_role key stays on the server). Without them `/race` just links to the game.
+
+## `/parts`: part finder
+
+Finds the best places to buy a part and adds the one you pick to the Purchasing (PEFS)
+database. Code is in `src/partFinder/`. It's a TypeScript port of the standalone Python
+scraper (`scraper2.py` + `ranking.py`).
+
+```text
+/parts LM7805                   best 5 for one unit
+/parts LM7805 -q 50             for 50 units (also qty:50 or x50)
+/parts LM7805 -q 50 --cheapest  lowest order total only
+```
+
+How it works:
+1. **Search**: about 15 results (`PARTS_POOL`) from Brave, Serper or Google Programmable
+   Search (the first one with a key), with DuckDuckGo as a keyless fallback.
+2. **Read**: each page is cut down to about 6,000 characters of text around the product
+   heading, plus any schema.org JSON-LD and the search snippet. An LLM returns price,
+   currency, seller catalog number, pack size, price breaks, stock, shipping cost and time,
+   and the free-shipping minimum as JSON. Every value is type-checked; the page is treated
+   as untrusted data.
+3. **Rank** (`rank.ts`):
+   `score = (order cost incl. shipping / cheapest clean option) × penalties`.
+   Penalties cover being out of stock or short, slow or unknown shipping, a snippet-only
+   price, a search-results page, missing query words, a variant part number (LM317L for
+   LM317), and suspiciously cheap outliers. 1.00 = cheapest with no drawbacks. Override
+   any weight with `PARTS_WEIGHTS_JSON`, e.g. `{"outOfStock": 2}`.
+4. **Reply**: the results go only to you, each with an **Add to Purchasing** button. A
+   click creates a row with Name, Cat. or model no. (the seller's catalog number when
+   found), Quant., Unit cost, Link, Season, Vendor, Notes and you as Point of contact.
+   Pack listings are entered as packs at the pack price. Payment Method is set to BenBuys
+   for DigiKey and McMaster links; otherwise the requester sets it, along with Subsystem,
+   until `PEFS Ready?` shows ✅. Columns that are missing or have changed type are skipped
+   with a warning.
+
+Setup:
+- **Slack app**: add the `/parts` slash command. Interactivity is already on for the other
+  buttons. Uses the `users:read` / `users:read.email` scopes `/arrivals` already needs.
+- **Search key** (required on Render, because DuckDuckGo blocks datacenter IPs):
+  `SERPER_API_KEY` (2,500 free, no card) or `BRAVE_API_KEY`.
+- **LLM**: `GEMINI_API_KEY` (free tier, about 250k tokens/min) is the best fit. Without
+  it, the existing `GROQ_API_KEY` is used; Groq's free tier allows only about 8k tokens/min
+  on gpt-oss-120b, so a search takes a few minutes. Optional: `PARTS_LLM_PROVIDER`
+  (gemini | groq | openrouter), `PARTS_LLM_MODEL`, `PARTS_LLM_RPM`.
+- **Notion**: writes to the same Purchasing data source as BenBuys
+  (`BENBUYS_PURCHASING_DS_ID`, `BENBUYS_SEASON`). The integration needs *Insert content*.
+
+Run it locally without Slack or Notion writes: `npm run parts -- "LM7805" -q 50`.
