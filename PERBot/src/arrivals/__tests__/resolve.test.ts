@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildReply, textNamesVendor } from '../blocks.js';
+import { buildReply, settleBlocks, textNamesVendor } from '../blocks.js';
 import { addresseeMatches, eligibleRows, groupOrders, ordersForVendor, rankOrders } from '../orders.js';
 import { buildPickPrompt, groundPicks, parsePicks, stem } from '../pick.js';
 import { resolvePackage, resolveScan, type Picker } from '../resolve.js';
@@ -206,4 +206,73 @@ test('pile photos: a pick-list only when the message names the vendor, once per 
   const named = buildReply(pile, res, { ...BASE, inThread: false, text: 'Jlc picked up' })!;
   assert.equal(named.blocks.filter((b) => b.type === 'actions').length, 1);
   assert.equal(buildReply(pile, res, { ...BASE, inThread: false, text: '' }), null);
+});
+
+test('pick-list: one section per order with its items linked to Notion; tapping keeps only the chosen order', async () => {
+  const rows = [
+    row({ partNumber: 'SN74LVC245APWR', name: 'Bus Transceivers Single 8-bit', runId: 'M1', vendor: 'Mouser', pointOfContact: ['Mike Song'], url: 'https://notion.so/r1', quantity: 2 }),
+    ...['A1', 'A2', 'A3', 'A4', 'A5'].map((pn) => row({ partNumber: `${pn}-X1`, name: `Cap ${pn}`, runId: 'M1', vendor: 'Mouser', pointOfContact: ['Mike Song'] })),
+    row({ partNumber: 'HV-PLUG-2', name: 'Secondary HVDC Plug', runId: 'M2', vendor: 'Mouser', pointOfContact: [], url: 'https://notion.so/r2' }),
+  ];
+  const label = scan('shipping_label', [pkg([], { vendor: 'Mouser Electronics' })]);
+  const reply = buildReply(label, await resolveScan(label, rows, OCT10, 'mouser here', noPick), { ...BASE, inThread: false })!;
+  const choices = reply.blocks.filter((b) => b.block_id?.startsWith('arrival_choice:0:'));
+  assert.equal(choices.length, 2);
+  assert.match(choices[0].text.text, /^\*Mike\* · Sep 28 · 6 items\n• <https:\/\/notion\.so\/r1\|Bus Transceivers Single 8-bit> `SN74LVC245APWR` ×2/);
+  assert.match(choices[0].text.text, /_\+2 more_$/);
+  assert.match(choices[1].text.text, /^\*No point of contact\*/);
+  assert.deepEqual(choices.map((b) => [b.accessory.text.text, b.accessory.action_id]), [['This one', 'arrival_order:0'], ['This one', 'arrival_order:1']]);
+  const none = reply.blocks.find((b) => b.block_id === 'arrival_actions:0');
+  assert.deepEqual(none.elements.map((e: any) => e.text.text), ['None of these']);
+
+  const settled = settleBlocks(reply.blocks, 'arrival_choice:0:1', 'done', 1);
+  assert.deepEqual(settled.filter((b) => b.block_id?.startsWith('arrival_choice')).map((b) => [b.block_id, 'accessory' in b]), [['arrival_choice:0:1', false]]);
+  assert.equal(settled.at(-1).elements[0].text, 'done');
+  assert.equal(settleBlocks(reply.blocks, 'arrival_actions:0', 'nope').filter((b) => b.block_id?.startsWith('arrival_choice')).length, 0);
+});
+
+test('pile photos: the message’s items reach every package, not just the one the model filed them under', async () => {
+  const rows = [
+    row({ partNumber: 'LDO-1', name: 'LDO regulator', runId: 'M1', vendor: 'Mouser' }),
+    row({ partNumber: 'B0FIT', name: 'Push-to-connect cooling fittings 3/8"', runId: 'A1', vendor: 'Amazon', link: '' }),
+  ];
+  const seenHints: string[][] = [];
+  const picker: Picker = async (p, orders) => {
+    seenHints.push(p.itemHints);
+    const o = orders.find((x) => x.runId === 'A1');
+    return o ? [{ order: o, rows: o.rows, confidence: 'high', evidence: 'cooling fittings' }] : [];
+  };
+  const pile = scan('several_packages', [pkg([], { vendor: 'Mouser', itemHints: ['cooling fittings'] }), pkg([], { vendor: 'Amazon' })]);
+  const res = await resolveScan(pile, rows, OCT10, 'mouser parts and cooling fittings', picker);
+  assert.deepEqual(seenHints, [['cooling fittings'], ['cooling fittings']]);
+  assert.deepEqual(res.map((r) => [r.pkg, r.kind]), [[0, 'choose'], [1, 'match']]);
+});
+
+test('groundPicks: a hint grounds on its head noun, not on an adjective it shares', () => {
+  const [fitting, tubing] = groupOrders([
+    row({ partNumber: 'B0T', name: 'Cooling T-Fitting for Temp Sensor', runId: 'A1', vendor: 'Amazon' }),
+    row({ partNumber: 'B0P', name: 'DERNORD 3/8" ID PVC Tubing for Cooling', runId: 'A2', vendor: 'Amazon' }),
+  ]);
+  const pick = (o: typeof fitting) => ({ order: o!, rows: o!.rows, confidence: 'high' as const, evidence: '' });
+  const hints = pkg([], { vendor: 'Amazon', itemHints: ['mouser parts', 'cooling fittings or something'] });
+  assert.deepEqual(groundPicks([pick(fitting), pick(tubing)], hints).map((p) => p.order.key), [fitting!.key]);
+});
+
+test('groundPicks: once an order is grounded by a head noun, a shared modifier brings its sibling rows along', () => {
+  const [mc] = groupOrders([
+    row({ partNumber: 'flange 8 feet', name: 'primary flange', runId: 'MC', vendor: 'mcmaster', link: '' }),
+    row({ partNumber: '4130 tube', name: 'welded insert stock', runId: 'MC', vendor: 'mcmaster', link: '' }),
+  ]);
+  const hints = pkg([], { vendor: 'McMaster-Carr', itemHints: ['primary bracket stock', 'welded inserts stock'] });
+  const [p] = groundPicks([{ order: mc!, rows: [mc!.rows[1]!], confidence: 'high', evidence: '' }], hints);
+  assert.deepEqual(p!.rows.map((r) => r.name).sort(), ['primary flange', 'welded insert stock']);
+});
+
+test('groundPicks: a word the picked row already explains does not drag in siblings', () => {
+  const [amz] = groupOrders([
+    row({ partNumber: 'B0T', name: 'Cooling T-Fitting for Temp Sensor', runId: 'A1', vendor: 'Amazon' }),
+    row({ partNumber: 'B0F', name: '12V Cooling Fans', runId: 'A1', vendor: 'Amazon' }),
+  ]);
+  const [p] = groundPicks([{ order: amz!, rows: [amz!.rows[0]!], confidence: 'high', evidence: '' }], pkg([], { vendor: 'Amazon', itemHints: ['cooling fittings'] }));
+  assert.deepEqual(p!.rows.map((r) => r.name), ['Cooling T-Fitting for Temp Sensor']);
 });

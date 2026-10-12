@@ -138,7 +138,9 @@ const VENDOR_WORDS = 'digikey digi key mcmaster carr jlcpcb jlc jlccnc amazon mo
 /** Words too common to tie a package to an item on their own (stored stemmed). */
 const STOP = new Set(
   ['the', 'and', 'for', 'with', 'from', 'here', 'this', 'that', 'our', 'new', 'some', 'stock', 'part', 'kit', 'set', 'pack', 'piece',
-    'item', 'order', 'box', 'small', 'large', 'black', 'red', 'blue', 'white', 'meter', 'feet', 'inch', 'tool'].map(stem)
+    'item', 'order', 'box', 'small', 'large', 'black', 'red', 'blue', 'white', 'meter', 'feet', 'inch', 'tool',
+    // filler from how people actually type ("cooling fittings or something")
+    'something', 'stuff', 'thing', 'things', 'maybe', 'probably', 'idk', 'misc', 'other', 'etc', 'arrived', 'came', 'here'].map(stem)
 );
 
 export function terms(...texts: (string | null | undefined)[]): Set<string> {
@@ -153,22 +155,38 @@ export function terms(...texts: (string | null | undefined)[]): Set<string> {
 }
 
 /**
- * The deterministic check on the model: keep only picked rows that share a real word stem with the
- * package's own evidence (item hints, slip lines). "cooling tube" ↔ "PVC Tubing for Cooling" passes;
- * "buds" ↔ "Cotton Swabs" and "rev11 substack" ↔ "JLCPCB Order 1" don't. A pick with no such row is dropped.
+ * The deterministic check on the model. A pick survives only if one of its rows shares a word stem
+ * with the package's own evidence — from an item hint, its head noun; from a slip line, any word.
+ * "cooling tube" ↔ "PVC Tubing for Cooling" passes; "cooling fittings" ↔ "PVC Tubing for Cooling"
+ * (only the adjective) and "buds" ↔ "Cotton Swabs" don't. Within a pick that passed, any shared word
+ * keeps a row: "primary bracket stock" brings along "primary flange" from the order "welded inserts
+ * stock" already matched (10/02).
  */
 export function groundPicks(picks: Pick[], pkg: Extraction): Pick[] {
-  const evidence = terms(...pkg.itemHints, ...pkg.lines.flatMap((l) => [l.description, l.vendorPartNumber, l.manufacturerPartNumber]));
   // A vendor's name is not evidence about an item: "PCBs (JLCPCB)" must not ground a row called "JLCPCB Order 1".
-  for (const v of terms(pkg.vendor, ...picks.flatMap((p) => p.order.rows.map((r) => r.vendor)), VENDOR_WORDS)) evidence.delete(v);
+  const vendorTerms = terms(pkg.vendor, ...picks.flatMap((p) => p.order.rows.map((r) => r.vendor)), VENDOR_WORDS);
+  const drop = (set: Iterable<string>) => new Set([...set].filter((t) => !vendorTerms.has(t)));
+  const slip = drop(terms(...pkg.lines.flatMap((l) => [l.description, l.vendorPartNumber, l.manufacturerPartNumber])));
+  const heads = new Set([...pkg.itemHints.map((h) => [...drop(terms(h))].at(-1)).filter((t): t is string => !!t), ...slip]);
+  const any = new Set([...drop(terms(...pkg.itemHints)), ...slip]);
   const codes = new Set(pkg.lines.flatMap((l) => [l.vendorPartNumber, l.manufacturerPartNumber]).filter(Boolean).map((c) => c!.toUpperCase()));
-  const grounded = (row: ArrivalRow) => {
+  const shares = (row: ArrivalRow, evidence: Set<string>) => {
     if (codes.has(row.partNumber.trim().toUpperCase())) return true;
     for (const t of terms(row.name, row.partNumber, row.sanitizedDescription)) if (evidence.has(t)) return true;
     return false;
   };
+  const rowTerms = (r: ArrivalRow) => terms(r.name, r.partNumber, r.sanitizedDescription);
   return picks
-    .map((p) => ({ ...p, rows: (p.rows.some(grounded) ? p.rows : p.order.rows).filter(grounded) }))
+    .filter((p) => p.order.rows.some((r) => shares(r, heads)))
+    .map((p) => {
+      const kept = (p.rows.some((r) => shares(r, any)) ? p.rows : p.order.rows).filter((r) => shares(r, any));
+      // Hint words the kept rows don't account for can still name siblings ("primary" → "primary flange");
+      // ones they do can't drag more in ("cooling" is already the T-fitting's, so "cooling fans" stays out).
+      const explained = new Set(kept.flatMap((r) => [...rowTerms(r)]));
+      const rest = new Set([...any].filter((t) => !explained.has(t)));
+      const siblings = p.order.rows.filter((r) => !kept.includes(r) && shares(r, rest));
+      return { ...p, rows: [...kept, ...siblings] };
+    })
     .filter((p) => p.rows.length > 0);
 }
 
