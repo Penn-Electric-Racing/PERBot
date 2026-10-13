@@ -228,12 +228,20 @@ test('guess card: top order with requesters @-mentioned, items as checkboxes, th
   assert.equal(boxes.options.length, 6);
   assert.equal(boxes.initial_options.length, 6);
   assert.deepEqual(boxes.options[0].text, { type: 'mrkdwn', text: 'Bus Transceivers Single 8-bit `SN74LVC245APWR` ×2' });
-  assert.equal(boxes.options[0].description.text, '<https://notion.so/r1|Open in Notion ↗>');
+  // Links can't be clicked inside a checkbox option, so they sit on a line of their own under the boxes.
+  assert.ok(boxes.options.every((o: any) => !o.description));
+  const links = reply.blocks.find((b) => b.block_id === 'arrival_links:0').elements[0].text.split('\n');
+  assert.equal(links.length, 6);
+  assert.match(links[0]!, /^`SN74LVC245APWR`  <https:\/\/notion\.so\/r1\|Notion> · <https?:\/\/[^|]+\|Mouser ↗>$/);
   // A long app.notion.com URL falls back to the short notion.so/<id> form.
-  const long = row({ partNumber: 'X1', id: '3f0560bc-c039-8185-9ee4-e08d9394ffaa', url: `https://app.notion.com/p/${'x'.repeat(80)}` });
+  const long = row({ partNumber: 'X1', id: '3f0560bc-c039-8185-9ee4-e08d9394ffaa', url: `https://app.notion.com/p/${'x'.repeat(80)}`, link: '' });
   const longCard = buildReply(scan('shipping_label', [pkg([], { vendor: 'DigiKey' })]), [{ pkg: 0, kind: 'choose', orders: groupOrders([long]), vendor: 'DigiKey' }], { ...BASE, inThread: false })!;
-  assert.equal(longCard.blocks.find((b) => b.block_id === 'arrival_items:0').elements[0].options[0].description.text, '<https://notion.so/3f0560bcc03981859ee4e08d9394ffaa|Open in Notion ↗>');
-  assert.ok(boxes.options.every((o: any) => o.text.text.length <= 75 && (o.description?.text.length ?? 0) <= 75));
+  assert.equal(longCard.blocks.find((b) => b.block_id === 'arrival_links:0').elements[0].text, '`X1`  <https://notion.so/3f0560bcc03981859ee4e08d9394ffaa|Notion>');
+  assert.ok(boxes.options.every((o: any) => o.text.text.length <= 75));
+  // A Notion page pasted in as the product link isn't a product page.
+  const pasted = row({ partNumber: 'X2', url: 'https://notion.so/r9', link: 'https://app.notion.com/p/penn-electric-racing/abc' });
+  const pastedCard = buildReply(scan('shipping_label', [pkg([], { vendor: 'DigiKey' })]), [{ pkg: 0, kind: 'choose', orders: groupOrders([pasted]), vendor: 'DigiKey' }], { ...BASE, inThread: false })!;
+  assert.equal(pastedCard.blocks.find((b) => b.block_id === 'arrival_links:0').elements[0].text, '`X2`  <https://notion.so/r9|Notion>');
 
   const actions = reply.blocks.find((b) => b.block_id === 'arrival_actions:0').elements;
   assert.deepEqual(actions.map((e: any) => e.text?.text ?? e.placeholder.text), ['Mark arrived', 'None of these', 'Other Mouser orders (1)…']);
