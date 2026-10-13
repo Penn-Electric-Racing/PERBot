@@ -11,6 +11,8 @@ import { vendorDisplay, vendorKey, vendorsCompatible } from './match.js';
  *              who know what's in the box see it) or, vendor-only, "Is it @Mike's order from Oct 5?"
  *   items      the order's rows as checkboxes, the ones this box shows already ticked (≤ 10 rows;
  *              bigger orders fall back to a linked list + [These N arrived] [All M arrived])
+ *   links      one line per row: Notion · product page (Slack doesn't make links inside a
+ *              checkbox option clickable — a tap there toggles the box)
  *   actions    [Mark arrived] [Wrong order] [Other <vendor> orders… ▾]
  * Picking another order swaps the card in place; marking turns it into a receipt with [Undo].
  * Rows left unticked stay `Arrived? = No` — that IS the partial-shipment record.
@@ -37,7 +39,7 @@ export const ARRIVAL_ACTION_IDS = {
 /** Buttons in one block need distinct action ids, so legacy pick-list buttons carry a `:n` suffix. */
 export const ARRIVAL_ACTION_RE = /^arrival_(these|all|order|wrong|mark|items|other|undo)(?::\d+)?$/;
 /** Every block of a card carries `arrival_<part>:<package index>`. */
-const CARD_BLOCK_RE = /^arrival_(head|items|list|note|actions|done|choice|reminded):(\d+)/;
+const CARD_BLOCK_RE = /^arrival_(head|items|links|list|note|actions|done|choice|reminded):(\d+)/;
 export const ACTIONS_BLOCK_PREFIX = 'arrival_actions:';
 /** One section per candidate order in a pick-list: `arrival_choice:<package>:<order>`. */
 export const CHOICE_BLOCK_PREFIX = 'arrival_choice:';
@@ -179,12 +181,33 @@ function shownCode(row: ArrivalRow): string | null {
   return row.name && row.name.toUpperCase().includes(pn.toUpperCase()) ? null : clean(pn, 30);
 }
 
-/** "• <notion|Bus Transceivers Single 8-bit…> `SN74LVC245APWR` ×2" — the name links to the Purchasing row. */
+/** The row's product page, safe inside `<url|text>`; null when missing, not http(s), or absurdly long. */
+function productUrl(row: ArrivalRow): string | null {
+  const url = (row.link ?? '').trim();
+  if (!/^https?:\/\/\S+$/i.test(url) || url.length > 500) return null;
+  if (/^https?:\/\/([^/]+\.)?notion\.(so|site|com)\//i.test(url)) return null; // a Notion page pasted in as the product
+  return url.replace(/\|/g, '%7C').replace(/>/g, '%3E').replace(/</g, '%3C');
+}
+
+/** "Mouser ↗" — the vendor's name for the product link (the link's host when the vendor is blank). */
+function productLabel(row: ArrivalRow): string {
+  const host = (row.link.match(/^https?:\/\/(?:www\.)?([^/:]+)/i)?.[1] ?? '').split('.').slice(-2, -1)[0] ?? '';
+  return `${clean(vendorDisplay(row.vendor) || vendorDisplay(host) || 'Product page', 24)} ↗`;
+}
+
+/** "<product|Mouser ↗>", or "" without a product link. */
+function productLink(row: ArrivalRow): string {
+  const url = productUrl(row);
+  return url ? `<${url}|${productLabel(row)}>` : '';
+}
+
+/** "• <notion|Bus Transceivers Single 8-bit…> `SN74LVC245APWR` ×2 · <product|Mouser ↗>" — the name links to the Purchasing row. */
 function itemLine(row: ArrivalRow, max = 60): string {
   const name = clean(row.name || row.partNumber, max) || 'item';
   const code = shownCode(row);
   const qty = row.quantity > 0 ? ` ×${row.quantity}` : '';
-  return `• ${row.url ? `<${row.url}|${name}>` : name}${code ? ` \`${code}\`` : ''}${qty}`;
+  const product = productLink(row);
+  return `• ${row.url ? `<${row.url}|${name}>` : name}${code ? ` \`${code}\`` : ''}${qty}${product ? ` · ${product}` : ''}`;
 }
 
 function button(text: string, actionId: string, value: ArrivalButtonValue, style?: 'primary' | 'danger'): any | null {
@@ -195,21 +218,23 @@ function button(text: string, actionId: string, value: ArrivalButtonValue, style
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
-/** The row's Notion page, short enough for a 75-char checkbox description. */
-function notionLink(row: ArrivalRow): string | null {
-  if (row.url && row.url.length <= 60) return row.url;
-  return row.id ? `https://notion.so/${compact(row.id)}` : row.url || null;
-}
-
-/** A checkbox: "Bus Transceivers Single… `74LVC1T45GW` ×3", with a Notion link underneath (Slack caps both at 75). */
+/** A checkbox: "Bus Transceivers Single… `74LVC1T45GW` ×3" (Slack caps it at 75). No links — they don't click there. */
 function option(row: ArrivalRow): any {
   const qty = row.quantity > 0 ? ` ×${row.quantity}` : '';
   const code = shownCode(row);
   const tail = `${code ? ` \`${code}\`` : ''}${qty}`;
   const name = clean(row.name || row.partNumber, Math.max(20, 72 - tail.length)) || 'item';
   const text = `${name}${tail}`.length <= 75 ? `${name}${tail}` : `${name}${qty}`;
-  const link = notionLink(row);
-  return { text: { type: 'mrkdwn', text }, value: compact(row.id), ...(link ? { description: { type: 'mrkdwn', text: `<${link}|Open in Notion ↗>` } } : {}) };
+  return { text: { type: 'mrkdwn', text }, value: compact(row.id) };
+}
+
+/** "`74LVC1T45GW,125`  <notion|Notion> · <product|Mouser ↗>" — one line per checkbox, in the same order. */
+function linkLine(row: ArrivalRow): string | null {
+  const code = shownCode(row);
+  const what = code ? `\`${code}\`` : clean(row.name || row.partNumber, 32) || 'item';
+  const notion = row.url && row.url.length <= 60 ? row.url : row.id ? `https://notion.so/${compact(row.id)}` : row.url;
+  const links = [notion ? `<${notion}|Notion>` : '', productLink(row)].filter(Boolean);
+  return links.length ? `${what}  ${links.join(' · ')}` : null;
 }
 
 /** "Theodor +7 · Sep 29 · Secondary and Inverter HVDC…" — plain text for a select option. */
@@ -264,6 +289,14 @@ export function orderCard(index: number, card: CardInput, base: Base): any[] {
       block_id: id('items'),
       elements: [{ type: 'checkboxes', action_id: ARRIVAL_ACTION_IDS.items, options, ...(initial.length ? { initial_options: initial } : {}) }],
     });
+    // Context text caps at 3000 chars per element (long Amazon URLs): split across elements if needed.
+    const linkTexts: any[] = [];
+    for (const line of shown.map(linkLine).filter((l): l is string => !!l)) {
+      const last = linkTexts[linkTexts.length - 1];
+      if (last && last.text.length + line.length + 1 <= 3000) last.text += `\n${line}`;
+      else if (line.length <= 3000) linkTexts.push({ type: 'mrkdwn', text: line });
+    }
+    if (linkTexts.length) blocks.push({ type: 'context', block_id: id('links'), elements: linkTexts.slice(0, 10) });
     elements.push(button('Mark arrived', ARRIVAL_ACTION_IDS.mark, value, 'primary'));
     if (shown.length < all.length) {
       notes.push(`${plural(all.length - shown.length, 'more item')} on this order not listed`);
@@ -532,7 +565,7 @@ export function settleCard(blocks: any[], index: number, outcome: string, marked
       const undoButton = undo ? button('Undo', ARRIVAL_ACTION_IDS.undo, undo) : null;
       if (undoButton) out.push({ type: 'actions', block_id: id('done'), elements: [undoButton] });
     }
-    // items/list (nothing marked), note, done, choice, reminded: dropped.
+    // items/list (nothing marked), links, note, done, choice, reminded: dropped.
   }
   return out;
 }
