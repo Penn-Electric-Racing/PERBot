@@ -142,11 +142,13 @@ export async function enrichCompany(
         company: displayCompany,
         domain: canonical,
         bankPageUrl: existing.url,
+        alreadyDeal: false,
         assignment: { ...assignmentBase!, dealUrl: deal.url },
       };
     }
 
-    return { deduped: true, company: displayCompany, domain: canonical, bankPageUrl: existing.url, assignment: assignmentBase };
+    const alreadyDeal = existing.hasPipelineDeal || existing.status === 'Graduated';
+    return { deduped: true, company: displayCompany, domain: canonical, bankPageUrl: existing.url, alreadyDeal, assignment: assignmentBase };
   }
 
   // Step 3 — homepage/about text (deterministic grounding for the classifier).

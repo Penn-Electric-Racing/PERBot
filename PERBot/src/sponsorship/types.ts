@@ -230,6 +230,8 @@ export type EnrichResult =
       domain: string;
       /** URL of the pre-existing Bank page. */
       bankPageUrl: string;
+      /** The existing lead was already a Pipeline deal before this add. */
+      alreadyDeal: boolean;
       assignment?: AssignmentInfo;
     }
   | {
