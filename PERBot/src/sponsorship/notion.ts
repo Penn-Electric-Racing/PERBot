@@ -250,6 +250,20 @@ export class SponsorNotion {
     return { id: result.id, url: result.url };
   }
 
+  /**
+   * Bank leads on `hostname` however the Domain was typed (http://, www., trailing
+   * path) — the forgiving lookup behind `/sponsor claim keye.co`. Enrichment's dedupe
+   * keeps the exact `findBankRowByDomain`.
+   */
+  async findBankRowsByHostname(hostname: string): Promise<BankLeadRow[]> {
+    const response: any = await this.client.dataSources.query({
+      data_source_id: config.sponsorship.bankDataSourceId,
+      filter: { property: 'Domain', url: { contains: hostname } },
+      page_size: 25,
+    });
+    return (response.results ?? []).map(parseBankRow).filter((r: BankLeadRow) => extractHostname(r.domain) === hostname);
+  }
+
   /** Find Bank leads whose Company title contains `name` (for `/sponsor claim`). */
   async findBankRowsByCompany(name: string): Promise<BankLeadRow[]> {
     const response: any = await this.client.dataSources.query({
@@ -460,6 +474,11 @@ export class SponsorNotion {
   /** Find Pipeline deals whose Company title contains `name` (for `/sponsor log`). */
   async findDealsByCompany(name: string): Promise<PipelineRow[]> {
     return this.queryPipeline({ property: 'Company', title: { contains: name } });
+  }
+
+  /** Deals graduated from one Bank lead (via the Bank source relation) — title-independent. */
+  async findDealsForBankRow(bankPageId: string): Promise<PipelineRow[]> {
+    return this.queryPipeline({ property: 'Bank source', relation: { contains: bankPageId } });
   }
 
   /**

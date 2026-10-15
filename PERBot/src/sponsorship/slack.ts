@@ -10,6 +10,8 @@ import { indexNotionUsers, resolveSlackHandles, slackUserToNotionId } from './id
 import { dealListBlocks } from './dealBlocks.js';
 import { computeQuotaResults, currentAuditWindow, formatQuotaStanding } from './jobs/quotaAudit.js';
 import { announceWonNow, totalRaised } from './jobs/winPost.js';
+import { extractHostname, looksLikeDomain } from './domain.js';
+import { NameMatch, pickByName, pickLiveDeal } from './match.js';
 import { SponsorNotion } from './notion.js';
 import { compareForRank, fitScore, impactScore, priorityScore, quadrant, SponsorScores } from './scoring.js';
 import { BankLeadRow, CATEGORIES, Category, EnrichResult, PipelineRow, STAGES, Stage, WonKind } from './types.js';
@@ -141,9 +143,10 @@ function formatAddResult(result: EnrichResult): string {
       return `✅ *${result.company}* was already in the Bank — claimed it for ${result.assignment.assignees.join(', ')} → <${result.assignment.dealUrl}|Pipeline deal> (Prospect).`;
     }
     const base = `↩︎ *${result.company}* is already in the Bank. <${result.bankPageUrl}|Open row>`;
-    return result.assignment?.assignees.length || result.assignment?.unresolved.length
-      ? `${base}\n• It's already an active deal — use \`/sponsor me\`, or \`/sponsor stage\` / \`/sponsor won\` to update it.`
-      : base;
+    const host = extractHostname(result.domain) ?? result.company;
+    return result.alreadyDeal
+      ? `${base}\n• It's already a Pipeline deal — update it with \`/sponsor stage ${host} <stage>\` or \`/sponsor log ${host} - <note>\`.`
+      : `${base}\n• Nobody's claimed it yet — \`/sponsor claim ${host}\` makes it your deal.`;
   }
 
   const c = result.classification;
@@ -310,27 +313,59 @@ async function handleQuota(client: WebClient, respond: RespondFn, slackUserId: s
 
 // --- /sponsor email ------------------------------------------------------------
 
+/** "<https://www.keye.co|www.keye.co>" / "keye.co" → "keye.co"; a plain name → null. */
+function queryHostname(query: string): string | null {
+  return looksLikeDomain(query) ? extractHostname(query) : null;
+}
+
+/** The bare hostname a user can type back to pick this row, e.g. "skf.com". */
+function bankHost(row: BankLeadRow): string {
+  return extractHostname(row.domain) ?? '';
+}
+
 /**
- * Find the single Bank prospect matching `company` (exact title wins when several
- * match). Responds itself and returns null on zero or ambiguous matches.
+ * Bank rows for a `/sponsor` argument: a URL/domain matches the Domain column (the only
+ * thing that tells two "SKF" rows apart); a name goes through the title search with
+ * exact-name-beats-substring (so "Keye" isn't ambiguous with "Hawkeyeind").
  */
-async function resolveSingleBankRow(respond: RespondFn, company: string): Promise<BankLeadRow | null> {
-  const rows = await notion.findBankRowsByCompany(company);
-  if (rows.length === 0) {
-    await respond({
-      response_type: 'ephemeral',
-      text: `No Bank prospect matches *${company}*. Add it with \`/sponsor add ${company}\` first.`,
-    });
-    return null;
+async function lookupBankRows(query: string): Promise<NameMatch<BankLeadRow>> {
+  const host = queryHostname(query);
+  if (host) {
+    const rows = await notion.findBankRowsByHostname(host);
+    if (rows.length === 1) return { kind: 'one', row: rows[0]! };
+    return rows.length ? { kind: 'many', rows } : { kind: 'none' };
   }
-  if (rows.length > 1) {
-    const exact = rows.find((r) => r.company.toLowerCase() === company.toLowerCase());
-    if (exact) return exact;
-    const list = rows.slice(0, 8).map((r) => `• <${r.url}|${r.company}>`).join('\n');
-    await respond({ response_type: 'ephemeral', text: `*${company}* matches several prospects — be more specific:\n${list}` });
-    return null;
-  }
-  return rows[0]!;
+  return pickByName(await notion.findBankRowsByCompany(query), query);
+}
+
+/** "Several match" reply that shows each row's domain and how to pick one. */
+function ambiguousBankText(query: string, rows: BankLeadRow[], subcommand: string): string {
+  const list = rows.slice(0, 8).map((r) => {
+    const host = bankHost(r);
+    const state = r.hasPipelineDeal || r.status === 'Graduated' ? 'already a deal' : 'unclaimed';
+    return `• <${r.url}|${r.company}>${host ? ` — ${host}` : ''} · ${state}`;
+  });
+  const example = rows.map(bankHost).find(Boolean);
+  const hint = example
+    ? `\nRe-run with the domain to pick one, e.g. \`/sponsor ${subcommand} ${example}\`.`
+    : '\nRename one of them in Notion so the names differ, then re-run.';
+  return `Several Bank leads match *${query}*:\n${list.join('\n')}${hint}`;
+}
+
+/**
+ * Find the single Bank prospect for `query` (a name or a domain). Responds itself and
+ * returns null on zero or ambiguous matches; `subcommand` goes into the retry hint.
+ */
+export async function resolveSingleBankRow(respond: RespondFn, rawQuery: string, subcommand: string): Promise<BankLeadRow | null> {
+  const query = unwrapSlackLinks(rawQuery).trim();
+  const match = await lookupBankRows(query);
+  if (match.kind === 'one') return match.row;
+  const text =
+    match.kind === 'none'
+      ? `No Bank lead matches *${query}*. Add it with \`/sponsor add ${query}\` first.`
+      : ambiguousBankText(query, match.rows, subcommand);
+  await respond({ response_type: 'ephemeral', text });
+  return null;
 }
 
 // Slack rejects messages much past 4000 chars; leave headroom for the header lines.
@@ -362,7 +397,7 @@ async function handleEmail(
     return;
   }
 
-  const row = await resolveSingleBankRow(respond, company);
+  const row = await resolveSingleBankRow(respond, company, 'email');
   if (!row) return;
 
   // The sender is the caller: their real name fills [NAME] and the signature.
@@ -407,7 +442,7 @@ async function handleAsk(respond: RespondFn, arg: string): Promise<void> {
     return;
   }
 
-  const row = await resolveSingleBankRow(respond, parsed.company);
+  const row = await resolveSingleBankRow(respond, parsed.company, 'ask');
   if (!row) return;
 
   await notion.writeAskSection(row.id, parsed.note);
@@ -477,24 +512,8 @@ async function handleScore(respond: RespondFn, arg: string): Promise<void> {
     return;
   }
 
-  const rows = await notion.findBankRowsByCompany(company);
-  if (rows.length === 0) {
-    await respond({ response_type: 'ephemeral', text: `No Bank prospect matches *${company}*. Add it with \`/sponsor add\` first.` });
-    return;
-  }
-
-  // Disambiguate multiple matches: prefer an exact (case-insensitive) title match.
-  let row = rows[0]!;
-  if (rows.length > 1) {
-    const exact = rows.find((r) => r.company.toLowerCase() === company.toLowerCase());
-    if (exact) {
-      row = exact;
-    } else {
-      const list = rows.slice(0, 8).map((r) => `• <${r.url}|${r.company}>`).join('\n');
-      await respond({ response_type: 'ephemeral', text: `*${company}* matches several prospects — be more specific:\n${list}` });
-      return;
-    }
-  }
+  const row = await resolveSingleBankRow(respond, company, 'score');
+  if (!row) return;
 
   await notion.updateBankScores(row.id, updates);
   const merged = { ...row.scores, ...updates };
@@ -658,27 +677,48 @@ function parseLog(arg: string): { company: string; note: string } | null {
 }
 
 /**
- * Find the single Pipeline deal matching `company`. Responds and returns null on zero
- * or multiple matches (shared by log / won / stage). Callers proceed only on one hit.
+ * Find the single Pipeline deal for `query` (a name or a domain). Shared by log / won /
+ * stage. A name tries the deal titles first; a domain, or a name with no deal title,
+ * goes through the Bank row's `Bank source` link, so a deal still resolves when its title
+ * differs from what was typed. When the company is only in the Bank, the reply says how to
+ * claim it instead of "check the name". Responds itself and returns null unless exactly
+ * one deal is found.
  */
-async function resolveSingleDeal(respond: RespondFn, company: string): Promise<PipelineRow | null> {
-  const matches = await notion.findDealsByCompany(company);
-  if (matches.length === 0) {
-    await respond({
-      response_type: 'ephemeral',
-      text: `No Pipeline deal matches *${company}*. Check the name, or it may still be in the Bank (not yet a deal).`,
-    });
+export async function resolveSingleDeal(respond: RespondFn, rawQuery: string, subcommand: string): Promise<PipelineRow | null> {
+  const query = unwrapSlackLinks(rawQuery).trim();
+  const reply = async (text: string): Promise<null> => {
+    await respond({ response_type: 'ephemeral', text });
     return null;
+  };
+
+  if (!queryHostname(query)) {
+    const byTitle = pickByName(await notion.findDealsByCompany(query), query);
+    const deal = byTitle.kind === 'many' ? pickLiveDeal(byTitle.rows) : byTitle;
+    if (deal.kind === 'one') return deal.row;
+    if (deal.kind === 'many') {
+      const list = deal.rows.map((d) => `• <${d.url}|${d.company}> · ${d.stage ?? 'no stage'}`).join('\n');
+      return reply(`Several Pipeline deals match *${query}*:\n${list}\nUse the exact deal name or the company's domain.`);
+    }
   }
-  if (matches.length > 1) {
-    const list = matches.map((m) => `• <${m.url}|${m.company}>`).join('\n');
-    await respond({
-      response_type: 'ephemeral',
-      text: `Multiple deals match *${company}* — be more specific:\n${list}`,
-    });
-    return null;
+
+  const bank = await lookupBankRows(query);
+  if (bank.kind === 'none') {
+    return reply(`No Pipeline deal or Bank lead matches *${query}*. Check the spelling, or add it with \`/sponsor add <website>\`.`);
   }
-  return matches[0]!;
+  if (bank.kind === 'many') return reply(ambiguousBankText(query, bank.rows, subcommand));
+
+  const row = bank.row;
+  const deal = pickLiveDeal(await notion.findDealsForBankRow(row.id));
+  if (deal.kind === 'one') return deal.row;
+  const claimRef = bankHost(row) || row.company;
+  if (deal.kind === 'none') {
+    return reply(
+      `*${row.company}* is in the Bank but isn't a Pipeline deal yet. <${row.url}|Open row>\n` +
+        `Claim it first with \`/sponsor claim ${claimRef}\` (makes you the DRI), then re-run \`/sponsor ${subcommand}\`.`
+    );
+  }
+  const list = deal.rows.map((d) => `• <${d.url}|${d.company}> · ${d.stage ?? 'no stage'}`).join('\n');
+  return reply(`*${row.company}* has several Pipeline deals:\n${list}\nUpdate the right one from its Notion page.`);
 }
 
 async function handleLog(respond: RespondFn, arg: string): Promise<void> {
@@ -691,7 +731,7 @@ async function handleLog(respond: RespondFn, arg: string): Promise<void> {
     return;
   }
 
-  const deal = await resolveSingleDeal(respond, parsed.company);
+  const deal = await resolveSingleDeal(respond, parsed.company, 'log');
   if (!deal) return;
 
   await notion.logTouch(deal, parsed.note, todayIsoET());
@@ -776,7 +816,7 @@ async function handleWon(client: WebClient, respond: RespondFn, arg: string): Pr
     return;
   }
 
-  const deal = await resolveSingleDeal(respond, parsed.company);
+  const deal = await resolveSingleDeal(respond, parsed.company, 'won');
   if (!deal) return;
 
   await notion.markWon(deal, parsed.amountUsd, parsed.note, todayIsoET(), parsed.kind);
@@ -824,7 +864,7 @@ async function handleStage(respond: RespondFn, arg: string): Promise<void> {
     return;
   }
 
-  const deal = await resolveSingleDeal(respond, parsed.company);
+  const deal = await resolveSingleDeal(respond, parsed.company, 'stage');
   if (!deal) return;
 
   await notion.setStage(deal, parsed.stage, todayIsoET());
@@ -950,23 +990,11 @@ async function handleClaim(
     return;
   }
 
-  const rows = await notion.findBankRowsByCompany(company);
-  if (rows.length === 0) {
-    await respond({
-      response_type: 'ephemeral',
-      text: `No Bank lead matches *${company}*. Add it first with \`/sponsor add ${company}\`.`,
-    });
-    return;
-  }
-  if (rows.length > 1) {
-    const list = rows.map((r) => `• <${r.url}|${r.company}>`).join('\n');
-    await respond({ response_type: 'ephemeral', text: `Multiple Bank leads match *${company}* — be more specific:\n${list}` });
-    return;
-  }
-  const bank = rows[0]!;
+  const bank = await resolveSingleBankRow(respond, company, 'claim');
+  if (!bank) return;
 
   if (bank.hasPipelineDeal || bank.status === 'Graduated') {
-    const deals = await notion.findDealsByCompany(bank.company);
+    const deals = await notion.findDealsForBankRow(bank.id);
     const link = deals[0] ? ` <${deals[0].url}|Open deal>` : '';
     await respond({ response_type: 'ephemeral', text: `↩︎ *${bank.company}* is already an active deal.${link}` });
     return;
