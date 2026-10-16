@@ -161,6 +161,15 @@ export const config = {
     // Partial ranking-weight overrides as JSON, e.g. {"outOfStock": 2} (see partFinder/rank.ts).
     weightsJson: optionalString('PARTS_WEIGHTS_JSON', ''),
   },
+  priceCheck: {
+    // Queue rows added by /parts for the Purchasing price checker (PER-Purchase-Testing's
+    // price_check.py): a "price-check-queue <page id>" claim in the Job Log, plus a GitHub
+    // repository_dispatch so its workflow runs right away (without a token it runs every 30 min).
+    enabled: optionalString('PRICE_CHECK_QUEUE', 'false') === 'true',
+    dispatchRepo: optionalString('PRICE_CHECK_DISPATCH_REPO', 'pandabear189/PER-Purchase-Testing'),
+    // Fine-grained PAT with Contents: read & write on dispatchRepo only.
+    dispatchToken: process.env.PRICE_CHECK_DISPATCH_TOKEN?.trim() || '',
+  },
   race: {
     // /race: the REV12 members' time trial leaderboard (Supabase). The service_role key is a server secret;
     // unset ⇒ /race just links to the game.

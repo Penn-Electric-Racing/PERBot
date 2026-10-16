@@ -296,5 +296,13 @@ Setup:
   (gemini | groq | openrouter), `PARTS_LLM_MODEL`, `PARTS_LLM_RPM`.
 - **Notion**: writes to the same Purchasing data source as BenBuys
   (`BENBUYS_PURCHASING_DS_ID`, `BENBUYS_SEASON`). The integration needs *Insert content*.
+- **Price check** (optional): the Purchasing price checker (`price_check.py` in
+  `pandabear189/PER-Purchase-Testing`) re-prices new Purchasing rows every 30 minutes and
+  DMs the Point of contact when the price moved; it finds rows on its own. With
+  `PRICE_CHECK_QUEUE=true` and `PRICE_CHECK_DISPATCH_TOKEN` (a fine-grained token with
+  *Contents: read & write* on that repo; `PRICE_CHECK_DISPATCH_REPO` to point elsewhere),
+  each row added here is queued (a `price-check-queue <page id>` claim in the ⚙️ Job Log)
+  and the checker starts right away instead of on its schedule. Failures are logged and
+  never block the button.
 
 Run it locally without Slack or Notion writes: `npm run parts -- "LM7805" -q 50`.

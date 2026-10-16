@@ -7,6 +7,7 @@ import { logger } from '../utils/logger.js';
 import { findParts, type FindOptions, type FindResult } from './finder.js';
 import { createPartsLlm, type JsonLlm } from './llm.js';
 import { PartsNotion } from './notion.js';
+import { queuePriceCheck } from './priceCheck.js';
 import { makeWeights, Scorer } from './rank.js';
 import type { Candidate, RankMode } from './types.js';
 
@@ -170,6 +171,8 @@ export interface PartsDeps {
   llm: JsonLlm | null;
   notion: PartsNotion;
   cache: SearchCache;
+  /** Hands a new Purchasing row to the price checker (default: priceCheck.ts). */
+  queuePriceCheck?: (pageId: string) => Promise<unknown>;
   find?: (part: string, opts: FindOptions) => Promise<FindResult>;
 }
 
@@ -267,6 +270,8 @@ export async function handleAdd(deps: PartsDeps, value: string, userId: string, 
       addedBy,
     });
     cached.added.set(index, row.url);
+    // Not awaited: the reply shouldn't wait on the Job Log / GitHub; it never throws.
+    void (deps.queuePriceCheck ?? queuePriceCheck)(row.id);
     const todo = ['Subsystem', row.paymentMethod ? '' : 'Payment Method', poc ? '' : 'Point of contact'].filter(Boolean);
     await respond({
       response_type: 'ephemeral',

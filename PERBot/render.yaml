@@ -60,3 +60,8 @@ services:
         sync: false
       - key: GEMINI_API_KEY
         sync: false
+      # Queue /parts rows for the Purchasing price checker (PER-Purchase-Testing).
+      - key: PRICE_CHECK_QUEUE
+        value: 'false'
+      - key: PRICE_CHECK_DISPATCH_TOKEN
+        sync: false

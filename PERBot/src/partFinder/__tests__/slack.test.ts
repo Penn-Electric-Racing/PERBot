@@ -129,7 +129,9 @@ function addHarness(userId = 'U1') {
   };
   const client: any = { users: { info: async () => ({ user: { profile: { email: 'ada@upenn.edu', real_name: 'Ada Park' } } }) } };
   const respond = (async (m: any) => { replies.push(m); }) as any;
-  return { deps: { llm: null, notion, cache }, searchId, replies, created, client, respond };
+  const queued: string[] = [];
+  const queuePriceCheck = async (pageId: string) => { queued.push(pageId); };
+  return { deps: { llm: null, notion, cache, queuePriceCheck }, searchId, replies, created, client, respond, queued };
 }
 
 test('handleAdd: creates the row with the clicker as point of contact, once', async () => {
@@ -144,6 +146,7 @@ test('handleAdd: creates the row with the clicker as point of contact, once', as
   await handleAdd(h.deps, `${h.searchId}:0`, 'U1', h.client, h.respond);
   assert.equal(h.created.length, 1);
   assert.match(h.replies[1].text, /Already added/);
+  assert.deepEqual(h.queued, ['p1']); // handed to the price checker once
 });
 
 test('handleAdd: other users and expired searches are refused', async () => {
@@ -161,6 +164,7 @@ test('handleAdd: a Notion failure is reported and the option can be retried', as
   h.deps.notion.addCandidate = async () => { throw new Error('validation_error'); };
   await handleAdd(h.deps, `${h.searchId}:0`, 'U1', h.client, h.respond);
   assert.match(h.replies[0].text, /Couldn’t create the Purchasing row: validation_error/);
+  assert.deepEqual(h.queued, []); // nothing to check when the row wasn't created
   h.deps.notion.addCandidate = ok;
   await handleAdd(h.deps, `${h.searchId}:0`, 'U1', h.client, h.respond);
   assert.equal(h.created.length, 1);
