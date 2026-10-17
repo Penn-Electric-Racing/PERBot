@@ -12,12 +12,17 @@
  *     `price_swap_keep`; PERBot adds `price_swap_undo` itself
  *   - value = JSON `PriceSwapValue` (below), ≤ 2000 chars (Slack's cap); `n`/`s`/`l`/`ol` only
  *     on use buttons
+ *   - Use buttons carry a Slack `confirm` dialog (check the listing first), handled by Slack
+ *   - a separate `price_swap_links` actions block holds View-listing link buttons
+ *     (`price_swap_view:<i>`, url only). It isn't replaced on a click; PERBot only acks them
  */
 
 export const PRICE_ACTIONS_BLOCK_ID = 'price_swap_actions';
 export const PRICE_RESULT_BLOCK_ID = 'price_swap_result';
 export const PRICE_UNDO_ACTION_ID = 'price_swap_undo';
 export const PRICE_ACTION_RE = /^price_swap_(use|keep|undo)(?::\d+)?$/;
+export const PRICE_LINKS_BLOCK_ID = 'price_swap_links';
+export const PRICE_VIEW_RE = /^price_swap_view(?::\d+)?$/;
 
 export type PriceAction = 'use' | 'keep' | 'undo';
 
