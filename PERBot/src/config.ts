@@ -151,6 +151,12 @@ export const config = {
     serviceKey: process.env.RACE_SUPABASE_SERVICE_KEY?.trim() || '',
     siteUrl: optionalString('RACE_SITE_URL', 'https://race.pennelectricracing.com'),
   },
+  priceCheck: {
+    // 💸 Price Check Savings (under Purchasing — PEFS): one row per price-listener alert, updated
+    // when someone taps Use / Keep / Undo; /pricecheck stats reads it. Empty disables the ledger.
+    ledgerDataSourceId: optionalString('PRICE_CHECK_LEDGER_DS_ID', 'dd1818e3-82cd-461b-8071-12af3b0f1341'),
+    ledgerUrl: optionalString('PRICE_CHECK_LEDGER_URL', 'https://www.notion.so/9269079476304d29be9dcb3dedac7e15'),
+  },
   arrivals: {
     // Packing-slip photos posted here are matched to open Purchasing rows (same DB + season as
     // BenBuys). Channel name or id; empty disables the listener.

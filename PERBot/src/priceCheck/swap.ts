@@ -15,9 +15,10 @@ import {
  *
  * Use: re-read the row and write the alert's price only if the row still reads what the
  * alert saw (same Unit cost and Quant., not yet ordered); otherwise say what changed and
- * write nothing. Writing Unit cost fires the price listener's webhook, so the row is re-priced
- * against the new value and stays quiet when it now matches. Keep: no write. Undo: the
- * reverse write, under the same guards, for a day.
+ * write nothing. The listener checks each row once (its Job Log queue entry is permanent), so
+ * the write doesn't trigger another alert. Keep: no write. Undo: the reverse write, under the
+ * same guards, for a day. Every click is also returned as a `ledger` event for the savings
+ * ledger (ledger.ts).
  */
 
 /** One run of a Notion rich-text value, kept only when every run is plain text (see readTextRuns). */
@@ -36,6 +37,11 @@ export interface PriceRow {
   deleted: boolean;
   /** `Notes (internal)` runs; null when it holds mentions/equations we won't rewrite. */
   notes: TextRun[] | null;
+  /** For the savings ledger (a row it has to create itself). */
+  name?: string;
+  part?: string;
+  season?: string;
+  url?: string;
 }
 
 export interface RowPatch {
@@ -157,6 +163,16 @@ export interface ClickResult {
   whisper?: string;
   /** For the log. */
   log: string;
+  /** What to record in the savings ledger (actions.ts writes it after replying). */
+  ledger?: LedgerEvent;
+}
+
+/** A click outcome for the savings ledger (ledger.ts). */
+export interface LedgerEvent {
+  kind: 'used' | 'kept' | 'undone' | 'refused';
+  value: PriceSwapValue;
+  clicker: string;
+  at: Date;
 }
 
 const etDate = (d: Date) => d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
@@ -173,7 +189,11 @@ export async function handlePriceSwap(deps: PriceSwapDeps, input: ClickInput): P
   const who = `<@${input.clicker}>`;
   const time = nowTimeET(deps.now());
 
-  if (kind === 'keep') return settle(input.existing, `👍 ${who} kept $${money(value.o)}, so Notion wasn't changed · ${time}`);
+  const event = (k: LedgerEvent['kind'], v: PriceSwapValue = value): LedgerEvent => ({ kind: k, value: v, clicker: input.clicker, at: deps.now() });
+
+  if (kind === 'keep') {
+    return { ...settle(input.existing, `👍 ${who} kept $${money(value.o)}, so Notion wasn't changed · ${time}`), ledger: event('kept') };
+  }
 
   if (value.n === undefined) return { whisper: 'This button has no price on it. Update *Unit cost* in Notion instead.', log: 'use/undo without n' };
   const v = value as PriceSwapValue & { n: number };
@@ -183,10 +203,13 @@ export async function handlePriceSwap(deps: PriceSwapDeps, input: ClickInput): P
 
   const row = await deps.fetchRow(v.r);
   const plan = planSwap(kind, v, row);
-  if (plan.kind === 'refuse') return settle(input.existing, `⚠️ ${plan.reason}`);
+  if (plan.kind === 'refuse') {
+    // A refused Undo leaves the earlier Use standing, so only a refused Use is recorded.
+    return { ...settle(input.existing, `⚠️ ${plan.reason}`), ...(kind === 'use' ? { ledger: event('refused') } : {}) };
+  }
   if (plan.kind === 'already') {
     const price = money(kind === 'use' ? v.n : v.o);
-    return settle(input.existing, `✅ *Unit cost* is already $${price} in Notion.`);
+    return { ...settle(input.existing, `✅ *Unit cost* is already $${price} in Notion.`), ledger: event(kind === 'use' ? 'used' : 'undone') };
   }
 
   const patch: RowPatch = { unitCost: plan.unitCost, ...(plan.link !== undefined ? { link: plan.link } : {}) };
@@ -203,8 +226,8 @@ export async function handlePriceSwap(deps: PriceSwapDeps, input: ClickInput): P
   if (kind === 'use') {
     const link = v.l !== undefined ? ' and updated the product link' : '';
     const undo: PriceSwapValue = { ...v, t: Math.floor(deps.now().getTime() / 1000) };
-    return settle(input.existing, `✅ ${who} set *Unit cost* to *$${money(v.n)}*${supplier}${link} · was $${money(v.o)} · ${time}`, undo);
+    return { ...settle(input.existing, `✅ ${who} set *Unit cost* to *$${money(v.n)}*${supplier}${link} · was $${money(v.o)} · ${time}`, undo), ledger: event('used') };
   }
   const link = v.l !== undefined ? ' and restored the product link' : '';
-  return settle(input.existing, `↩️ ${who} undid it: *Unit cost* is back to *$${money(v.o)}*${link} · ${time}`);
+  return { ...settle(input.existing, `↩️ ${who} undid it: *Unit cost* is back to *$${money(v.o)}*${link} · ${time}`), ledger: event('undone') };
 }

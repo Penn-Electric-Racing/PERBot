@@ -1,6 +1,7 @@
 import type { App } from '@slack/bolt';
 import { logger } from '../utils/logger.js';
 import { PRICE_ACTION_RE, PRICE_VIEW_RE } from './blocks.js';
+import { PriceLedger } from './ledger.js';
 import { PriceCheckNotion } from './notion.js';
 import { handlePriceSwap } from './swap.js';
 
@@ -12,6 +13,7 @@ import { handlePriceSwap } from './swap.js';
  */
 
 const notion = new PriceCheckNotion();
+const ledger = new PriceLedger();
 const inFlight = new Set<string>();
 
 export function registerPriceCheckActions(app: App): void {
@@ -28,6 +30,10 @@ export function registerPriceCheckActions(app: App): void {
     const clicker = (body as any)?.user?.id as string | undefined;
     if (!clicker) return;
     const whisper = (text: string) => respond({ response_type: 'ephemeral', replace_original: false, text });
+    const displayName = async (user: string): Promise<string | null> => {
+      const info: any = await client.users.info({ user }).catch(() => null);
+      return info?.user?.profile?.real_name || info?.user?.real_name || info?.user?.name || null;
+    };
 
     let rowId = '';
     try {
@@ -43,10 +49,7 @@ export function registerPriceCheckActions(app: App): void {
         {
           fetchRow: (id) => notion.fetchRow(id),
           writeRow: (id, patch) => notion.writeRow(id, patch),
-          displayName: async (user) => {
-            const info: any = await client.users.info({ user }).catch(() => null);
-            return info?.user?.profile?.real_name || info?.user?.real_name || info?.user?.name || null;
-          },
+          displayName,
           now: () => new Date(),
         },
         { actionId, rawValue: a?.value, clicker, existing: (body as any)?.message?.blocks }
@@ -54,6 +57,14 @@ export function registerPriceCheckActions(app: App): void {
       if (result.blocks) await respond({ replace_original: true, blocks: result.blocks, text: result.text ?? 'Price check' });
       else if (result.whisper) await whisper(result.whisper);
       logger.info(`Price check button: ${clicker} → ${actionId} on ${rowId || '?'}: ${result.log}`);
+      // After the reply, so the ledger never slows the click down or fails it.
+      if (result.ledger) {
+        const e = result.ledger;
+        ledger
+          .record(e, (await displayName(clicker)) ?? clicker, (id) => notion.fetchRow(id))
+          .then((what) => logger.info(`Price check ledger: ${rowId}: ${what}`))
+          .catch((err) => logger.warn(`Price check ledger: couldn't record ${e.kind} on ${rowId}`, err));
+      }
     } catch (err) {
       logger.error(`Price check button ${actionId} failed`, err);
       await whisper('✗ Could not update Notion. Try again, or change *Unit cost* in Notion.');
