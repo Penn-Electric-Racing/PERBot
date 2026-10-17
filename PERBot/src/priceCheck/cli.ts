@@ -1,6 +1,7 @@
+import { Client } from '@notionhq/client';
 import { WebClient } from '@slack/web-api';
 import { config } from '../config.js';
-import { encodeValue, money, PRICE_ACTIONS_BLOCK_ID, type PriceSwapValue } from './blocks.js';
+import { encodeValue, escapeMrkdwn, money, PRICE_ACTIONS_BLOCK_ID, type PriceSwapValue } from './blocks.js';
 import { PriceCheckNotion } from './notion.js';
 
 /**
@@ -32,13 +33,23 @@ async function main(): Promise<void> {
   }
 
   const row = await new PriceCheckNotion().fetchRow(rowId);
+  // The row's name / part number / page link, so the test alert reads like price_check.py's.
+  const page: any = await new Client({ auth: config.notion.token, notionVersion: config.notion.apiVersion }).pages.retrieve({ page_id: rowId });
+  const plain = (prop: any) => (prop?.title ?? prop?.rich_text ?? []).map((t: any) => t.plain_text).join('').trim();
+  const name = plain(Object.values(page.properties ?? {}).find((v: any) => v?.type === 'title'));
+  const part = plain(page.properties?.['Cat. or model no.']);
   if (row.unitCost === null || row.quantity === null) throw new Error('That row has no Unit cost / Quant. to compare.');
   const base: PriceSwapValue = { v: 1, r: row.id, q: row.quantity, o: row.unitCost };
   const use = encodeValue({ ...base, n: price, s: supplier, ...(link ? { l: link, ol: row.link } : {}) });
   const keep = encodeValue(base);
   if (!use || !keep) throw new Error('Button value over 2000 chars (link too long).');
 
-  const text = `🧪 *Test price alert* for row \`${row.id}\` (×${row.quantity})\n• In Notion: $${money(row.unitCost)}\n• Now: $${money(price)} at ${supplier}`;
+  const label = escapeMrkdwn(name || part || row.id);
+  const text = [
+    `🧪 *Test price alert on <${page.url}|${label}>*${part ? ` (\`${part}\` ×${row.quantity})` : ` (×${row.quantity})`}`,
+    `• In Notion: $${money(row.unitCost)}`,
+    `• Now: $${money(price)} at ${escapeMrkdwn(supplier)}`,
+  ].join('\n');
   await new WebClient(config.slack.botToken).chat.postMessage({
     channel: to,
     text: `Test price alert: $${money(row.unitCost)} → $${money(price)}`,
