@@ -49,6 +49,8 @@ export interface PriceSwapValue {
   ol?: string;
   /** Unix seconds the Undo button was issued (set by PERBot; Undo expires after a day). */
   t?: number;
+  /** 1 on `price-check:try` test alerts: clicks work but aren't written to the savings ledger. */
+  x?: 1;
 }
 
 const SLACK_VALUE_MAX = 2000;
@@ -78,6 +80,7 @@ export function decodeValue(raw: string | undefined): PriceSwapValue | null {
   if (v.l !== undefined) out.l = v.l;
   if (v.ol !== undefined) out.ol = v.ol;
   if (v.t !== undefined) out.t = v.t;
+  if (v.x === 1) out.x = 1;
   return out;
 }
 

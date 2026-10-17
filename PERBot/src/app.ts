@@ -25,6 +25,7 @@ import { registerBenbuysCommand } from './benbuys/slack.js';
 import { registerArrivals } from './arrivals/slack.js';
 import { registerRaceCommand } from './race/slack.js';
 import { registerPriceCheckActions } from './priceCheck/actions.js';
+import { registerPriceCheckStats } from './priceCheck/stats.js';
 
 const app = new App({
   token: config.slack.botToken,
@@ -483,6 +484,7 @@ registerBenbuysCommand(app);
 registerArrivals(app);
 registerRaceCommand(app);
 registerPriceCheckActions(app);
+registerPriceCheckStats(app);
 
 async function main(): Promise<void> {
   logger.info('[PERBot] Starting Slack Socket Mode...');

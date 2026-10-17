@@ -39,7 +39,8 @@ async function main(): Promise<void> {
   const name = plain(Object.values(page.properties ?? {}).find((v: any) => v?.type === 'title'));
   const part = plain(page.properties?.['Cat. or model no.']);
   if (row.unitCost === null || row.quantity === null) throw new Error('That row has no Unit cost / Quant. to compare.');
-  const base: PriceSwapValue = { v: 1, r: row.id, q: row.quantity, o: row.unitCost };
+  // x: 1 keeps test clicks out of the savings ledger.
+  const base: PriceSwapValue = { v: 1, r: row.id, q: row.quantity, o: row.unitCost, x: 1 };
   const use = encodeValue({ ...base, n: price, s: supplier, ...(link ? { l: link, ol: row.link } : {}) });
   const keep = encodeValue(base);
   // Same as price_check.py: a View button for the listing (the --link, else the row's own link).

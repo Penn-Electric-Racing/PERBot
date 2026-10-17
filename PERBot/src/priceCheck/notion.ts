@@ -20,8 +20,14 @@ export function parsePriceRow(page: any): PriceRow {
     exported: Boolean(p['Exported?']?.checkbox),
     deleted: Boolean(page?.archived || page?.in_trash),
     notes: readTextRuns(p['Notes (internal)']),
+    name: plain(Object.values(p).find((v: any) => v?.type === 'title')),
+    part: plain(p['Cat. or model no.']),
+    season: p['Season']?.select?.name ?? '',
+    url: page?.url ?? '',
   };
 }
+
+const plain = (prop: any): string => (prop?.title ?? prop?.rich_text ?? []).map((t: any) => t?.plain_text ?? '').join('').trim();
 
 export class PriceCheckNotion {
   private client: Client;
