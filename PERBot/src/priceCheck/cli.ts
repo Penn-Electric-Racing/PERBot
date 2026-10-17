@@ -1,7 +1,7 @@
 import { Client } from '@notionhq/client';
 import { WebClient } from '@slack/web-api';
 import { config } from '../config.js';
-import { encodeValue, escapeMrkdwn, money, PRICE_ACTIONS_BLOCK_ID, type PriceSwapValue } from './blocks.js';
+import { encodeValue, escapeMrkdwn, money, PRICE_ACTIONS_BLOCK_ID, PRICE_LINKS_BLOCK_ID, type PriceSwapValue } from './blocks.js';
 import { PriceCheckNotion } from './notion.js';
 
 /**
@@ -42,6 +42,8 @@ async function main(): Promise<void> {
   const base: PriceSwapValue = { v: 1, r: row.id, q: row.quantity, o: row.unitCost };
   const use = encodeValue({ ...base, n: price, s: supplier, ...(link ? { l: link, ol: row.link } : {}) });
   const keep = encodeValue(base);
+  // Same as price_check.py: a View button for the listing (the --link, else the row's own link).
+  const listing = /^https?:\/\/\S+$/i.test(link ?? row.link) ? (link ?? row.link) : null;
   if (!use || !keep) throw new Error('Button value over 2000 chars (link too long).');
 
   const label = escapeMrkdwn(name || part || row.id);
@@ -54,13 +56,34 @@ async function main(): Promise<void> {
     channel: to,
     text: `Test price alert: $${money(row.unitCost)} → $${money(price)}`,
     unfurl_links: false,
-    blocks: [
+    blocks: <any[]>[
       { type: 'section', text: { type: 'mrkdwn', text } },
+      ...(listing
+        ? [
+            {
+              type: 'actions',
+              block_id: PRICE_LINKS_BLOCK_ID,
+              elements: [{ type: 'button', action_id: 'price_swap_view:0', url: listing, text: { type: 'plain_text', text: `View ${supplier} ↗`.slice(0, 75) } }],
+            },
+          ]
+        : []),
       {
         type: 'actions',
         block_id: PRICE_ACTIONS_BLOCK_ID,
         elements: [
-          { type: 'button', style: 'primary', text: { type: 'plain_text', text: `Use $${money(price)} · ${supplier}`.slice(0, 75) }, action_id: 'price_swap_use:0', value: use },
+          {
+            type: 'button',
+            style: 'primary',
+            text: { type: 'plain_text', text: `Use $${money(price)} · ${supplier}`.slice(0, 75) },
+            action_id: 'price_swap_use:0',
+            value: use,
+            confirm: {
+              title: { type: 'plain_text', text: 'Update Notion?' },
+              text: { type: 'plain_text', text: `Set Unit cost to $${money(price)} (${supplier})? Open the listing first and check it's the right part, in stock, at this price.`.slice(0, 300) },
+              confirm: { type: 'plain_text', text: 'Update Unit cost' },
+              deny: { type: 'plain_text', text: 'Not yet' },
+            },
+          },
           { type: 'button', text: { type: 'plain_text', text: `Keep $${money(row.unitCost)}` }, action_id: 'price_swap_keep', value: keep },
         ],
       },

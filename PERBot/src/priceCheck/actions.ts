@@ -1,6 +1,6 @@
 import type { App } from '@slack/bolt';
 import { logger } from '../utils/logger.js';
-import { PRICE_ACTION_RE } from './blocks.js';
+import { PRICE_ACTION_RE, PRICE_VIEW_RE } from './blocks.js';
 import { PriceCheckNotion } from './notion.js';
 import { handlePriceSwap } from './swap.js';
 
@@ -15,6 +15,12 @@ const notion = new PriceCheckNotion();
 const inFlight = new Set<string>();
 
 export function registerPriceCheckActions(app: App): void {
+  // View-listing link buttons: Slack opens the URL itself but still reports the click, and an
+  // un-acked click shows an error icon on the button.
+  app.action(PRICE_VIEW_RE, async ({ ack }) => {
+    await ack();
+  });
+
   app.action(PRICE_ACTION_RE, async ({ ack, body, action, respond, client }) => {
     await ack();
     const a = action as any;
