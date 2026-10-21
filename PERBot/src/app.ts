@@ -22,7 +22,7 @@ import { assignFromMention, registerAssignCommand, registerAssignShortcut } from
 import { registerSponsorActions } from './sponsorship/actions.js';
 import { registerSponsorCommands } from './sponsorship/slack.js';
 import { registerBenbuysCommand } from './benbuys/slack.js';
-import { registerArrivals } from './arrivals/slack.js';
+import { handleArrivalsMention, registerArrivals } from './arrivals/slack.js';
 import { registerRaceCommand } from './race/slack.js';
 import { registerPriceCheckActions } from './priceCheck/actions.js';
 import { registerPriceCheckStats } from './priceCheck/stats.js';
@@ -428,6 +428,14 @@ app.event('app_mention', async ({ event, client, context }) => {
       channel: event.channel,
       threadTs,
     });
+    return;
+  }
+
+  // In a #packages thread, "@PERBot <what's in the box>" corrects the package match, not a docs question.
+  try {
+    if (await handleArrivalsMention(client, event, context.botUserId)) return;
+  } catch (error) {
+    logger.error('Arrivals mention failed.', error);
     return;
   }
 

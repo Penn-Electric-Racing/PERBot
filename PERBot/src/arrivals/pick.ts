@@ -139,9 +139,20 @@ const VENDOR_WORDS = 'digikey digi key mcmaster carr jlcpcb jlc jlccnc amazon mo
 const STOP = new Set(
   ['the', 'and', 'for', 'with', 'from', 'here', 'this', 'that', 'our', 'new', 'some', 'stock', 'part', 'kit', 'set', 'pack', 'piece',
     'item', 'order', 'box', 'small', 'large', 'black', 'red', 'blue', 'white', 'meter', 'feet', 'inch', 'tool',
+    // generic for a whole vendor: "PCM, Dash, BMS" boards must not ground a row called "JLCPCB Boards" (10/19)
+    'board', 'pcb', 'pcbs', 'component', 'electronic', 'parts', 'supplies',
     // filler from how people actually type ("cooling fittings or something")
     'something', 'stuff', 'thing', 'things', 'maybe', 'probably', 'idk', 'misc', 'other', 'etc', 'arrived', 'came', 'here'].map(stem)
 );
+
+/**
+ * A row that says nothing beyond its vendor and generic words ("JLCPCB Boards", "Mouser order"): it
+ * can't tell one of that vendor's orders from another, so a card never pre-ticks it on a guess.
+ */
+export function isGeneric(row: ArrivalRow): boolean {
+  const vendor = terms(row.vendor, VENDOR_WORDS);
+  return [...terms(row.name, row.partNumber)].every((t) => vendor.has(t));
+}
 
 export function terms(...texts: (string | null | undefined)[]): Set<string> {
   const out = new Set<string>();

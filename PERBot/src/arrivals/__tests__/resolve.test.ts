@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { arrivalDm, buildReply, replaceCard, settleCard, textNamesVendor, who } from '../blocks.js';
+import { arrivalDm, buildReply, guessCard, replaceCard, rowDetail, settleCard, textNamesVendor, who } from '../blocks.js';
 import { addresseeMatches, eligibleRows, groupOrders, ordersForVendor, rankOrders } from '../orders.js';
-import { buildPickPrompt, groundPicks, parsePicks, stem } from '../pick.js';
+import { buildPickPrompt, groundPicks, isGeneric, parsePicks, stem } from '../pick.js';
+import { threadOrders } from '../slack.js';
 import { resolvePackage, resolveScan, type Picker } from '../resolve.js';
 import type { Scan } from '../types.js';
 import { BASE, line, pkg, row } from './helpers.js';
@@ -156,7 +157,8 @@ test('buildReply: specific matches reply even in threads; a pile photo gets matc
   assert.match(json, /2 orders in this photo/);
   assert.match(json, /\*Sofia\*'s \*DigiKey\* order from \*Sep 28\*/);
   assert.match(json, /Probably the \*McMaster-Carr\* order/);
-  assert.match(json, /:mag: message says cooling tube/);
+  assert.match(json, /:mag: Why: message says cooling tube/);
+  assert.match(json, /:mag: Why: part numbers on the slip match this order/);
   assert.doesNotMatch(json, /123\.45|9\.99|\$|Which order/);
   const actionBlocks = reply.blocks.filter((b) => b.block_id?.startsWith('arrival_actions:'));
   assert.deepEqual(actionBlocks.map((b) => b.block_id), ['arrival_actions:0', 'arrival_actions:1']);
@@ -180,7 +182,7 @@ test('buildReply: one-order pick-list reads naturally; mixed-vendor PEFS runs ne
   const reply = buildReply(label, res, { ...BASE, inThread: false })!;
   const json = JSON.stringify(reply.blocks);
   assert.match(json, /A \*McMaster-Carr\* package\. There’s one open McMaster-Carr order from \*Sep 28\*\. Is it this one\?/);
-  assert.deepEqual(reply.blocks.find((b) => b.block_id === 'arrival_actions:0').elements.map((e: any) => e.text.text), ['Mark arrived', 'No']);
+  assert.deepEqual(reply.blocks.find((b) => b.block_id === 'arrival_actions:0').elements.map((e: any) => e.text.text), ['Mark arrived', 'Wrong order']);
   // PERPO-1 also holds the Amazon row: only the McMaster row is offered.
   assert.deepEqual(reply.blocks.find((b) => b.block_id === 'arrival_items:0').elements[0].options.map((o: any) => o.text.text), ['Firewall tube ×1']);
 });
@@ -212,7 +214,7 @@ test('pile photos: a pick-list only when the message names the vendor, once per 
   assert.equal(buildReply(pile, res, { ...BASE, inThread: false, text: '' }), null);
 });
 
-test('guess card: top order with requesters @-mentioned, items as checkboxes, the rest in a select; settle + swap', async () => {
+test('guess card: top order with requesters named (not pinged), nothing pre-ticked among several orders, the rest in a select; settle + swap', async () => {
   const rows = [
     row({ partNumber: 'SN74LVC245APWR', name: 'Bus Transceivers Single 8-bit', runId: 'M1', vendor: 'Mouser', pointOfContact: ['Mike Song', 'Ana Li'], url: 'https://notion.so/r1', quantity: 2 }),
     ...['A1', 'A2', 'A3', 'A4', 'A5'].map((pn) => row({ partNumber: `${pn}-X1`, name: `Cap ${pn}`, runId: 'M1', vendor: 'Mouser', pointOfContact: ['Mike Song'] })),
@@ -223,10 +225,11 @@ test('guess card: top order with requesters @-mentioned, items as checkboxes, th
   const reply = buildReply(label, await resolveScan(label, rows, OCT10, 'mouser here', noPick), { ...BASE, inThread: false, people })!;
 
   const head = reply.blocks.find((b) => b.block_id === 'arrival_head:0').text.text;
-  assert.equal(head, ':package: A *Mouser* package. Is it <@U_MIKE> and *Ana*’s order from *Sep 28*?');
+  assert.equal(head, ':package: A *Mouser* package. Best guess: *Mike* and *Ana*’s order from *Sep 28* — tick what’s actually in the box.');
+  assert.match(reply.blocks.find((b) => b.block_id === 'arrival_why:0').elements[0].text, /only the vendor matched — 2 open Mouser orders.*\n.*@PERBot/s);
   const boxes = reply.blocks.find((b) => b.block_id === 'arrival_items:0').elements[0];
   assert.equal(boxes.options.length, 6);
-  assert.equal(boxes.initial_options.length, 6);
+  assert.equal(boxes.initial_options, undefined);
   assert.deepEqual(boxes.options[0].text, { type: 'mrkdwn', text: 'Bus Transceivers Single 8-bit `SN74LVC245APWR` ×2' });
   // Links can't be clicked inside a checkbox option, so they sit on a line of their own under the boxes.
   assert.ok(boxes.options.every((o: any) => !o.description));
@@ -244,7 +247,7 @@ test('guess card: top order with requesters @-mentioned, items as checkboxes, th
   assert.equal(pastedCard.blocks.find((b) => b.block_id === 'arrival_links:0').elements[0].text, '`X2`  <https://notion.so/r9|Notion>');
 
   const actions = reply.blocks.find((b) => b.block_id === 'arrival_actions:0').elements;
-  assert.deepEqual(actions.map((e: any) => e.text?.text ?? e.placeholder.text), ['Mark arrived', 'None of these', 'Other Mouser orders (1)…']);
+  assert.deepEqual(actions.map((e: any) => e.text?.text ?? e.placeholder.text), ['Mark arrived', 'Wrong order', 'Other Mouser orders (1)…']);
   assert.deepEqual(actions[2].options.map((o: any) => [o.text.text, o.value]), [['No contact · Sep 20 · 1 item · Secondary HVDC Plug', 'M2|mouser']]);
   assert.equal(JSON.parse(actions[0].value).k, 'M1|mouser');
 
@@ -263,7 +266,9 @@ test('guess card: top order with requesters @-mentioned, items as checkboxes, th
 
 test('who + DMs: mentions where known, first names otherwise; DM lists the requester’s items and lead time', () => {
   const people = new Map([['Mike Song', 'U_MIKE']]);
-  assert.equal(who(['Mike Song', 'Ana Li', 'Bo Chen'], people), '<@U_MIKE>, *Ana* +1');
+  assert.equal(who(['Mike Song', 'Ana Li', 'Bo Chen'], people), '<@U_MIKE>, *Ana* and *Bo*');
+  assert.equal(who(['Mike Song', 'Ana Li', 'Bo Chen'], undefined), '*Mike*, *Ana* and *Bo*');
+  assert.equal(who(['A A', 'B B', 'C C', 'D D', 'E E', 'F F']), '*A*, *B*, *C*, *D* and 2 others');
   assert.equal(who([], people), '');
   const r = row({ partNumber: 'A12-ND', name: 'Hall sensor', vendor: 'DigiKey', url: 'https://notion.so/x', quantity: 4 });
   const dm = arrivalDm([r], { clicker: 'U_C', poster: 'U_P', permalink: 'https://slack/p', arrivedAtIso: '2026-10-10T16:00:00.000Z' });
@@ -317,4 +322,97 @@ test('groundPicks: a word the picked row already explains does not drag in sibli
   ]);
   const [p] = groundPicks([{ order: amz!, rows: [amz!.rows[0]!], confidence: 'high', evidence: '' }], pkg([], { vendor: 'Amazon', itemHints: ['cooling fittings'] }));
   assert.deepEqual(p!.rows.map((r) => r.name), ['Cooling T-Fitting for Temp Sensor']);
+});
+
+// --- #packages feedback, Oct 2026 ------------------------------------------------------------------
+
+const OCT19 = new Date('2026-10-19T16:45:00Z');
+
+test('stale orders: never guessed on vendor alone, ranked after fresh ones, gone past 90 days (10/19 Amazon)', async () => {
+  // "Is it the order from Aug 29?" / "…Elijah’s order from Sep 3?" — both delivered and in use for a month.
+  const rows = [
+    row({ partNumber: 'OLD1', name: 'Zip ties', vendor: 'Amazon', link: '', submittedAt: '2026-08-28', orderedAt: '2026-08-29' }),
+    row({ partNumber: 'OLD2', name: 'Hose clamps', vendor: 'Amazon', link: '', submittedAt: '2026-09-02', orderedAt: '2026-09-03', pointOfContact: ['Elijah Jeoung'] }),
+    row({ partNumber: 'ANCIENT', name: 'Gloves', vendor: 'Amazon', link: '', submittedAt: '2026-06-01', orderedAt: '2026-06-02' }),
+  ];
+  const label = scan('shipping_label', [pkg([], { vendor: 'Amazon' })]);
+  assert.deepEqual((await resolveScan(label, rows, OCT19, 'this has been here for a week', noPick)).map((r) => r.kind), ['none']);
+  assert.deepEqual(eligibleRows(rows, OCT19).map((r) => r.partNumber), ['OLD1', 'OLD2']);
+  // A fresh order is guessed first; stale ones stay reachable as alternatives, last.
+  const fresh = row({ partNumber: 'NEW', name: 'Paint brushes', vendor: 'Amazon', link: '', submittedAt: '2026-10-13', orderedAt: '2026-10-14' });
+  const res = await resolveScan(label, [...rows, fresh], OCT19, '', noPick);
+  assert.equal(res[0]!.kind, 'choose');
+  assert.deepEqual((res[0] as any).orders.map((o: any) => o.rows[0].partNumber), ['NEW']);
+  const ranked = rankOrders(groupOrders(eligibleRows([...rows, fresh], OCT19)), pkg([], { vendor: 'Amazon' }), OCT19);
+  assert.deepEqual(ranked.map((o) => o.rows[0]!.partNumber), ['NEW', 'OLD2', 'OLD1']);
+});
+
+test('generic rows: "PCM, Dash, BMS" boards don’t ground "JLCPCB Boards"; the guess shows what’s inside and ticks nothing (10/19 JLC)', async () => {
+  const boards = row({ partNumber: 'JLCPCB', name: 'JLCPCB Boards', runId: 'PERPO-9', vendor: 'JLCPCB', link: 'https://cart.jlcpcb.com/shopcart/cart', sanitizedDescription: 'Order everything in the shared cart $412.20', orderedAt: '2026-10-01' });
+  const pdu = row({ partNumber: 'REV12PDUFixedY475', name: 'REV12PDUFixedY475', runId: 'PERPO-10', vendor: 'JLCPCB', link: '', orderedAt: '2026-10-07' });
+  assert.ok(isGeneric(boards));
+  assert.ok(!isGeneric(pdu));
+  const [order] = groupOrders([boards]);
+  const pick = { order: order!, rows: order!.rows, confidence: 'high' as const, evidence: '' };
+  assert.deepEqual(groundPicks([pick], pkg([], { vendor: 'JLCPCB', itemHints: ['PCM board', 'Dash board', 'BMS board', 'boards'] })), []);
+
+  const one = buildReply(scan('contents', [pkg([], { vendor: 'JLCPCB' })]), [{ pkg: 0, kind: 'choose', orders: [order!], vendor: 'JLCPCB' }], { ...BASE, inThread: false })!;
+  assert.equal(one.blocks.find((b) => b.block_id === 'arrival_items:0').elements[0].initial_options, undefined);
+  const links = one.blocks.find((b) => b.block_id === 'arrival_links:0').elements[0].text;
+  assert.match(links, /— _Order everything in the shared cart_$/);
+  assert.doesNotMatch(links, /412/);
+  assert.match(JSON.stringify(one.blocks), /These items don’t say what’s inside/);
+});
+
+test('Wrong order: the button carries the card’s order and every rejection; rejected orders are never offered again', async () => {
+  const rows = [
+    row({ partNumber: 'P1', name: 'Gasket', runId: 'MC-1', vendor: 'McMaster-Carr', link: '', orderedAt: '2026-10-15' }),
+    row({ partNumber: 'P2', name: 'Weld nut', runId: 'MC-2', vendor: 'McMaster-Carr', link: '', orderedAt: '2026-10-14' }),
+    row({ partNumber: 'P3', name: 'Rod stock', runId: 'MC-3', vendor: 'McMaster-Carr', link: '', orderedAt: '2026-10-10' }),
+  ];
+  const label = scan('shipping_label', [pkg([], { vendor: 'McMaster-Carr' })]);
+  const res = await resolveScan(label, rows, OCT19, '', noPick, new Set(['MC-1|mcmaster']));
+  assert.deepEqual((res[0] as any).orders.map((o: any) => o.key), ['MC-2|mcmaster', 'MC-3|mcmaster']);
+
+  const reply = buildReply(label, res, { ...BASE, inThread: false, rejected: ['MC-1|mcmaster'] })!;
+  const actions = reply.blocks.find((b) => b.block_id === 'arrival_actions:0').elements;
+  const wrong = JSON.parse(actions.find((e: any) => e.action_id === 'arrival_wrong').value);
+  assert.equal(wrong.k, 'MC-2|mcmaster');
+  assert.deepEqual(wrong.n, ['MC-1|mcmaster']);
+  assert.deepEqual(actions.find((e: any) => e.action_id === 'arrival_other').options.map((o: any) => o.value), ['MC-3|mcmaster']);
+
+  // Swapped in after a rejection: the note is its own line, above the headline.
+  const [mc3] = groupOrders([rows[2]!]);
+  const swapped = guessCard(0, mc3!, [], 'McMaster-Carr', BASE, '✗ <@U_T>: not that one — nothing was written. ', ['MC-1|mcmaster', 'MC-2|mcmaster']);
+  assert.match(swapped[0].text.text, /^✗ <@U_T>: not that one — nothing was written\.\n:package: A \*McMaster-Carr\* package\./);
+});
+
+test('threadOrders: what PERBot’s cards in a thread already cover (no second card for the same box, 10/13 brackets)', async () => {
+  const rows = [row({ partNumber: 'BRKT', name: 'primary brackets', runId: 'X-1', vendor: 'Xometry', link: '' })];
+  const label = scan('contents', [pkg([], { vendor: 'Xometry' })]);
+  const card = buildReply(label, await resolveScan(label, rows, OCT10, '', noPick), { ...BASE, inThread: false, rejected: ['X-0|xometry'] })!;
+  const thread = [{ ts: '1', user: 'U_T', text: 'brackets' }, { ts: '2', bot_id: 'B_PER', blocks: card.blocks }, { ts: '3', bot_id: 'B_OTHER', blocks: card.blocks }];
+  const { carded, rejected } = threadOrders(thread, 'B_PER', ['X-9|xometry']);
+  assert.deepEqual([...carded], ['X-1|xometry']);
+  assert.deepEqual([...rejected].sort(), ['X-0|xometry', 'X-9|xometry']);
+  assert.equal(threadOrders(thread, null).carded.size, 0);
+});
+
+test('corrections: "@PERBot <what’s inside>" may get a vendor guess even in a thread, and a clear no-match line', async () => {
+  const rows = [row({ partNumber: 'FIT', name: 'Barb fittings', runId: 'A-1', vendor: 'Amazon', link: '', orderedAt: '2026-10-12', pointOfContact: ['Elijah Jeoung'] })];
+  const photo = scan('shipping_label', [pkg([], { vendor: 'Amazon', itemHints: ['cooling fittings'] })]);
+  const res = await resolveScan(photo, rows, OCT19, 'no, elijah cooling fittings are in this picture', noPick);
+  assert.equal(buildReply(photo, res, { ...BASE, inThread: true }), null);
+  assert.ok(buildReply(photo, res, { ...BASE, inThread: true, correction: true })!.blocks.some((b) => b.block_id === 'arrival_actions:0'));
+
+  const gasket = scan('contents', [pkg([], { vendor: null, itemHints: ['gasket'] })]);
+  const none = buildReply(gasket, [{ pkg: 0, kind: 'none' }], { ...BASE, inThread: true, correction: true })!;
+  assert.match(none.blocks[0].text.text, /couldn’t find an open order with “gasket” in it\. It may not be in Purchasing/);
+  const top = buildReply(scan('shipping_label', [pkg([], { vendor: null, itemHints: ['gasket'] })]), [{ pkg: 0, kind: 'none' }], { ...BASE, inThread: false })!;
+  assert.match(top.blocks[0].text.text, /with “gasket” in it — it may not be in Purchasing yet\..*@PERBot/);
+});
+
+test('rowDetail: the vendor-facing description, never a price, nothing when it just repeats the name', () => {
+  assert.equal(rowDetail(row({ partNumber: 'X', name: 'Boards', sanitizedDescription: 'Boards' })), null);
+  assert.equal(rowDetail(row({ partNumber: 'X', name: 'Boards', sanitizedDescription: 'BMS and Dash $ 1,204.50 total' })), 'BMS and Dash total');
 });

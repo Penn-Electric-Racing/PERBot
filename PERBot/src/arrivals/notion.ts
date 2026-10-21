@@ -9,10 +9,12 @@ import type { ArrivalRow } from './types.js';
  * season; the only writes are `markArrived` (and its `unmarkArrived` undo), touching ONLY the arrival columns:
  *
  *   Arrived? (status: No / Ready for Pickup / Yes) — exists today; 256 of 257 REV12 rows read "No"
- *   Arrived at (date) · Received by (person) · Arrival photo (url) — Week-0 columns
+ *   Arrived at (date) · Received by (person or text) · Arrival photo (url) — Week-0 columns
  *
  * The three Week-0 columns are optional: the schema is read once and a column that doesn't
- * exist yet is skipped (with a warning), so arrivals work before anyone adds them.
+ * exist yet is skipped (with a warning), so arrivals work before anyone adds them. `Received by` as
+ * a Text column gets the receiver's name instead of a person — a person property pings them in
+ * Notion on every package they bring in (10/19), which buries the @s that matter.
  */
 
 export const ARRIVED_YES = 'Yes';
@@ -39,13 +41,16 @@ export interface ArrivalWrite {
   /** When the photo was posted (ISO). */
   arrivedAt: string;
   receivedByNotionId: string | null;
+  /** Written instead of the person when `Received by` is a Text column. */
+  receivedByName: string | null;
   photoUrl: string | null;
 }
 
 export class ArrivalsNotion {
   private client: Client;
   private dataSourceId: string;
-  private columns: Promise<Set<string>> | null = null;
+  /** Column name → Notion property type. */
+  private columns: Promise<Map<string, string>> | null = null;
 
   constructor(token: string = config.notion.token, dataSourceId: string = config.benbuys.purchasingDataSourceId) {
     this.client = new Client({ auth: token, notionVersion: config.notion.apiVersion });
@@ -87,11 +92,11 @@ export class ArrivalsNotion {
     return parseArrivalRow(await this.client.pages.retrieve({ page_id: pageId }));
   }
 
-  private existingColumns(): Promise<Set<string>> {
+  private existingColumns(): Promise<Map<string, string>> {
     if (!this.columns) {
       this.columns = (this.client.dataSources.retrieve({ data_source_id: this.dataSourceId }) as Promise<any>)
         .then((ds) => {
-          const names = new Set<string>(Object.keys(ds?.properties ?? {}));
+          const names = new Map<string, string>(Object.entries(ds?.properties ?? {}).map(([k, v]: [string, any]) => [k, String(v?.type ?? '')]));
           const missing = OPTIONAL_COLUMNS.filter((c) => !names.has(c));
           if (missing.length) logger.warn(`Arrivals: Purchasing DB has no ${missing.join(' / ')} column yet; writing Arrived? only for those.`);
           return names;
@@ -108,7 +113,9 @@ export class ArrivalsNotion {
     const columns = await this.existingColumns();
     const properties: Record<string, any> = { 'Arrived?': { status: { name: ARRIVED_YES } } };
     if (columns.has('Arrived at')) properties['Arrived at'] = { date: { start: write.arrivedAt } };
-    if (columns.has('Received by') && write.receivedByNotionId) {
+    if (columns.get('Received by') === 'rich_text' && write.receivedByName) {
+      properties['Received by'] = { rich_text: [{ type: 'text', text: { content: write.receivedByName.slice(0, 100) } }] };
+    } else if (columns.get('Received by') === 'people' && write.receivedByNotionId) {
       properties['Received by'] = { people: [{ id: write.receivedByNotionId }] };
     }
     if (columns.has('Arrival photo') && write.photoUrl) properties['Arrival photo'] = { url: write.photoUrl };
@@ -120,7 +127,8 @@ export class ArrivalsNotion {
     const columns = await this.existingColumns();
     const properties: Record<string, any> = { 'Arrived?': { status: { name: previousStatus || 'No' } } };
     if (columns.has('Arrived at')) properties['Arrived at'] = { date: null };
-    if (columns.has('Received by')) properties['Received by'] = { people: [] };
+    if (columns.get('Received by') === 'rich_text') properties['Received by'] = { rich_text: [] };
+    else if (columns.get('Received by') === 'people') properties['Received by'] = { people: [] };
     if (columns.has('Arrival photo')) properties['Arrival photo'] = { url: null };
     await this.client.pages.update({ page_id: pageId, properties } as any);
   }
