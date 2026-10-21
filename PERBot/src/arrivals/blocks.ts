@@ -1,5 +1,6 @@
 import type { ArrivalRow, OpenOrder, Resolution, Scan, SlipMatch } from './types.js';
 import { vendorDisplay, vendorKey, vendorsCompatible } from './match.js';
+import { isGeneric } from './pick.js';
 
 /**
  * Block Kit for the thread reply under a delivery photo, plus the button value codec. Pure.
@@ -8,13 +9,18 @@ import { vendorDisplay, vendorKey, vendorsCompatible } from './match.js';
  *
  * One card per package the photo resolved — a single order, never a wall of candidates:
  *   headline   "Probably @Mike's Mouser order from Oct 5" (requesters @-mentioned, so the people
- *              who know what's in the box see it) or, vendor-only, "Is it @Mike's order from Oct 5?"
+ *              who know what's in the box see it) or, vendor-only, "Best guess: Mike's order from
+ *              Oct 5" (names written out, nobody pinged — it's only a guess)
  *   items      the order's rows as checkboxes, the ones this box shows already ticked (≤ 10 rows;
- *              bigger orders fall back to a linked list + [These N arrived] [All M arrived])
+ *              bigger orders fall back to a linked list + [These N arrived] [All M arrived]).
+ *              A vendor-only guess among several orders ticks nothing: the tapper says what's there.
  *   links      one line per row: Notion · product page (Slack doesn't make links inside a
- *              checkbox option clickable — a tap there toggles the box)
+ *              checkbox option clickable — a tap there toggles the box), plus the row's description
+ *              when its name is generic ("JLCPCB Boards")
+ *   why        what the guess rests on, and why anyone is tagged
  *   actions    [Mark arrived] [Wrong order] [Other <vendor> orders… ▾]
- * Picking another order swaps the card in place; marking turns it into a receipt with [Undo].
+ * Picking another order swaps the card in place; Wrong order swaps it to the next candidate (never
+ * one already rejected); marking turns it into a receipt with [Undo].
  * Rows left unticked stay `Arrived? = No` — that IS the partial-shipment record.
  *
  * When to say nothing (from #packages history, where most photos are banter, pickup proof, or
@@ -39,7 +45,7 @@ export const ARRIVAL_ACTION_IDS = {
 /** Buttons in one block need distinct action ids, so legacy pick-list buttons carry a `:n` suffix. */
 export const ARRIVAL_ACTION_RE = /^arrival_(these|all|order|wrong|mark|items|other|undo)(?::\d+)?$/;
 /** Every block of a card carries `arrival_<part>:<package index>`. */
-const CARD_BLOCK_RE = /^arrival_(head|items|links|list|note|actions|done|choice|reminded):(\d+)/;
+const CARD_BLOCK_RE = /^arrival_(head|items|links|list|note|why|actions|done|choice|reminded):(\d+)/;
 export const ACTIONS_BLOCK_PREFIX = 'arrival_actions:';
 /** One section per candidate order in a pick-list: `arrival_choice:<package>:<order>`. */
 export const CHOICE_BLOCK_PREFIX = 'arrival_choice:';
@@ -69,6 +75,8 @@ export interface ArrivalButtonValue {
   /** Undo only: when the rows were marked (epoch s), and which were `Ready for Pickup` before. */
   t?: number;
   p?: string[];
+  /** Wrong order: `OpenOrder.key`s already rejected on this card, never offered again. */
+  n?: string[];
 }
 
 type Base = { u: string; ts: string };
@@ -96,6 +104,7 @@ export function decodeValue(raw: string | undefined): ArrivalButtonValue | null 
       k: typeof v.k === 'string' ? v.k : undefined,
       t: typeof v.t === 'number' ? v.t : undefined,
       p: ids(v.p),
+      n: ids(v.n),
     };
   } catch {
     return null;
@@ -142,14 +151,17 @@ function names(requesters: string[], max = 2): string {
 }
 
 /**
- * "<@U1> and <@U2>" / "<@U1>, *Ana* +3" / "*Mike*" — requesters as Slack mentions where we know
- * them, so the reply pings the people who can tell what's in the box. At most `max` are named.
+ * "<@U1> and <@U2>" / "<@U1>, *Ana* and *Joe*" / "*Mike*" — requesters as Slack mentions where we
+ * know them, so the reply pings the people who can tell what's in the box; without `people`, plain
+ * names (nobody pinged). Everyone is named — "+2" left people asking who else (10/13) — up to `max`,
+ * then "and N others".
  */
-export function who(requesters: string[], people?: People, max = 2): string {
+export function who(requesters: string[], people?: People, max = 4): string {
   const unique = [...new Set(requesters.filter(Boolean))];
   if (unique.length === 0) return '';
   const shown = unique.slice(0, max).map((n) => (people?.get(n) ? `<@${people.get(n)}>` : `*${firstName(n)}*`));
-  return unique.length > max ? `${shown.join(', ')} +${unique.length - max}` : shown.join(' and ');
+  if (unique.length > max) shown.push(`${unique.length - max} other${unique.length - max === 1 ? '' : 's'}`);
+  return shown.length === 1 ? shown[0]! : `${shown.slice(0, -1).join(', ')} and ${shown.at(-1)}`;
 }
 
 /** "<@Mike>'s *DigiKey* order from *Oct 5*" / "the *DigiKey* order from *Oct 5*". */
@@ -228,13 +240,26 @@ function option(row: ArrivalRow): any {
   return { text: { type: 'mrkdwn', text }, value: compact(row.id) };
 }
 
+/**
+ * What a generic row ("JLCPCB Boards") actually holds: its sanitized description (the text that goes
+ * to the vendor, so nothing internal), never anything that looks like a price. Null when there's
+ * nothing beyond the name.
+ */
+export function rowDetail(row: ArrivalRow): string | null {
+  const text = clean(row.sanitizedDescription.replace(/\$\s?\d[\d,.]*/g, ''), 90);
+  if (!text || text.toLowerCase() === clean(row.name, 90).toLowerCase()) return null;
+  return text;
+}
+
 /** "`74LVC1T45GW,125`  <notion|Notion> · <product|Mouser ↗>" — one line per checkbox, in the same order. */
 function linkLine(row: ArrivalRow): string | null {
   const code = shownCode(row);
   const what = code ? `\`${code}\`` : clean(row.name || row.partNumber, 32) || 'item';
   const notion = row.url && row.url.length <= 60 ? row.url : row.id ? `https://notion.so/${compact(row.id)}` : row.url;
   const links = [notion ? `<${notion}|Notion>` : '', productLink(row)].filter(Boolean);
-  return links.length ? `${what}  ${links.join(' · ')}` : null;
+  const detail = isGeneric(row) ? rowDetail(row) : null;
+  const line = links.length ? `${what}  ${links.join(' · ')}` : detail ? what : null;
+  return line && detail ? `${line} — _${detail}_` : line;
 }
 
 /** "Theodor +7 · Sep 29 · Secondary and Inverter HVDC…" — plain text for a select option. */
@@ -264,8 +289,11 @@ export interface CardInput {
   runId: string | null;
   vendor: string;
   notes?: string[];
+  /** What the guess rests on and why people are tagged — its own line under the items. */
+  why?: string[];
   alternatives?: OpenOrder[];
-  wrongLabel?: string;
+  /** Order keys already rejected on this card (carried by Wrong order, so the next swap skips them). */
+  rejected?: string[];
 }
 
 /** One package's card. Block ids carry the package index so a tap settles only its own card. */
@@ -276,6 +304,7 @@ export function orderCard(index: number, card: CardInput, base: Base): any[] {
   const tickedIds = new Set(ticked.map((r) => r.id));
   const all = [...ticked, ...card.rows.filter((r) => !tickedIds.has(r.id))];
   const value: ArrivalButtonValue = { ...base, ...(card.key ? { k: card.key } : {}) };
+  const rejected = [...new Set(card.rejected ?? [])].slice(-12);
   const notes = [...(card.notes ?? [])];
   const blocks: any[] = [{ type: 'section', block_id: id('head'), text: { type: 'mrkdwn', text: card.headline } }];
   const elements: (any | null)[] = [];
@@ -314,9 +343,10 @@ export function orderCard(index: number, card: CardInput, base: Base): any[] {
     elements.push(these, button(`All ${card.rows.length} arrived`, ARRIVAL_ACTION_IDS.all, orderValue(card.rows, card.runId, base, extras), these ? undefined : 'primary'));
   }
 
-  elements.push(button(card.wrongLabel ?? 'Wrong order', ARRIVAL_ACTION_IDS.wrong, base));
-  elements.push(otherOrders(card.alternatives ?? [], card.vendor));
+  elements.push(button('Wrong order', ARRIVAL_ACTION_IDS.wrong, { ...value, ...(rejected.length ? { n: rejected } : {}) }));
+  elements.push(otherOrders((card.alternatives ?? []).filter((o) => !rejected.includes(o.key)), card.vendor));
   if (notes.length) blocks.push({ type: 'context', block_id: id('note'), elements: [{ type: 'mrkdwn', text: notes.join(' · ') }] });
+  if (card.why?.length) blocks.push({ type: 'context', block_id: id('why'), elements: [{ type: 'mrkdwn', text: card.why.join('\n') }] });
   const present = elements.filter(Boolean);
   if (!present.some((e) => e.type === 'button' && e.action_id !== ARRIVAL_ACTION_IDS.wrong)) {
     blocks.push({ type: 'context', block_id: id('note'), elements: [{ type: 'mrkdwn', text: 'Too many items to confirm from Slack — mark them in Notion.' }] });
@@ -340,7 +370,8 @@ export function matchCard(
   res: { match: SlipMatch; evidence: string | null; key?: string | null; alternatives?: OpenOrder[] },
   vendorHint: string | null,
   base: Base,
-  people?: People
+  people?: People,
+  rejected: string[] = []
 ): any[] {
   const { match, evidence } = res;
   const contextRows = match.orderRows.length ? match.orderRows : match.matchedRows;
@@ -369,8 +400,15 @@ export function matchCard(
     .map((l) => l.line.vendorPartNumber ?? l.line.manufacturerPartNumber ?? l.line.customerReference)
     .filter((s): s is string => !!s);
   const notes: string[] = [];
-  if (evidence) notes.push(`:mag: ${clean(evidence, 160)}`);
   if (unmatchedPns.length) notes.push(`not found in Purchasing: ${unmatchedPns.slice(0, 6).join(', ')}${unmatchedPns.length > 6 ? '…' : ''}`);
+  const why = [
+    match.confidence === 'exact' || (!evidence && match.confidence === 'strong')
+      ? ':mag: Why: part numbers on the slip match this order'
+      : evidence
+        ? `:mag: Why: ${clean(evidence, 160)}`
+        : ':mag: Why: only some slip lines match — check the items before confirming',
+  ];
+  if (tagged(contextRows, people)) why.push(':bust_in_silhouette: Tagged: they requested this order');
 
   return orderCard(
     index,
@@ -383,31 +421,51 @@ export function matchCard(
       runId: match.runId,
       vendor,
       notes,
+      why,
       alternatives: res.alternatives,
+      rejected,
     },
     base
   );
 }
 
-/** Vendor known, order not: the most plausible order as a card, the rest in the "Other … orders" select. */
-export function guessCard(index: number, order: OpenOrder, alternatives: OpenOrder[], vendor: string, base: Base, people?: People, lead = ''): any[] {
+/** Someone on these rows gets an @-mention. */
+function tagged(rows: ArrivalRow[], people?: People): boolean {
+  return !!people && rows.some((r) => r.pointOfContact.some((n) => people.has(n)));
+}
+
+export const ASK_AGAIN = 'Not sure? Reply `@PERBot <what’s in the box>` (or who it’s for) and I’ll look again.';
+
+/**
+ * Vendor known, order not: the most plausible order as a card, the rest in the "Other … orders"
+ * select. Only a guess, so requesters are named, not pinged; with several open orders nothing is
+ * pre-ticked — the person holding the box ticks what's in it. `lead` (an undo or a rejection) is its
+ * own line above the headline.
+ */
+export function guessCard(index: number, order: OpenOrder, alternatives: OpenOrder[], vendor: string, base: Base, lead = '', rejected: string[] = []): any[] {
   const v = clean(vendorDisplay(vendor) || vendor, 40);
-  const whom = who(order.rows.flatMap((r) => r.pointOfContact), people);
+  const whom = who(order.rows.flatMap((r) => r.pointOfContact));
   const when = shortDate(order.date);
-  const headline = alternatives.length
-    ? `${lead}:package: A *${v}* package. Is it ${whom ? `${whom}’s` : 'the'} order${when ? ` from *${when}*` : ''}?`
-    : `${lead}:package: A *${v}* package. There’s one open ${v} order${whom ? ` (${whom}’s)` : ''}${when ? ` from *${when}*` : ''}. Is it this one?`;
+  const open = alternatives.filter((o) => !rejected.includes(o.key));
+  const head = open.length
+    ? `:package: A *${v}* package. Best guess: ${whom ? `${whom}’s` : 'the'} order${when ? ` from *${when}*` : ''} — tick what’s actually in the box.`
+    : `:package: A *${v}* package. There’s one open ${v} order${whom ? ` (${whom}’s)` : ''}${when ? ` from *${when}*` : ''}. Is it this one?`;
+  const generic = order.rows.some(isGeneric);
+  const why = [`:grey_question: Why: only the vendor matched${open.length ? ` — ${open.length + 1} open ${v} orders, this is the closest by date` : ''}`];
+  if (generic) why.push(`:warning: These items don’t say what’s inside — open the Notion link to check before marking.`);
+  why.push(ASK_AGAIN);
   return orderCard(
     index,
     {
-      headline,
+      headline: lead.trim() ? `${lead.trim()}\n${head}` : head,
       rows: order.rows,
-      checked: order.rows,
+      checked: open.length || generic ? [] : order.rows,
       key: order.key,
       runId: order.runId,
       vendor: v,
-      alternatives,
-      wrongLabel: alternatives.length ? 'None of these' : 'No',
+      why,
+      alternatives: open,
+      rejected,
     },
     base
   );
@@ -425,6 +483,10 @@ export interface ReplyContext extends Base {
   text?: string;
   /** Requesters → Slack ids, for @-mentions. */
   people?: People;
+  /** Someone asked PERBot to look again (`@PERBot <what's in it>`): a vendor guess is welcome even in a thread. */
+  correction?: boolean;
+  /** Order keys rejected in this thread: carried on the cards so Wrong order never comes back to them. */
+  rejected?: string[];
 }
 
 /** "Jlc picked up" names JLCPCB: the poster is talking about this vendor's delivery. */
@@ -433,7 +495,7 @@ export function textNamesVendor(text: string | undefined, vendor: string): boole
   return !!key && (text ?? '').split(/[^A-Za-z0-9-]+/).some((w) => w.length >= 3 && vendorKey(w) === key);
 }
 
-const SLIP_PLEASE = 'If it’s ours, reply here with a photo of the *packing slip* or a *bag label* (anything with part numbers), or mark it in Notion.';
+const SLIP_PLEASE = 'If it’s ours, reply here with a photo of the *packing slip* or a *bag label* (anything with part numbers), reply `@PERBot <what’s in it>`, or mark it in Notion.';
 
 /** The thread reply for one delivery photo, or null to stay silent. */
 export function buildReply(scan: Scan, resolutions: Resolution[], ctx: ReplyContext): Reply | null {
@@ -448,17 +510,24 @@ export function buildReply(scan: Scan, resolutions: Resolution[], ctx: ReplyCont
   for (const res of resolutions) {
     if (sections.length >= MAX_PACKAGES) break;
     const pkg = scan.packages[res.pkg];
-    if (res.kind === 'match') sections.push(matchCard(sections.length, res, pkg?.vendor ?? null, base, ctx.people));
-    if (res.kind !== 'choose' || ctx.inThread || chosen.has(vendorKey(res.vendor))) continue;
-    if (scan.scene === 'several_packages' && !textNamesVendor(ctx.text, res.vendor)) continue;
+    if (res.kind === 'match') sections.push(matchCard(sections.length, res, pkg?.vendor ?? null, base, ctx.people, ctx.rejected));
+    if (res.kind !== 'choose' || (ctx.inThread && !ctx.correction) || chosen.has(vendorKey(res.vendor))) continue;
+    if (scan.scene === 'several_packages' && !ctx.correction && !textNamesVendor(ctx.text, res.vendor)) continue;
     chosen.add(vendorKey(res.vendor));
-    sections.push(guessCard(sections.length, res.orders[0]!, res.orders.slice(1), res.vendor, base, ctx.people));
+    sections.push(guessCard(sections.length, res.orders[0]!, res.orders.slice(1), res.vendor, base, '', ctx.rejected));
   }
 
   if (sections.length === 0) {
+    const hints = [...new Set(scan.packages.flatMap((p) => p.itemHints))].slice(0, 3);
+    const looked = hints.length ? ` with ${hints.map((h) => `“${clean(h, 40)}”`).join(' / ')} in it` : '';
+    if (ctx.correction) {
+      return { text: 'No open order matches', blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `:package: I couldn’t find an open order${looked}. It may not be in Purchasing — mark it in Notion if it’s ours.` } }] };
+    }
     const paperwork = scan.scene === 'packing_slip' || scan.scene === 'shipping_label';
     if (ctx.inThread || !paperwork) return null;
-    const lead = scan.legible ? ':package: I couldn’t match this to an open order.' : ':camera: I couldn’t read the label.';
+    const lead = scan.legible
+      ? `:package: I couldn’t find an open order${looked}${hints.length ? ' — it may not be in Purchasing yet' : ''}.`
+      : ':camera: I couldn’t read the label.';
     return { text: 'Which order is this package?', blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `${lead} ${SLIP_PLEASE}` } }] };
   }
 

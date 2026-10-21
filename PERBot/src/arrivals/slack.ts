@@ -24,7 +24,7 @@ import {
 import { ARRIVED_YES, ArrivalsNotion } from './notion.js';
 import { eligibleRows, groupOrders, ordersForVendor, rankOrders } from './orders.js';
 import { peopleMap } from './people.js';
-import { isImage, loadImages, parentText, processDelivery, withNames } from './pipeline.js';
+import { isImage, loadImages, parentText, processDelivery, slackName, withNames } from './pipeline.js';
 import type { ArrivalRow, Extraction } from './types.js';
 
 /**
@@ -33,9 +33,15 @@ import type { ArrivalRow, Extraction } from './types.js';
  * useful (see blocks.ts:buildReply), and writes Notion only when someone taps a button — only the
  * arrival columns. Other bots (the Copy Center webhook, B11's RFID logger) are ignored.
  *
- * People: replies @-mention the likely order's requesters; when rows are marked, each requester
- * gets a DM (not whoever tapped or posted); a card untapped for 4 h DMs them once (see remindStale).
- * Every mark can be undone from the card for 24 h.
+ * People: replies @-mention the likely order's requesters (named, not pinged, on a vendor-only
+ * guess); when rows are marked, each requester gets a DM (not whoever tapped or posted); a card
+ * untapped for 4 h DMs them once (see remindStale). Every mark can be undone from the card for 24 h.
+ *
+ * Corrections: `@PERBot <what's in it>` in a package thread looks again with that text (handleArrivalsMention)
+ * instead of searching the docs, and so does a plain reply from whoever just tapped Wrong order with
+ * nothing left to offer. Wrong order otherwise swaps the card to the vendor's next open order. Orders
+ * rejected in a thread are never offered there again, and a photo whose orders already have a card in
+ * its thread gets no second card.
  *
  * Slack setup: bot scope `files:read` and the `message.channels` event (`message.groups` too if
  * the channel is private), then reinstall.
@@ -66,13 +72,60 @@ const seen = new Set<string>();
 const packages = new Map<string, string>();
 /** Threads that already got a "post the packing slip" nudge — one per thread is enough. */
 const nudged = new Set<string>();
+/** Thread ts → order keys someone tapped Wrong order on there (the cards carry them too, until settled). */
+const rejectedIn = new Map<string, Set<string>>();
+/** Thread ts → who just ran out of candidates on Wrong order: their next plain reply there is a correction. */
+const awaiting = new Map<string, { user: string; until: number }>();
+const AWAIT_MS = 30 * 60_000;
 
 /** Keep the dedupe memory bounded: drop the oldest entry past 500. */
-function cap(coll: Set<string> | Map<string, string>): void {
+function cap(coll: Set<string> | Map<string, unknown>): void {
   if (coll.size > 500) coll.delete(coll.keys().next().value!);
 }
 
-export async function handlePhoto(client: WebClient, event: any): Promise<void> {
+function reject(threadTs: string, keys: string[]): void {
+  const set = rejectedIn.get(threadTs) ?? new Set<string>();
+  for (const k of keys) set.add(k);
+  rejectedIn.set(threadTs, set);
+  cap(rejectedIn);
+}
+
+/**
+ * What PERBot's cards in a thread already cover: `carded` = orders with a card (open or marked),
+ * `rejected` = orders tapped Wrong order on. Read from the cards' button values plus memory.
+ */
+export function threadOrders(messages: any[], bot: string | null, remembered: Iterable<string> = []): { carded: Set<string>; rejected: Set<string> } {
+  const carded = new Set<string>();
+  const rejected = new Set<string>(remembered);
+  for (const m of messages) {
+    if (!bot || m?.bot_id !== bot) continue;
+    for (const b of m.blocks ?? []) {
+      if (cardIndex(b?.block_id) === null) continue;
+      for (const el of b.elements ?? []) {
+        const v = decodeValue(el?.value);
+        if (v?.k) carded.add(v.k);
+        for (const k of v?.n ?? []) rejected.add(k);
+      }
+    }
+  }
+  for (const k of rejected) carded.delete(k);
+  return { carded, rejected };
+}
+
+async function threadMessages(client: WebClient, channel: string, threadTs: string): Promise<any[]> {
+  try {
+    return ((await client.conversations.replies({ channel, ts: threadTs, limit: 200 })) as any).messages ?? [];
+  } catch (err) {
+    logger.warn(`Arrivals: could not read thread ${threadTs}`, err);
+    return [];
+  }
+}
+
+/**
+ * `opts.correction`: re-run `event` (the photo) with `opts.text` — what someone said is in the box —
+ * replacing the photo's own message as the evidence.
+ */
+export async function handlePhoto(client: WebClient, event: any, opts: { correction?: boolean; text?: string; photoText?: string } = {}): Promise<void> {
   const threadTs = event.thread_ts ?? event.ts;
   const inThread = Boolean(event.thread_ts && event.thread_ts !== event.ts);
   const reply = (text: string, blocks?: any[]) =>
@@ -81,14 +134,29 @@ export async function handlePhoto(client: WebClient, event: any): Promise<void> 
   try {
     const images = await loadImages(client, event.files);
     if (images.length === 0) return;
-    const [text, parent, openRows, people] = await Promise.all([
-      withNames(client, event.text ?? ''),
-      inThread ? parentText(client, event.channel, threadTs) : Promise.resolve(undefined),
+    const [text, parent, openRows, people, thread, ids] = await Promise.all([
+      withNames(client, opts.text ?? event.text ?? ''),
+      inThread || opts.correction ? parentText(client, event.channel, threadTs) : Promise.resolve(undefined),
       notion.openRows(),
       peopleMap(client, notion),
+      inThread || opts.correction ? threadMessages(client, event.channel, threadTs) : Promise.resolve([]),
+      ownIds(client),
     ]);
+    const { carded, rejected } = threadOrders(thread, ids.bot, rejectedIn.get(threadTs));
     const { scan, resolutions, reply: answer } = await processDelivery(
-      { ts: event.ts, user: event.user, text, parentText: parent, inThread, images, people },
+      {
+        ts: event.ts,
+        user: event.user,
+        text,
+        // A correction is about the photo: its own message is the context, the correction the evidence.
+        parentText: opts.correction ? [parent, opts.photoText].filter(Boolean).join('\n') || undefined : parent,
+        inThread,
+        images,
+        people,
+        rejected,
+        carded: opts.correction ? new Set() : carded,
+        correction: opts.correction,
+      },
       openRows
     );
     logger.info(
@@ -98,12 +166,12 @@ export async function handlePhoto(client: WebClient, event: any): Promise<void> 
     if (!answer) return;
 
     const isNudge = !answer.blocks.some((b) => b.type === 'actions');
-    if (isNudge && nudged.has(threadTs)) return;
+    if (isNudge && nudged.has(threadTs) && !opts.correction) return;
 
     // A second photo of a box we already answered for: point at that reply instead.
     const keys = scan.packages.map(packageKey).filter((k): k is string => !!k);
     const earlier = keys.map((k) => packages.get(k)).find(Boolean);
-    if (earlier && keys.every((k) => packages.has(k))) {
+    if (earlier && keys.every((k) => packages.has(k)) && !opts.correction) {
       await reply(`:package: Same box as <${earlier}|this one> (same tracking number) — confirm it there.`);
       return;
     }
@@ -119,9 +187,56 @@ export async function handlePhoto(client: WebClient, event: any): Promise<void> 
     }
   } catch (err) {
     logger.error('Arrivals: photo handling failed', err);
-    // Stay quiet in threads (most thread photos are banter); a top-level failure gets one line.
-    if (!inThread) await reply(':warning: I couldn’t process that photo. Mark the order in Notion for now; the error is in the Render logs.').catch(() => undefined);
+    // Stay quiet in threads (most thread photos are banter); a top-level failure or an asked-for look gets one line.
+    if (!inThread || opts.correction) await reply(':warning: I couldn’t process that photo. Mark the order in Notion for now; the error is in the Render logs.').catch(() => undefined);
   }
+}
+
+// --- Corrections --------------------------------------------------------------------------------
+
+/** Look again at the thread's latest photo (at or before the correction) with `text` as the evidence. False: no photo there. */
+async function correct(client: WebClient, event: any, text: string): Promise<boolean> {
+  const threadTs = event.thread_ts as string;
+  const thread = await threadMessages(client, event.channel, threadTs);
+  const photo = [...thread].reverse().find((m) => isPhotoPost(m) && Number(m.ts) <= Number(event.ts));
+  if (!photo) return false;
+  // A photo posted as a reply has its own message; the thread's first message comes in as the parent.
+  const photoText = photo.ts !== threadTs && photo.text ? await withNames(client, photo.text) : undefined;
+  logger.info(`Arrivals: looking again at ${photo.ts} with "${text.slice(0, 80)}"`);
+  await handlePhoto(client, { ...photo, channel: event.channel, thread_ts: threadTs }, { correction: true, text, photoText });
+  return true;
+}
+
+/**
+ * `@PERBot <what's in it>` in a package thread: look again at that thread's photo with the text,
+ * rather than the docs search the mention would otherwise run (10/19: "no, elijah cooling fittings
+ * are in this picture" got a page of cooling-loop meeting notes). True when handled here.
+ */
+export async function handleArrivalsMention(client: WebClient, event: any, botUserId?: string): Promise<boolean> {
+  if (!event?.thread_ts) return false;
+  const arrivals = await arrivalsChannelId(client).catch(() => null);
+  if (!arrivals || event.channel !== arrivals) return false;
+  // A mention with a photo: the photo listener reads it, message text included.
+  if (Array.isArray(event.files) && event.files.some(isImage)) return true;
+  const text = String(event.text ?? '')
+    .replace(/<@([A-Z0-9]+)(?:\|[^>]*)?>/g, (m: string, id: string) => (id === botUserId ? ' ' : m))
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!text) return false;
+  awaiting.delete(event.thread_ts);
+  return correct(client, event, text);
+}
+
+/** A plain reply from whoever just ran out of candidates on Wrong order (see `awaiting`). */
+function awaitedReply(e: any): boolean {
+  if (e?.bot_id || !e?.user || e?.subtype || !e?.thread_ts || !e?.text) return false;
+  const w = awaiting.get(e.thread_ts);
+  if (!w || w.user !== e.user) return false;
+  if (w.until < Date.now()) {
+    awaiting.delete(e.thread_ts);
+    return false;
+  }
+  return true;
 }
 
 // --- Catch-up sweep ---------------------------------------------------------------------------
@@ -135,15 +250,22 @@ const SWEEP_EVERY_MS = 15 * 60_000;
 /** Leave fresh posts to the live listener (its event may still be in flight). */
 const SWEEP_MIN_AGE_MS = 2 * 60_000;
 
-let ownBotId: Promise<string | null> | null = null;
-function botId(client: WebClient): Promise<string | null> {
-  if (!ownBotId) {
-    ownBotId = client.auth.test().then(
-      (r: any) => (r?.bot_id as string) ?? null,
-      () => (ownBotId = null)
+let ownIdsP: Promise<{ bot: string | null; user: string | null }> | null = null;
+/** PERBot's bot id (on its messages) and user id (in its @-mentions). */
+function ownIds(client: WebClient): Promise<{ bot: string | null; user: string | null }> {
+  if (!ownIdsP) {
+    ownIdsP = client.auth.test().then(
+      (r: any) => ({ bot: (r?.bot_id as string) ?? null, user: (r?.user_id as string) ?? null }),
+      () => {
+        ownIdsP = null;
+        return { bot: null, user: null };
+      }
     );
   }
-  return ownBotId;
+  return ownIdsP;
+}
+async function botId(client: WebClient): Promise<string | null> {
+  return (await ownIds(client)).bot;
 }
 
 /** A human photo post. */
@@ -298,16 +420,24 @@ function cardBase(blocks: any[], index: number): { u: string; ts: string } | nul
  * A fresh card for order `key`, as of the photo: its open rows plus `restored` (rows an Undo just
  * reopened — the Notion query can lag the write by a moment), the vendor's other orders as the select.
  */
-async function cardForOrder(client: WebClient, index: number, key: string, base: { u: string; ts: string }, lead: string, restored: ArrivalRow[] = []): Promise<any[] | null> {
+async function cardForOrder(index: number, key: string, base: { u: string; ts: string }, lead: string, restored: ArrivalRow[] = [], rejected: string[] = []): Promise<any[] | null> {
   const asOf = new Date(Number(base.ts) * 1000);
-  const [open, people] = await Promise.all([notion.openRows(), peopleMap(client, notion)]);
+  const open = await notion.openRows();
   const byId = new Map(open.map((r) => [r.id, r]));
   for (const r of restored) byId.set(r.id, r);
   const orders = groupOrders(eligibleRows([...byId.values()], asOf));
   const order = orders.find((o) => o.key === key);
   if (!order) return null;
-  const others = ordersForVendor(orders, order.vendor).filter((o) => o !== order);
-  return guessCard(index, order, rankOrders(others, NO_PACKAGE, asOf), order.vendor, base, people, lead);
+  const others = ordersForVendor(orders, order.vendor).filter((o) => o !== order && !rejected.includes(o.key));
+  // Only who/when carries over from the tapped button — not its undo rows or rejections.
+  return guessCard(index, order, rankOrders(others, NO_PACKAGE, asOf), order.vendor, { u: base.u, ts: base.ts }, lead, rejected);
+}
+
+/** The order keys in card `index`'s "Other … orders" select, in the order shown. */
+function selectKeys(blocks: any[], index: number): string[] {
+  const actions = blocks.find((b) => b?.block_id === `arrival_actions:${index}`);
+  const select = (actions?.elements ?? []).find((el: any) => el?.action_id === ARRIVAL_ACTION_IDS.other);
+  return (select?.options ?? []).map((o: any) => String(o?.value ?? '')).filter(Boolean);
 }
 
 /** DM each requester whose rows were just marked (not the person who tapped, nor the one who posted the photo). */
@@ -340,7 +470,8 @@ export function registerArrivals(app: App): void {
 
   app.event('message', async ({ event, client }) => {
     const e = event as any;
-    if (!isPhotoPost(e)) return;
+    const photo = isPhotoPost(e);
+    if (!photo && !awaitedReply(e)) return;
     const arrivals = await arrivalsChannelId(client).catch((err) => {
       logger.error('Arrivals: could not resolve the channel', err);
       return null;
@@ -350,7 +481,11 @@ export function registerArrivals(app: App): void {
     if (seen.has(id)) return;
     seen.add(id);
     cap(seen);
-    await handlePhoto(client, e);
+    if (photo) return void (await handlePhoto(client, e));
+    const me = (await ownIds(client)).user;
+    if (me && String(e.text).includes(`<@${me}`)) return; // the mention handler has it
+    awaiting.delete(e.thread_ts);
+    await correct(client, e, String(e.text)).catch((err) => logger.error('Arrivals: correction failed', err));
   });
 
   app.action(ARRIVAL_ACTION_RE, async ({ ack, body, action, respond, client }) => {
@@ -376,7 +511,10 @@ export function registerArrivals(app: App): void {
         const key = a?.selected_option?.value as string | undefined;
         const base = index !== null ? cardBase(existing, index) : null;
         if (!key || !base || index === null) return;
-        const next = await cardForOrder(client, index, key, base, `↪️ <@${clicker}> switched orders. `);
+        const rejected = (existing.find((b) => b?.block_id === `arrival_actions:${index}`)?.elements ?? [])
+          .map((el: any) => decodeValue(el?.value)?.n ?? [])
+          .flat();
+        const next = await cardForOrder(index, key, base, `↪️ <@${clicker}> switched orders.`, [], rejected);
         if (!next) return void (await whisper('That order isn’t open anymore — someone may have just marked it. Check Notion.'));
         await replace(replaceCard(existing, index, next));
         return;
@@ -395,14 +533,28 @@ export function registerArrivals(app: App): void {
           restored.push({ ...(await notion.fetchRow(id)), arrived: previous });
         }
         const lead = `↩️ <@${clicker}> undid that — ${restored.length} item${restored.length === 1 ? '' : 's'} back to not arrived. `;
-        const next = index !== null && value.k ? await cardForOrder(client, index, value.k, value, lead, restored) : null;
+        const next = index !== null && value.k ? await cardForOrder(index, value.k, value, lead, restored) : null;
         await replace(next && index !== null ? replaceCard(existing, index, next) : settleCard(existing, index ?? 0, lead.trim()));
         logger.info(`Arrivals: ${clicker} undid ${restored.length} rows.`);
         return;
       }
 
       if (actionId === ARRIVAL_ACTION_IDS.wrong) {
-        const text = `✗ <@${clicker}>: not this order — nothing was written. Mark it in Notion if it’s ours.`;
+        // Never a dead end: swap to the vendor's next open order not yet rejected; with none left, ask what's inside.
+        const threadTs = message?.thread_ts ?? message?.ts;
+        const rejected = [...new Set([...(value.n ?? []), ...(value.k ? [value.k] : [])])];
+        if (threadTs) reject(threadTs, rejected);
+        if (card && index !== null) {
+          for (const key of selectKeys(existing, index).filter((k) => !rejected.includes(k))) {
+            const next = await cardForOrder(index, key, value, `✗ <@${clicker}>: not that one — nothing was written.`, [], rejected);
+            if (next) return void (await replace(replaceCard(existing, index, next), 'Not that order'));
+          }
+        }
+        const text = `✗ <@${clicker}>: not this order — nothing was written. Reply here with what’s in the box (or who it’s for) and I’ll look again, or mark it in Notion.`;
+        if (threadTs) {
+          awaiting.set(threadTs, { user: clicker, until: Date.now() + AWAIT_MS });
+          cap(awaiting);
+        }
         await replace(card ? settleCard(existing, index!, text) : settleBlocks(existing, blockId, text), 'Not this order');
         return;
       }
@@ -425,8 +577,9 @@ export function registerArrivals(app: App): void {
       const todo = rows.filter((r) => r.arrived !== ARRIVED_YES);
 
       const arrivedAt = new Date(Number(value.ts) * 1000).toISOString();
-      const [receivedBy, permalink] = await Promise.all([
+      const [receivedBy, receivedByName, permalink] = await Promise.all([
         receiverNotionId(client, value.u),
+        slackName(client, value.u).then((n) => (n === value.u ? null : n), () => null),
         client.chat.getPermalink({ channel, message_ts: value.ts }).then((r: any) => (r?.permalink as string) ?? null, () => null),
       ]);
 
@@ -434,7 +587,7 @@ export function registerArrivals(app: App): void {
       const failed: ArrivalRow[] = [];
       for (const row of todo) {
         try {
-          await notion.markArrived(row.id, { arrivedAt, receivedByNotionId: receivedBy, photoUrl: permalink });
+          await notion.markArrived(row.id, { arrivedAt, receivedByNotionId: receivedBy, receivedByName, photoUrl: permalink });
           marked.push(row);
         } catch (err) {
           logger.error(`Arrivals: write failed for ${row.id}`, err);

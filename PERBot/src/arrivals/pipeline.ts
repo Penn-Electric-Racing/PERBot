@@ -26,6 +26,12 @@ export interface DeliveryMessage {
   images: SlipImage[];
   /** Requesters → Slack ids, so the reply can @-mention them. */
   people?: People;
+  /** Orders someone called wrong in this thread: never candidates again. */
+  rejected?: ReadonlySet<string>;
+  /** Orders that already have a card in this thread: a second photo of the same box adds nothing. */
+  carded?: ReadonlySet<string>;
+  /** `@PERBot <what's in it>` asking to look again. */
+  correction?: boolean;
 }
 
 export interface DeliveryResult {
@@ -36,8 +42,27 @@ export interface DeliveryResult {
 
 export async function processDelivery(msg: DeliveryMessage, openRows: ArrivalRow[], picker?: Picker): Promise<DeliveryResult> {
   const scan = await scanPhotos(msg.images, { text: msg.text, parentText: msg.parentText });
-  const resolutions = await resolveScan(scan, openRows, new Date(Number(msg.ts) * 1000), [msg.parentText, msg.text].filter(Boolean).join('\n'), picker);
-  return { scan, resolutions, reply: buildReply(scan, resolutions, { u: msg.user, ts: msg.ts, inThread: msg.inThread, text: msg.text, people: msg.people }) };
+  const all = await resolveScan(scan, openRows, new Date(Number(msg.ts) * 1000), [msg.parentText, msg.text].filter(Boolean).join('\n'), picker, msg.rejected);
+  const resolutions = all.filter((r) => !msg.carded?.has(resolutionKey(r) ?? ''));
+  // Everything this photo found already has a card in the thread: stay quiet rather than repeat it (10/13).
+  if (all.length && !resolutions.length) return { scan, resolutions, reply: null };
+  const reply = buildReply(scan, resolutions, {
+    u: msg.user,
+    ts: msg.ts,
+    inThread: msg.inThread,
+    text: msg.text,
+    people: msg.people,
+    correction: msg.correction,
+    rejected: [...(msg.rejected ?? [])],
+  });
+  return { scan, resolutions, reply };
+}
+
+/** The order a resolution's card would show (`OpenOrder.key`), or null. */
+export function resolutionKey(res: Resolution): string | null {
+  if (res.kind === 'match') return res.key ?? null;
+  if (res.kind === 'choose') return res.orders[0]?.key ?? null;
+  return null;
 }
 
 // --- Slack plumbing shared by the listener and the backtest -----------------------------------
@@ -71,6 +96,12 @@ export async function loadImages(client: WebClient, files: any[]): Promise<SlipI
 }
 
 const names = new Map<string, string>();
+
+/** A Slack user's real name (cached), or their id when Slack won't say. */
+export async function slackName(client: WebClient, id: string): Promise<string> {
+  if (!names.has(id)) await withNames(client, `<@${id}>`);
+  return names.get(id) ?? id;
+}
 
 /** "<@U07M54CLKNY> cooling tube is here" → "@Elijah Jeoung cooling tube is here" — owners are evidence. */
 export async function withNames(client: WebClient, text: string): Promise<string> {

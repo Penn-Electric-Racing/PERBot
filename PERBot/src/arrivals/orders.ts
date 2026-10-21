@@ -11,6 +11,11 @@ import type { ArrivalRow, Extraction, OpenOrder } from './types.js';
  */
 
 const DAY = 86_400_000;
+/** Older than this, an open order has almost certainly arrived unrecorded (nothing was marked before
+ *  this feature): it isn't offered on vendor alone, and ranks after fresher orders. */
+export const STALE_DAYS = 30;
+/** Older than this, an open row isn't a candidate at all — "Is it the order from Aug 29?" on Oct 19 was the #1 complaint. */
+export const MAX_AGE_DAYS = 90;
 
 function time(iso: string | null): number | null {
   if (!iso) return null;
@@ -23,8 +28,21 @@ export function eligibleRows(rows: ArrivalRow[], asOf: Date): ArrivalRow[] {
   return rows.filter((r) => {
     if (!r.exported || r.arrived === 'Yes') return false;
     const requested = time(r.submittedAt);
-    return requested === null || requested <= cutoff;
+    if (requested !== null && requested > cutoff) return false;
+    const placed = time(r.orderedAt) ?? requested;
+    return placed === null || cutoff - placed <= MAX_AGE_DAYS * DAY;
   });
+}
+
+/** The order a row belongs to: `Run ID`, else request day, plus vendor (see groupOrders). */
+export function orderKey(row: ArrivalRow): string {
+  return `${row.runId || (row.submittedAt ?? '').slice(0, 10)}|${rowVendorKey(row) || 'unknown'}`;
+}
+
+/** Placed more than STALE_DAYS before `asOf`. Undated orders aren't stale (nothing to judge by). */
+export function isStale(order: OpenOrder, asOf: Date): boolean {
+  const t = time(order.date);
+  return t !== null && asOf.getTime() - t > STALE_DAYS * DAY;
 }
 
 /**
@@ -36,7 +54,7 @@ export function groupOrders(rows: ArrivalRow[]): OpenOrder[] {
   const byKey = new Map<string, ArrivalRow[]>();
   const runSize = new Map<string, number>();
   for (const r of rows) {
-    const key = `${r.runId || (r.submittedAt ?? '').slice(0, 10)}|${rowVendorKey(r) || 'unknown'}`;
+    const key = orderKey(r);
     byKey.set(key, [...(byKey.get(key) ?? []), r]);
     if (r.runId) runSize.set(r.runId, (runSize.get(r.runId) ?? 0) + 1);
   }
@@ -77,8 +95,9 @@ export function addresseeMatches(addressee: string | null, requesters: string[])
 /**
  * Most plausible first: an addressee who requested it, then the order placed closest BEFORE the
  * ship date — or before the photo, when no ship date was read (McMaster ships next day, so an order
- * from yesterday is a prime candidate). Orders placed after the ship date go last. Nothing was
- * marked arrived before this feature, so "oldest open order" would surface stale, long-delivered ones.
+ * from yesterday is a prime candidate). Stale orders (STALE_DAYS) come after fresh ones, and orders
+ * placed after the ship date go last. Nothing was marked arrived before this feature, so "oldest open
+ * order" would surface long-delivered ones.
  */
 export function rankOrders(orders: OpenOrder[], pkg: Extraction, asOf: Date): OpenOrder[] {
   const anchor = time(pkg.shipDate) ?? asOf.getTime();
@@ -86,7 +105,8 @@ export function rankOrders(orders: OpenOrder[], pkg: Extraction, asOf: Date): Op
     const t = time(o.date);
     if (t === null) return 365;
     const days = (anchor - t) / DAY;
-    return days >= -1 ? Math.abs(days) : 365 + Math.abs(days); // ordered after it shipped: last
+    if (days < -1) return 365 + Math.abs(days); // ordered after it shipped: last
+    return days > STALE_DAYS ? 180 + days : Math.abs(days);
   };
   return [...orders].sort((a, b) => {
     const named = Number(addresseeMatches(pkg.addressee, b.requesters)) - Number(addresseeMatches(pkg.addressee, a.requesters));

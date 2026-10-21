@@ -1,5 +1,5 @@
 import { matchSlip } from './match.js';
-import { eligibleRows, groupOrders, ordersForVendor, rankOrders } from './orders.js';
+import { eligibleRows, groupOrders, isStale, orderKey, ordersForVendor, rankOrders } from './orders.js';
 import { pickOrders, type Pick } from './pick.js';
 import type { ArrivalRow, Extraction, OpenOrder, Resolution, Scan, SlipMatch } from './types.js';
 
@@ -10,10 +10,12 @@ import type { ArrivalRow, Extraction, OpenOrder, Resolution, Scan, SlipMatch } f
  *      orders (or all open orders when the vendor is unknown), validated against what we offered —
  *      up to 3 orders, since one message often lists several items;
  *   3. a weak slip match, if that's all there is;
- *   4. vendor known → a pick-list of its most plausible open orders;
+ *   4. vendor known → a pick-list of its most plausible open orders — never one older than STALE_DAYS,
+ *      which on vendor alone is nearly always long delivered and simply never marked;
  *   5. nothing.
- * Only orders that went out before the photo are candidates (`eligibleRows`), and rows claimed by an
- * earlier package in the same photo aren't offered again.
+ * Only orders that went out before the photo are candidates (`eligibleRows`), rows claimed by an
+ * earlier package in the same photo aren't offered again, and neither are orders someone already
+ * called wrong in this thread (`exclude`, by `OpenOrder.key`).
  */
 
 export type Picker = (pkg: Extraction, orders: OpenOrder[], messageText: string) => Promise<Pick[]>;
@@ -63,11 +65,19 @@ export async function resolvePackage(
   }
 
   if (weak) return [{ kind: 'match', match: weak, evidence: null, ...around(weak) }];
-  if (vendorOrders.length) return [{ kind: 'choose', orders: rankOrders(vendorOrders, pkg, asOf), vendor: pkg.vendor! }];
+  const fresh = vendorOrders.filter((o) => !isStale(o, asOf));
+  if (fresh.length) return [{ kind: 'choose', orders: rankOrders(fresh, pkg, asOf), vendor: pkg.vendor! }];
   return [{ kind: 'none' }];
 }
 
-export async function resolveScan(scan: Scan, openRows: ArrivalRow[], asOf: Date, messageText: string, picker?: Picker): Promise<Resolution[]> {
+export async function resolveScan(
+  scan: Scan,
+  openRows: ArrivalRow[],
+  asOf: Date,
+  messageText: string,
+  picker?: Picker,
+  exclude: ReadonlySet<string> = new Set()
+): Promise<Resolution[]> {
   if (scan.scene === 'not_a_delivery') return [];
   // A pile photo with nothing said: any "hints" are the model describing boxes. Part numbers still count.
   // With a message, its items belong to the pile, not to whichever box the model filed them under
@@ -77,7 +87,7 @@ export async function resolveScan(scan: Scan, openRows: ArrivalRow[], asOf: Date
   const pile = scan.scene === 'several_packages';
   const pileHints = [...new Set(scan.packages.flatMap((p) => p.itemHints))];
   const packagesIn = !pile ? scan.packages : scan.packages.map((p) => ({ ...p, itemHints: messageText.trim() ? pileHints : [] }));
-  let rows = eligibleRows(openRows, asOf);
+  let rows = eligibleRows(openRows, asOf).filter((r) => !exclude.has(orderKey(r)));
   const out: Resolution[] = [];
   for (const [i, pkg] of packagesIn.entries()) {
     for (const res of await resolvePackage(pkg, rows, asOf, messageText, picker)) {
