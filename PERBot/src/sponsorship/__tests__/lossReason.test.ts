@@ -90,6 +90,9 @@ test('buildStaleDm: stays under Slack’s 50-block cap and stamps only the cold 
   assert.ok(blocks.length <= 50, `${blocks.length} blocks`);
   assert.equal(coldShown.length, 8);
   assert.equal(coldShown[0].id, 'c0', 'oldest first');
+  const text = blocks.map((b) => b.text?.text ?? '').join('\n');
+  assert.match(text, /You have \*30\* sponsorship deal\(s\).*oldest 14 shown/);
+  assert.match(text, /\*20\* deal\(s\) contacted 30\+ days ago.*oldest 8 shown/);
 });
 
 test('buildStaleDm: nothing to say → no blocks', () => {

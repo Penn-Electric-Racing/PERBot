@@ -57,22 +57,23 @@ export function buildStaleDm(
 ): { text: string; blocks: any[]; coldShown: PipelineRow[] } {
   const coldShown = [...cold].sort((a, b) => (a.contactedAt ?? '').localeCompare(b.contactedAt ?? '')).slice(0, MAX_COLD_SHOWN);
   const coldIds = new Set(cold.map((d) => d.id));
-  const overdueShown = overdue
-    .filter((d) => !coldIds.has(d.id))
+  const overdueAll = overdue.filter((d) => !coldIds.has(d.id));
+  const overdueShown = [...overdueAll]
     .sort((a, b) => (a.nextActionDate ?? '').localeCompare(b.nextActionDate ?? ''))
     .slice(0, MAX_OVERDUE_SHOWN);
+  const shownNote = (shown: number, total: number) => (shown < total ? ` _(oldest ${shown} shown)_` : '');
 
   const blocks: any[] = [];
   const text: string[] = [];
   if (overdueShown.length > 0) {
-    const header = `:wave: You have *${overdueShown.length}* sponsorship deal(s) with an overdue next action:`;
+    const header = `:wave: You have *${overdueAll.length}* sponsorship deal(s) with an overdue next action:${shownNote(overdueShown.length, overdueAll.length)}`;
     blocks.push(...dealListBlocks(header, overdueShown, slackUserId, { lineFor: (d) => overdueLine(d).replace(/^• /, '') }));
     text.push(header, ...overdueShown.map(overdueLine));
   }
   if (coldShown.length > 0) {
     const header =
-      `:snowflake: *${coldShown.length}* deal(s) contacted ${COLD_AFTER_DAYS}+ days ago with no reply. ` +
-      'One tap each: still waiting, or close it out. Asked once per deal.';
+      `:snowflake: *${cold.length}* deal(s) contacted ${COLD_AFTER_DAYS}+ days ago with no reply.${shownNote(coldShown.length, cold.length)} ` +
+      'One tap each: still waiting, or close it out. Asked once per deal; the rest come next Wednesday.';
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text: header } });
     for (const d of coldShown) blocks.push(...coldDealBlocks(d, slackUserId, coldLine(d, now)));
     text.push(header, ...coldShown.map((d) => `• ${coldLine(d, now)}`));
