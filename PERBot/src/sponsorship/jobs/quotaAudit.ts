@@ -153,6 +153,60 @@ export function computeQuotaResults(
   });
 }
 
+// --- Follow-up gap ---------------------------------------------------------------
+
+/**
+ * Last season's heatmap (PER_sponsor_heatmap.html, 2026-10): of the 180 companies that
+ * never replied, 145 never got a single follow-up. Quoted in the post as the reason the
+ * line exists. Update it when the heatmap is regenerated.
+ */
+const NO_REPLY_NO_FOLLOWUP_PCT = 81;
+
+/**
+ * Deals contacted before this audit window opened (so 7+ days ago) that are still at
+ * Contacted (no reply moved them to In talks) and have had no touch since. `/sponsor stage`
+ * stamps Last contact on the contact day itself, so a follow-up is a Last contact later
+ * than that ET date (`/sponsor log` or a later stage move). Deals with no `Contacted at`
+ * stamp are left out: there's no evidence of when, or whether, outreach went out.
+ */
+export function followUpGapDeals(deals: PipelineRow[], window: AuditWindow): PipelineRow[] {
+  return deals.filter((d) => {
+    if (d.stage !== 'Contacted' || !d.contactedAt) return false;
+    const contacted = new Date(d.contactedAt);
+    if (contacted.getTime() >= window.start.getTime()) return false;
+    const contactedDayET = contacted.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    return !d.lastContact || d.lastContact.slice(0, 10) <= contactedDayET;
+  });
+}
+
+/**
+ * One line for the quota post: how many deals are waiting on a follow-up, split by DRI.
+ * Plain names, no @-mentions. The post already pings the people below quota, and this
+ * line shouldn't add more pings. Null when there's no gap, so the post stays short.
+ */
+export function buildFollowUpGapLine(
+  gap: PipelineRow[],
+  window: AuditWindow,
+  nameFor: (notionUserId: string) => string
+): string | null {
+  if (gap.length === 0) return null;
+  const perOwner = new Map<string, number>();
+  for (const d of gap) {
+    const owners = d.driUserIds.length ? d.driUserIds.map(nameFor) : ['unassigned'];
+    for (const name of owners) perOwner.set(name, (perOwner.get(name) ?? 0) + 1);
+  }
+  const owners = [...perOwner]
+    .sort(([a, n], [b, m]) => m - n || a.localeCompare(b))
+    .map(([name, n]) => `${name} ${n}`)
+    .join(' · ');
+  const noun = gap.length === 1 ? 'deal' : 'deals';
+  return (
+    `:mag: *Follow-up gap:* ${gap.length} ${noun} contacted before ${fmtDate(window.weekStartIso)} with no reply ` +
+    `and no follow-up since: ${owners}. _Last season, ${NO_REPLY_NO_FOLLOWUP_PCT}% of sponsors who never replied ` +
+    `never got a follow-up. Send one, then log it with \`/sponsor log <company> - <note>\`._`
+  );
+}
+
 export function fmtDate(iso: string): string {
   return new Date(`${iso}T12:00:00Z`).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
@@ -162,7 +216,8 @@ export function buildQuotaPost(
   results: QuotaAuditResult[],
   window: AuditWindow,
   quota: number,
-  mentionFor: (m: QuotaRosterMember) => string | null
+  mentionFor: (m: QuotaRosterMember) => string | null,
+  followUpGapLine: string | null = null
 ): string {
   // Most assignments first within each group, then by name — stable regardless of roster order.
   const byCountThenName = (a: QuotaAuditResult, b: QuotaAuditResult) =>
@@ -185,6 +240,7 @@ export function buildQuotaPost(
   } else if (total > 0) {
     lines.push(':tada: Everyone hit quota this week.');
   }
+  if (followUpGapLine) lines.push(followUpGapLine);
   lines.push(
     `_Record: <${config.sponsorship.quotaAuditUrl}|📋 Weekly Quota Audit>. Only the Slack command counts — ` +
       `claiming a lead or moving a card in Notion doesn't._`
@@ -277,10 +333,11 @@ export async function runQuotaAudit(
   // Stamp any Notion-side stage moves since the last hourly sync first (skipped in dry
   // runs — no writes — so counts may lag by up to an hour).
 
-  const [members, deals, notionUsers] = await Promise.all([
+  const [members, deals, notionUsers, contactedDeals] = await Promise.all([
     notion.queryQuotaRoster(),
     notion.queryDealsEditedSince(window.start.toISOString()),
     notion.listNotionUsers(),
+    notion.queryContactedDeals(),
   ]);
   if (members.length === 0) {
     logger.warn('Quota audit: the Ops Quota Roster has no active members — nothing to audit.');
@@ -302,7 +359,11 @@ export async function runQuotaAudit(
     if (!mention) logger.warn(`Quota audit: no Slack match for ${r.member.name} — will use their name.`);
     mentions.set(r.member.notionUserId, mention);
   }
-  const text = buildQuotaPost(results, window, quota, (m) => mentions.get(m.notionUserId) ?? null);
+  const gap = followUpGapDeals(contactedDeals, window);
+  logger.info(`Quota audit: follow-up gap ${gap.length} deal(s)${gap.length ? ` (${gap.map((d) => d.company).join(', ')})` : ''}.`);
+  const userNames = new Map(notionUsers.map((u) => [u.id, u.name]));
+  const gapLine = buildFollowUpGapLine(gap, window, (id) => userNames.get(id) ?? 'unknown');
+  const text = buildQuotaPost(results, window, quota, (m) => mentions.get(m.notionUserId) ?? null, gapLine);
 
   if (dryRun) {
     logger.info(`Quota audit (dry run) — would write ${results.length} audit rows and post to #${config.sponsorship.quotaChannel}:\n${text}`);
