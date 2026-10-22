@@ -22,6 +22,7 @@ function deal(over: Partial<PipelineRow> = {}): PipelineRow {
     lossReason: null,
     bankSourceId: null,
     coldAskedAt: null,
+    releaseAskedAt: null,
     ...over,
   };
 }

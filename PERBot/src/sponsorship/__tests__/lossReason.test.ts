@@ -32,6 +32,7 @@ function deal(over: Partial<PipelineRow> = {}): PipelineRow {
     lossReason: null,
     bankSourceId: null,
     coldAskedAt: null,
+    releaseAskedAt: null,
     ...over,
   };
 }
@@ -75,7 +76,7 @@ test('coldDealBlocks: four choices, each routed to an existing handler', () => {
 
 test('buildStaleDm: a deal both overdue and cold shows once, under cold', () => {
   const both = deal({ id: 'both', nextActionDate: '2026-09-20' });
-  const { blocks, coldShown } = buildStaleDm([both, deal({ id: 'late', nextActionDate: '2026-09-21' })], [both], 'U1');
+  const { blocks, coldShown } = buildStaleDm({ overdue: [both, deal({ id: 'late', nextActionDate: '2026-09-21' })], cold: [both] }, 'U1');
   const sections = blocks.filter((b) => b.block_id?.startsWith('deal:')).map((b) => b.block_id);
   assert.deepEqual(sections, ['deal:late', 'deal:both']);
   assert.deepEqual(coldShown.map((d) => d.id), ['both']);
@@ -86,20 +87,20 @@ test('buildStaleDm: stays under Slack’s 50-block cap and stamps only the cold 
   const cold = Array.from({ length: 20 }, (_, i) =>
     deal({ id: `c${i}`, contactedAt: `2026-08-${String(i + 1).padStart(2, '0')}T15:00:00.000Z` })
   );
-  const { blocks, coldShown } = buildStaleDm(overdue, cold, 'U1');
+  const { blocks, coldShown } = buildStaleDm({ overdue, cold }, 'U1');
   assert.ok(blocks.length <= 50, `${blocks.length} blocks`);
-  assert.equal(coldShown.length, 8);
+  assert.equal(coldShown.length, 6);
   assert.equal(coldShown[0].id, 'c0', 'oldest first');
   const text = blocks.map((b) => b.text?.text ?? '').join('\n');
-  assert.match(text, /You have \*30\* sponsorship deal\(s\).*oldest 14 shown/);
-  assert.match(text, /\*20\* deal\(s\) contacted 30\+ days ago.*oldest 8 shown/);
+  assert.match(text, /You have \*30\* sponsorship deal\(s\).*oldest 10 shown/);
+  assert.match(text, /\*20\* deal\(s\) contacted 30\+ days ago.*oldest 6 shown/);
 });
 
 test('buildStaleDm: nothing to say → no blocks', () => {
-  assert.equal(buildStaleDm([], [], 'U1').blocks.length, 0);
+  assert.equal(buildStaleDm({ overdue: [], cold: [] }, 'U1').blocks.length, 0);
 });
 
 test('buildStaleDm: the cold line says when it was contacted and how long ago', () => {
-  const { text } = buildStaleDm([], [deal()], 'U1', new Date('2026-10-14T13:00:00.000Z'));
+  const { text } = buildStaleDm({ overdue: [], cold: [deal()] }, 'U1', new Date('2026-10-14T13:00:00.000Z'));
   assert.match(text, /contacted Sep 2 \(41 days ago\), no reply yet/);
 });
