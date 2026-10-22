@@ -490,6 +490,11 @@ export class SponsorNotion {
     return this.queryPipeline({ timestamp: 'last_edited_time', last_edited_time: { on_or_after: sinceIso } });
   }
 
+  /** Every deal still at Contacted (no reply yet) — feeds the quota post's follow-up gap. */
+  async queryContactedDeals(): Promise<PipelineRow[]> {
+    return this.queryPipeline({ property: 'Stage', select: { equals: 'Contacted' } });
+  }
+
   /** Stamp `Contacted at` (first move out of Prospect) — quota credit; see jobs/quotaAudit.ts. */
   async writeContactedAt(pageId: string, iso: string): Promise<void> {
     await this.client.pages.update({

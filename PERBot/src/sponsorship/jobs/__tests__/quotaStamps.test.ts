@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { auditWindow, bulkStampInstants, computeQuotaResults } from '../quotaAudit.js';
+import { auditWindow, buildFollowUpGapLine, bulkStampInstants, computeQuotaResults, followUpGapDeals } from '../quotaAudit.js';
 import type { PipelineRow, QuotaRosterMember } from '../../types.js';
 
 function deal(over: Partial<PipelineRow> = {}): PipelineRow {
@@ -88,4 +88,60 @@ test('computeQuotaResults: claiming a lead earns nothing', () => {
   const members: QuotaRosterMember[] = [{ name: 'Arjun Sharma', notionUserId: 'u1' }];
   const claimed = deal({ id: 'c1', stage: 'Prospect', contactedAt: null });
   assert.equal(computeQuotaResults(members, [claimed], window, 3)[0].deals.length, 0);
+});
+
+// --- follow-up gap: contacted 7+ days ago, no reply, no touch since ------------------
+
+test('followUpGapDeals: flags a deal contacted before the window with no later touch', () => {
+  const stale = deal({ id: 'a', contactedAt: '2026-09-08T15:00:00.000Z', lastContact: '2026-09-08' });
+  const neverStamped = deal({ id: 'b', contactedAt: '2026-09-08T15:00:00.000Z' });
+  assert.deepEqual(followUpGapDeals([stale, neverStamped], WEEK).map((d) => d.id), ['a', 'b']);
+});
+
+test('followUpGapDeals: a later Last contact is a follow-up', () => {
+  const followed = deal({ contactedAt: '2026-09-08T15:00:00.000Z', lastContact: '2026-09-15' });
+  assert.equal(followUpGapDeals([followed], WEEK).length, 0);
+});
+
+test('followUpGapDeals: contacted inside this week is too fresh to count', () => {
+  const fresh = deal({ contactedAt: '2026-09-14T15:00:00.000Z', lastContact: '2026-09-14' });
+  assert.equal(followUpGapDeals([fresh], WEEK).length, 0);
+});
+
+test('followUpGapDeals: replied (In talks), unstamped, and Prospect deals are left out', () => {
+  const old = { contactedAt: '2026-09-08T15:00:00.000Z', lastContact: '2026-09-08' };
+  const rows = [
+    deal({ id: 'talks', stage: 'In talks', ...old }),
+    deal({ id: 'nostamp', contactedAt: null, lastContact: '2026-09-01' }),
+    deal({ id: 'prospect', stage: 'Prospect', ...old }),
+  ];
+  assert.equal(followUpGapDeals(rows, WEEK).length, 0);
+});
+
+test('followUpGapDeals: compares against the ET contact day, not the UTC one', () => {
+  // 01:30 UTC on Sep 9 is 21:30 ET on Sep 8, so a Sep 8 Last contact is the same touch.
+  const lateEvening = deal({ contactedAt: '2026-09-09T01:30:00.000Z', lastContact: '2026-09-08' });
+  assert.equal(followUpGapDeals([lateEvening], WEEK).length, 1);
+});
+
+test('buildFollowUpGapLine: null with no gap, otherwise counts per DRI, most first', () => {
+  assert.equal(buildFollowUpGapLine([], WEEK, (id) => id), null);
+  const gap = [
+    deal({ id: 'a', driUserIds: ['u1'] }),
+    deal({ id: 'b', driUserIds: ['u2'] }),
+    deal({ id: 'c', driUserIds: ['u2'] }),
+    deal({ id: 'd', driUserIds: [] }),
+  ];
+  const names: Record<string, string> = { u1: 'Priya', u2: 'Sam' };
+  const line = buildFollowUpGapLine(gap, WEEK, (id) => names[id])!;
+  assert.match(line, /4 deals contacted 7–30 days ago, no reply yet/);
+  assert.match(line, /Sam 2 · Priya 1 · unassigned 1/);
+  assert.doesNotMatch(line, /<@/);
+});
+
+test('followUpGapDeals: contacted more than 30 days before the audit has aged out', () => {
+  // WEEK ends Sep 19 10:00 ET, so the cutoff is Aug 20 10:00 ET.
+  const aged = deal({ id: 'aged', contactedAt: '2026-08-15T15:00:00.000Z', lastContact: '2026-08-15' });
+  const edge = deal({ id: 'edge', contactedAt: '2026-08-21T15:00:00.000Z', lastContact: '2026-08-21' });
+  assert.deepEqual(followUpGapDeals([aged, edge], WEEK).map((d) => d.id), ['edge']);
 });
