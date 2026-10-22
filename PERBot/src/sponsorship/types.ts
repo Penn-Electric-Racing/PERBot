@@ -64,6 +64,24 @@ export const WON_KINDS = ['Cash donation', 'In-kind donation', 'Valued discount'
 export type WonKind = (typeof WON_KINDS)[number];
 
 /**
+ * Why a deal was Lost: the Pipeline `Loss reason` select. The labels match the sponsor
+ * heatmap's categories (PER_sponsor_heatmap.html) so next season's table lines up with
+ * last season's. "No response" is set by PERBot (the Wednesday "gone cold" check). The
+ * rest are a tap after Lost, and all of them are optional.
+ */
+export const LOSS_REASONS = [
+  'No response',
+  'Replied, then went quiet',
+  "Policy: doesn't sponsor teams like ours",
+  'Sent to a form, application or another team',
+  'No budget or capacity right now',
+  'Regular price only, no discount',
+  "Couldn't do the work we needed",
+  'Bounced or wrong contact',
+] as const;
+export type LossReason = (typeof LOSS_REASONS)[number];
+
+/**
  * The structured JSON the LLM is forced to return. Contact data is deliberately
  * NOT part of this — the LLM never invents contacts (guardrail); those come only
  * from Hunter.
@@ -142,6 +160,12 @@ export interface PipelineRow {
    * The weekly quota audit credits the deal's DRI(s) in the week of this stamp.
    */
   contactedAt: string | null;
+  /** Why it was Lost (`Loss reason`); null when not Lost or nobody said. */
+  lossReason: LossReason | null;
+  /** The Bank row this deal graduated from (`Bank source` relation), if any. */
+  bankSourceId: string | null;
+  /** YYYY-MM-DD the Wednesday DM last asked about this deal going cold (`Cold asked`). */
+  coldAskedAt: string | null;
 }
 
 /** An active row of the 👥 Ops Quota Roster — a member held to the weekly quota. */

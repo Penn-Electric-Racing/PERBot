@@ -19,6 +19,9 @@ function deal(over: Partial<PipelineRow> = {}): PipelineRow {
     notes: '',
     createdTime: '2026-09-11T12:00:00.000Z',
     contactedAt: null,
+    lossReason: null,
+    bankSourceId: null,
+    coldAskedAt: null,
     ...over,
   };
 }

@@ -10,6 +10,8 @@ import {
   BankRowInput,
   BankStatus,
   Category,
+  LOSS_REASONS,
+  LossReason,
   NotionUser,
   PipelineDealInput,
   PipelineRow,
@@ -114,6 +116,11 @@ function fsaeProperties(scan: FsaeScan, dateIso: string): Record<string, any> {
 /** Pipeline date property PERBot stamps the first time a deal leaves Prospect. */
 export const CONTACTED_AT_PROP = 'Contacted at';
 
+/** Pipeline columns for loss reasons and the "gone cold" check; Bank column for a sponsor's form (ensureLossColumns). */
+export const LOSS_REASON_PROP = 'Loss reason';
+export const COLD_ASKED_PROP = 'Cold asked';
+export const APPLY_VIA_PROP = 'Apply via';
+
 /** Stages that mean outreach has gone out — reaching any of them from Prospect stamps `Contacted at`. */
 export const CONTACTED_STAGES: ReadonlySet<Stage> = new Set<Stage>(['Contacted', 'In talks', 'Won']);
 
@@ -166,6 +173,9 @@ function parsePipelineRow(page: any): PipelineRow {
     notes: readRichText(p['Notes']),
     createdTime: typeof page?.created_time === 'string' ? page.created_time : '',
     contactedAt: readDate(p[CONTACTED_AT_PROP]),
+    lossReason: (readSelect(p[LOSS_REASON_PROP]) as LossReason | null) ?? null,
+    bankSourceId: p['Bank source']?.relation?.[0]?.id ?? null,
+    coldAskedAt: readDate(p[COLD_ASKED_PROP]),
   };
 }
 
@@ -495,6 +505,112 @@ export class SponsorNotion {
     return this.queryPipeline({ property: 'Stage', select: { equals: 'Contacted' } });
   }
 
+  // --- Loss reasons + "gone cold" check ------------------------------------------
+
+  private lossColumnsReady: Promise<string[]> | null = null;
+
+  /**
+   * Add `Loss reason` (select) and `Cold asked` (date) to the Pipeline and `Apply via`
+   * (url) to the Bank if they're missing. Idempotent, and memoized per process so every
+   * write below can call it without a schema round-trip each time. With `create: false`
+   * it only reports what's missing (dry runs make no writes, schema included).
+   */
+  async ensureLossColumns(create = true): Promise<string[]> {
+    if (create && this.lossColumnsReady) return this.lossColumnsReady;
+    const run = (async () => {
+      const missing: string[] = [];
+      const targets: Array<[string, Record<string, any>]> = [
+        [
+          config.sponsorship.pipelineDataSourceId,
+          {
+            [LOSS_REASON_PROP]: { select: { options: LOSS_REASONS.map((name) => ({ name })) } },
+            [COLD_ASKED_PROP]: { date: {} },
+          },
+        ],
+        [config.sponsorship.bankDataSourceId, { [APPLY_VIA_PROP]: { url: {} } }],
+      ];
+      for (const [dsId, wanted] of targets) {
+        const ds: any = await this.client.dataSources.retrieve({ data_source_id: dsId });
+        const have = new Set(Object.keys(ds?.properties ?? {}));
+        const absent = Object.keys(wanted).filter((k) => !have.has(k));
+        missing.push(...absent);
+        if (create && absent.length) {
+          await this.client.dataSources.update({
+            data_source_id: dsId,
+            properties: Object.fromEntries(absent.map((k) => [k, wanted[k]])) as any,
+          });
+          logger.info(`Added ${absent.join(', ')} to data source ${dsId}.`);
+        }
+      }
+      return missing;
+    })();
+    if (create) this.lossColumnsReady = run.catch((err) => {
+      this.lossColumnsReady = null; // retry next time rather than caching a failure
+      throw err;
+    });
+    return run;
+  }
+
+  /**
+   * Deals still at Contacted whose `Contacted at` is before `beforeIso` and that the
+   * Wednesday DM hasn't asked about yet. `coldAskedColumn: false` (a dry run before the
+   * column exists) drops that condition instead of failing the query.
+   */
+  async queryColdDeals(beforeIso: string, coldAskedColumn = true): Promise<PipelineRow[]> {
+    const conditions: any[] = [
+      { property: 'Stage', select: { equals: 'Contacted' } },
+      { property: CONTACTED_AT_PROP, date: { before: beforeIso } },
+    ];
+    if (coldAskedColumn) conditions.push({ property: COLD_ASKED_PROP, date: { is_empty: true } });
+    return this.queryPipeline({ and: conditions });
+  }
+
+  /** Record that the Wednesday DM asked about this deal, so it's asked once, not weekly. */
+  async stampColdAsked(pageId: string, dateIso: string): Promise<void> {
+    await this.ensureLossColumns();
+    await this.client.pages.update({
+      page_id: pageId,
+      properties: { [COLD_ASKED_PROP]: { date: { start: dateIso } } } as any,
+    });
+  }
+
+  /** Set `Loss reason` and prepend a dated note. Doesn't touch Stage or Last contact. */
+  async writeLossReason(row: PipelineRow, reason: LossReason, dateIso: string): Promise<void> {
+    await this.ensureLossColumns();
+    const dated = `${dateIso}: Loss reason: ${reason} (via Slack)`;
+    await this.client.pages.update({
+      page_id: row.id,
+      properties: {
+        [LOSS_REASON_PROP]: { select: { name: reason } },
+        Notes: { rich_text: [{ text: { content: (row.notes ? `${dated}\n${row.notes}` : dated).slice(0, 1900) } }] },
+      } as any,
+    });
+    logger.info(`Loss reason on ${row.company} (${row.id}): ${reason}.`);
+  }
+
+  /** Set Next action + its date without logging a touch ("Still waiting" on a cold deal). */
+  async setNextAction(pageId: string, action: string, dateIso: string): Promise<void> {
+    await this.client.pages.update({
+      page_id: pageId,
+      properties: {
+        'Next action': { rich_text: [{ text: { content: action } }] },
+        'Next action date': { date: { start: dateIso } },
+      } as any,
+    });
+  }
+
+  /** Mark a Bank lead Dead, so ranking and claiming skip it next season. */
+  async markBankDead(pageId: string): Promise<void> {
+    await this.client.pages.update({ page_id: pageId, properties: { Status: { select: { name: 'Dead' } } } as any });
+    logger.info(`Bank lead ${pageId} → Dead.`);
+  }
+
+  /** Save the form / application a company routes sponsorship through on its Bank row. */
+  async writeBankApplyVia(pageId: string, url: string): Promise<void> {
+    await this.ensureLossColumns();
+    await this.client.pages.update({ page_id: pageId, properties: { [APPLY_VIA_PROP]: { url } } as any });
+  }
+
   /** Stamp `Contacted at` (first move out of Prospect) — quota credit; see jobs/quotaAudit.ts. */
   async writeContactedAt(pageId: string, iso: string): Promise<void> {
     await this.client.pages.update({
@@ -567,11 +683,16 @@ export class SponsorNotion {
    * Contacted / In talks / Won also stamps `Contacted at` (the quota audit's signal) — once
    * per deal, so bouncing a deal back and forth never earns a second credit.
    */
-  async setStage(row: PipelineRow, stage: Stage, dateIso: string, note?: string): Promise<void> {
+  async setStage(row: PipelineRow, stage: Stage, dateIso: string, note?: string, lossReason?: LossReason): Promise<void> {
     const properties: Record<string, any> = {
       Stage: { select: { name: stage } },
       'Last contact': { date: { start: dateIso } },
     };
+    if (lossReason) {
+      // Same write as the stage move, so Notes isn't rewritten twice from a stale copy.
+      await this.ensureLossColumns();
+      properties[LOSS_REASON_PROP] = { select: { name: lossReason } };
+    }
     if (CONTACTED_STAGES.has(stage) && !row.contactedAt) {
       properties[CONTACTED_AT_PROP] = { date: { start: new Date().toISOString() } };
     }

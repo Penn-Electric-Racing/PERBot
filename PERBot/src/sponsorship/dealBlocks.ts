@@ -1,4 +1,4 @@
-import { PipelineRow } from './types.js';
+import { LOSS_REASONS, LossReason, PipelineRow } from './types.js';
 
 /**
  * Block Kit for deal lists (Wednesday stale DM, Saturday digest's next actions,
@@ -16,8 +16,32 @@ export const DEAL_ACTION_IDS = {
   lost: 'deal_stage_lost',
   wonOpen: 'deal_won_open',
   touchOpen: 'deal_touch_open',
+  coldWait: 'deal_cold_wait',
+  coldNoReply: 'deal_cold_noreply',
+  coldSaidNo: 'deal_cold_saidno',
 } as const;
 export const DEAL_STAGE_ACTION_RE = /^deal_stage_(contacted|intalks|lost)$/;
+export const DEAL_COLD_ACTION_RE = /^deal_cold_(wait|noreply|saidno)$/;
+/** One button per Loss reason: `deal_loss_<index into LOSS_REASONS>`. */
+export const DEAL_LOSS_ACTION_RE = /^deal_loss_(\d+)$/;
+export const APPLY_VIA_MODAL_ID = 'sponsor_apply_via_modal';
+
+/** Short button labels for LOSS_REASONS (same order). The full label goes to Notion. */
+const LOSS_BUTTON_LABELS: Record<LossReason, string> = {
+  'No response': '🔕 No response',
+  'Replied, then went quiet': '🤐 Went quiet',
+  "Policy: doesn't sponsor teams like ours": "🚫 Policy: doesn't sponsor",
+  'Sent to a form, application or another team': '📄 Sent to a form',
+  'No budget or capacity right now': '💸 No budget now',
+  'Regular price only, no discount': '🏷️ Price only',
+  "Couldn't do the work we needed": "🛠️ Can't do the work",
+  'Bounced or wrong contact': '📭 Wrong contact',
+};
+
+export function lossReasonForAction(actionId: string): LossReason | null {
+  const m = DEAL_LOSS_ACTION_RE.exec(actionId);
+  return m ? LOSS_REASONS[Number(m[1])] ?? null : null;
+}
 export const WON_MODAL_ID = 'sponsor_won_modal';
 export const TOUCH_MODAL_ID = 'sponsor_touch_modal';
 
@@ -58,10 +82,15 @@ export function defaultDealLine(deal: PipelineRow): string {
   return `<${deal.url}|${deal.company || 'Untitled'}> — *${stage}*${next}${due}`;
 }
 
-/** Buttons that make sense from this stage (none once Won/Lost). */
+/**
+ * Buttons that make sense from this stage. None once Won. A Lost deal with no reason
+ * yet gets the reason picker instead. It's optional, so ignoring it leaves the deal
+ * Lost with the reason blank.
+ */
 export function buttonsFor(deal: PipelineRow, value: DealButtonValue): any[] {
   const stage = deal.stage ?? 'Prospect';
-  if (stage === 'Won' || stage === 'Lost') return [];
+  if (stage === 'Lost') return deal.lossReason ? [] : lossReasonButtons(value);
+  if (stage === 'Won') return [];
   const out: any[] = [];
   if (stage === 'Prospect') out.push(button('📨 Contacted', DEAL_ACTION_IDS.contacted, value, 'primary'));
   if (stage === 'Prospect' || stage === 'Contacted') {
@@ -71,6 +100,32 @@ export function buttonsFor(deal: PipelineRow, value: DealButtonValue): any[] {
   out.push(button('❌ Lost', DEAL_ACTION_IDS.lost, value));
   out.push(button('📝 Log touch', DEAL_ACTION_IDS.touchOpen, value));
   return out;
+}
+
+/** The reason picker: one tap writes `Loss reason`. */
+export function lossReasonButtons(value: DealButtonValue): any[] {
+  return LOSS_REASONS.map((reason, i) => button(LOSS_BUTTON_LABELS[reason], `deal_loss_${i}`, value));
+}
+
+/**
+ * A deal at Contacted for 30+ days with no reply (the Wednesday DM's "gone cold"
+ * section). After a click, actions.ts swaps these for the normal stage buttons.
+ */
+export function coldDealBlocks(deal: PipelineRow, slackUserId: string, line: string): any[] {
+  const value: DealButtonValue = { d: deal.id, u: slackUserId };
+  return [
+    { type: 'section', block_id: dealSectionId(deal.id), text: { type: 'mrkdwn', text: line } },
+    {
+      type: 'actions',
+      block_id: dealActionsId(deal.id),
+      elements: [
+        button('⏳ Still waiting', DEAL_ACTION_IDS.coldWait, value),
+        button('💬 They replied', DEAL_ACTION_IDS.inTalks, value, 'primary'),
+        button('🔕 No reply, close it', DEAL_ACTION_IDS.coldNoReply, value),
+        button('👎 They said no', DEAL_ACTION_IDS.coldSaidNo, value),
+      ],
+    },
+  ];
 }
 
 /**
