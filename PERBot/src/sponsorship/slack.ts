@@ -7,7 +7,7 @@ import { findMatchingProspects, scoutCompanies } from './discovery.js';
 import { draftOutreachEmail } from './emailDraft.js';
 import { DomainResolutionError, enrichCompany } from './enrichCompany.js';
 import { indexNotionUsers, resolveSlackHandles, slackUserToNotionId } from './identity.js';
-import { dealListBlocks } from './dealBlocks.js';
+import { dealListBlocks, lossReasonButtons } from './dealBlocks.js';
 import { computeQuotaResults, currentAuditWindow, formatQuotaStanding } from './jobs/quotaAudit.js';
 import { announceWonNow, totalRaised } from './jobs/winPost.js';
 import { extractHostname, looksLikeDomain } from './domain.js';
@@ -854,7 +854,7 @@ function parseStage(arg: string): { company: string; stage: Stage } | null {
   return null;
 }
 
-async function handleStage(respond: RespondFn, arg: string): Promise<void> {
+async function handleStage(respond: RespondFn, userId: string, arg: string): Promise<void> {
   const parsed = parseStage(arg);
   if (!parsed) {
     await respond({
@@ -869,10 +869,20 @@ async function handleStage(respond: RespondFn, arg: string): Promise<void> {
 
   await notion.setStage(deal, parsed.stage, todayIsoET());
   const tip = parsed.stage === 'Won' ? ' _(tip: use `/sponsor won <company> <amount>` to record the $ and post the win)_' : '';
-  await respond({
-    response_type: 'ephemeral',
-    text: `✅ Moved <${deal.url}|${deal.company}> to *${parsed.stage}*.${tip}`,
-  });
+  const text = `✅ Moved <${deal.url}|${deal.company}> to *${parsed.stage}*.${tip}`;
+  if (parsed.stage === 'Lost' && !deal.lossReason) {
+    // Same optional one-tap reason as the Lost button (handled in actions.ts).
+    await respond({
+      response_type: 'ephemeral',
+      text,
+      blocks: [
+        { type: 'section', text: { type: 'mrkdwn', text: `${text}\n_Why? One tap, optional:_` } },
+        { type: 'actions', elements: lossReasonButtons({ d: deal.id, u: userId }) },
+      ],
+    });
+    return;
+  }
+  await respond({ response_type: 'ephemeral', text });
 }
 
 // --- /sponsor leaderboard -------------------------------------------------------
@@ -1077,7 +1087,7 @@ export function registerSponsorCommands(app: App): void {
 
         case 'stage':
           await ack();
-          await handleStage(respond, arg);
+          await handleStage(respond, command.user_id, arg);
           break;
 
         case 'score':
