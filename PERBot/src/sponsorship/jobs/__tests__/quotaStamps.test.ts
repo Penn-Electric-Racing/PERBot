@@ -134,7 +134,14 @@ test('buildFollowUpGapLine: null with no gap, otherwise counts per DRI, most fir
   ];
   const names: Record<string, string> = { u1: 'Priya', u2: 'Sam' };
   const line = buildFollowUpGapLine(gap, WEEK, (id) => names[id])!;
-  assert.match(line, /4 deals contacted before Sep 12/);
+  assert.match(line, /4 deals contacted 7–30 days ago, no reply yet/);
   assert.match(line, /Sam 2 · Priya 1 · unassigned 1/);
   assert.doesNotMatch(line, /<@/);
+});
+
+test('followUpGapDeals: contacted more than 30 days before the audit has aged out', () => {
+  // WEEK ends Sep 19 10:00 ET, so the cutoff is Aug 20 10:00 ET.
+  const aged = deal({ id: 'aged', contactedAt: '2026-08-15T15:00:00.000Z', lastContact: '2026-08-15' });
+  const edge = deal({ id: 'edge', contactedAt: '2026-08-21T15:00:00.000Z', lastContact: '2026-08-21' });
+  assert.deepEqual(followUpGapDeals([aged, edge], WEEK).map((d) => d.id), ['edge']);
 });

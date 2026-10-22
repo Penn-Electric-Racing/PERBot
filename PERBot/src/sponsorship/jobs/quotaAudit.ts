@@ -163,17 +163,27 @@ export function computeQuotaResults(
 const NO_REPLY_NO_FOLLOWUP_PCT = 81;
 
 /**
- * Deals contacted before this audit window opened (so 7+ days ago) that are still at
- * Contacted (no reply moved them to In talks) and have had no touch since. `/sponsor stage`
- * stamps Last contact on the contact day itself, so a follow-up is a Last contact later
- * than that ET date (`/sponsor log` or a later stage move). Deals with no `Contacted at`
- * stamp are left out: there's no evidence of when, or whether, outreach went out.
+ * Deals contacted more than this many days before the audit drop out of the gap. Past a
+ * month a nudge is rarely worth it, and an unbounded backlog (128 deals on the first dry
+ * run, 2026-10-22) is a number people stop reading.
+ */
+const FOLLOW_UP_MAX_AGE_DAYS = 30;
+
+/**
+ * Deals contacted 7–30 days before the audit (before this window opened, but not more
+ * than FOLLOW_UP_MAX_AGE_DAYS ago) that are still at Contacted, so no reply has moved
+ * them to In talks. Members rarely run `/sponsor log`. They only move stages, so the
+ * post words this as "no reply yet", not "no follow-up". A Last contact after the
+ * contact day (ET) still takes a deal out, so a touch that was logged counts. Deals with
+ * no `Contacted at` stamp are left out: there's no evidence of when, or whether,
+ * outreach went out.
  */
 export function followUpGapDeals(deals: PipelineRow[], window: AuditWindow): PipelineRow[] {
+  const oldest = window.end.getTime() - FOLLOW_UP_MAX_AGE_DAYS * 86_400_000;
   return deals.filter((d) => {
     if (d.stage !== 'Contacted' || !d.contactedAt) return false;
     const contacted = new Date(d.contactedAt);
-    if (contacted.getTime() >= window.start.getTime()) return false;
+    if (contacted.getTime() >= window.start.getTime() || contacted.getTime() < oldest) return false;
     const contactedDayET = contacted.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     return !d.lastContact || d.lastContact.slice(0, 10) <= contactedDayET;
   });
@@ -201,9 +211,9 @@ export function buildFollowUpGapLine(
     .join(' · ');
   const noun = gap.length === 1 ? 'deal' : 'deals';
   return (
-    `:mag: *Follow-up gap:* ${gap.length} ${noun} contacted before ${fmtDate(window.weekStartIso)} with no reply ` +
-    `and no follow-up since: ${owners}. _Last season, ${NO_REPLY_NO_FOLLOWUP_PCT}% of sponsors who never replied ` +
-    `never got a follow-up. Send one, then log it with \`/sponsor log <company> - <note>\`._`
+    `:mag: *Follow-up gap:* ${gap.length} ${noun} contacted 7–${FOLLOW_UP_MAX_AGE_DAYS} days ago, no reply yet: ` +
+    `${owners}. _Last season, ${NO_REPLY_NO_FOLLOWUP_PCT}% of sponsors who never replied never got a follow-up. ` +
+    `Send one, or mark it \`/sponsor stage <company> Lost\` if it's dead._`
   );
 }
 
