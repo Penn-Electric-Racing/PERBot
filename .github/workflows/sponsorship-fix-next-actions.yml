@@ -1,0 +1,36 @@
+name: Sponsorship — One-off Next action cleanup
+
+# One-time cleanup (2026-10-22): deals past Prospect that still say "Send first outreach".
+# Run once with apply off to review the plan in the log, then once with apply on. Safe to
+# re-run, since fixed deals no longer match. Delete this workflow once it has been applied.
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: 'Write the changes (off = print the plan only)'
+        type: boolean
+        default: false
+
+jobs:
+  fix-next-actions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: PERBot/package-lock.json
+
+      - name: Install dependencies
+        working-directory: PERBot
+        run: npm ci
+
+      - name: Fix leftover "Send first outreach" next actions
+        working-directory: PERBot
+        run: npm run fix-next-actions
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          APPLY: ${{ inputs.apply }}

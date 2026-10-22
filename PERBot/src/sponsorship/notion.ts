@@ -4,6 +4,7 @@ import { logger } from '../utils/logger.js';
 import { todayIsoET } from './dates.js';
 import { extractHostname } from './domain.js';
 import { FsaeScan, formatFsaeEvidence } from './fsaeTies.js';
+import { NextActionChange, nextActionAfterTouch, nextActionForStage, nextActionProperties } from './nextActions.js';
 import type { SponsorScores } from './scoring.js';
 import {
   BankLeadRow,
@@ -120,6 +121,8 @@ export const CONTACTED_AT_PROP = 'Contacted at';
 export const LOSS_REASON_PROP = 'Loss reason';
 export const COLD_ASKED_PROP = 'Cold asked';
 export const APPLY_VIA_PROP = 'Apply via';
+/** Pipeline date: when the Wednesday DM asked "sent it, or release it?" about a claim never contacted. */
+export const RELEASE_ASKED_PROP = 'Release asked';
 
 /** Stages that mean outreach has gone out — reaching any of them from Prospect stamps `Contacted at`. */
 export const CONTACTED_STAGES: ReadonlySet<Stage> = new Set<Stage>(['Contacted', 'In talks', 'Won']);
@@ -176,6 +179,7 @@ function parsePipelineRow(page: any): PipelineRow {
     lossReason: (readSelect(p[LOSS_REASON_PROP]) as LossReason | null) ?? null,
     bankSourceId: p['Bank source']?.relation?.[0]?.id ?? null,
     coldAskedAt: readDate(p[COLD_ASKED_PROP]),
+    releaseAskedAt: readDate(p[RELEASE_ASKED_PROP]),
   };
 }
 
@@ -510,7 +514,7 @@ export class SponsorNotion {
   private lossColumnsReady: Promise<string[]> | null = null;
 
   /**
-   * Add `Loss reason` (select) and `Cold asked` (date) to the Pipeline and `Apply via`
+   * Add `Loss reason` (select), `Cold asked` and `Release asked` (dates) to the Pipeline and `Apply via`
    * (url) to the Bank if they're missing. Idempotent, and memoized per process so every
    * write below can call it without a schema round-trip each time. With `create: false`
    * it only reports what's missing (dry runs make no writes, schema included).
@@ -525,6 +529,7 @@ export class SponsorNotion {
           {
             [LOSS_REASON_PROP]: { select: { options: LOSS_REASONS.map((name) => ({ name })) } },
             [COLD_ASKED_PROP]: { date: {} },
+            [RELEASE_ASKED_PROP]: { date: {} },
           },
         ],
         [config.sponsorship.bankDataSourceId, { [APPLY_VIA_PROP]: { url: {} } }],
@@ -563,6 +568,49 @@ export class SponsorNotion {
     ];
     if (coldAskedColumn) conditions.push({ property: COLD_ASKED_PROP, date: { is_empty: true } });
     return this.queryPipeline({ and: conditions });
+  }
+
+  /** Set (or clear) Next action + date in one write. Used by the one-time cleanup. */
+  async applyNextAction(pageId: string, change: NextActionChange): Promise<void> {
+    await this.client.pages.update({ page_id: pageId, properties: nextActionProperties(change) as any });
+  }
+
+  /** Deals still at Prospect (claimed, never contacted) created before `beforeIso`. */
+  async queryStaleClaims(beforeIso: string): Promise<PipelineRow[]> {
+    return this.queryPipeline({
+      and: [
+        { property: 'Stage', select: { equals: 'Prospect' } },
+        { timestamp: 'created_time', created_time: { before: beforeIso } },
+      ],
+    });
+  }
+
+  /** Record that the Wednesday DM asked "sent it, or release it?" about this claim. */
+  async stampReleaseAsked(pageId: string, dateIso: string): Promise<void> {
+    await this.ensureLossColumns();
+    await this.client.pages.update({
+      page_id: pageId,
+      properties: { [RELEASE_ASKED_PROP]: { date: { start: dateIso } } } as any,
+    });
+  }
+
+  /**
+   * Give a claim back: the Bank lead returns to Available with no claimer, so anyone can
+   * `/sponsor claim` it, and the Prospect deal goes to Notion's trash (restorable for 30
+   * days). It isn't marked Lost, because nobody ever asked the company, so it shouldn't
+   * count as a loss.
+   */
+  async releaseClaim(row: PipelineRow): Promise<void> {
+    if (row.bankSourceId) {
+      await this.client.pages.update({
+        page_id: row.bankSourceId,
+        // Unlink the deal too: `/sponsor claim` refuses a lead whose Pipeline deal relation is
+        // non-empty, and a trashed page can linger there. (Restoring the deal from trash won't relink it.)
+        properties: { Status: { select: { name: 'Available' } }, 'Claimed by': { people: [] }, 'Pipeline deal': { relation: [] } } as any,
+      });
+    }
+    await this.client.pages.update({ page_id: row.id, in_trash: true } as any);
+    logger.info(`Released claim on ${row.company || 'Untitled'} (${row.id})${row.bankSourceId ? ', Bank lead → Available' : ''}.`);
   }
 
   /** Record that the Wednesday DM asked about this deal, so it's asked once, not weekly. */
@@ -639,11 +687,13 @@ export class SponsorNotion {
   async logTouch(row: PipelineRow, note: string, dateIso: string): Promise<void> {
     const dated = `${dateIso}: ${note}`;
     const merged = row.notes ? `${dated}\n${row.notes}` : dated;
+    const followUp = nextActionAfterTouch(row, dateIso);
     await this.client.pages.update({
       page_id: row.id,
       properties: {
         'Last contact': { date: { start: dateIso } },
         Notes: { rich_text: [{ text: { content: merged.slice(0, 1900) } }] },
+        ...(followUp ? nextActionProperties(followUp) : {}),
       } as any,
     });
     logger.info(`Logged touch on ${row.company} (${row.id}).`);
@@ -667,6 +717,8 @@ export class SponsorNotion {
       'Last contact': { date: { start: dateIso } },
     };
     if (kind) properties['Won kind'] = { select: { name: kind } };
+    const next = nextActionForStage(row, 'Won', dateIso);
+    if (next) Object.assign(properties, nextActionProperties(next));
     if (row.dealValue == null) properties['Deal value ($)'] = { number: amountUsd };
     // Won straight from Prospect still means outreach happened — date it for the quota audit.
     if (!row.contactedAt) properties[CONTACTED_AT_PROP] = { date: { start: new Date().toISOString() } };
@@ -696,6 +748,9 @@ export class SponsorNotion {
     if (CONTACTED_STAGES.has(stage) && !row.contactedAt) {
       properties[CONTACTED_AT_PROP] = { date: { start: new Date().toISOString() } };
     }
+    // Swap PERBot's own Next action ("Send first outreach") for the one this stage needs.
+    const next = nextActionForStage(row, stage, dateIso);
+    if (next) Object.assign(properties, nextActionProperties(next));
     if (note) {
       // Same dated-line convention as logTouch, so Slack-driven moves show in the audit trail.
       const merged = `${dateIso}: ${note}${row.notes ? `\n${row.notes}` : ''}`;

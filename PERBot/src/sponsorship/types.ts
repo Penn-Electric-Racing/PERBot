@@ -166,6 +166,8 @@ export interface PipelineRow {
   bankSourceId: string | null;
   /** YYYY-MM-DD the Wednesday DM last asked about this deal going cold (`Cold asked`). */
   coldAskedAt: string | null;
+  /** YYYY-MM-DD the Wednesday DM asked "sent it, or release it?" about this claim (`Release asked`). */
+  releaseAskedAt: string | null;
 }
 
 /** An active row of the 👥 Ops Quota Roster — a member held to the weekly quota. */

@@ -19,6 +19,8 @@ export const DEAL_ACTION_IDS = {
   coldWait: 'deal_cold_wait',
   coldNoReply: 'deal_cold_noreply',
   coldSaidNo: 'deal_cold_saidno',
+  followedUp: 'deal_followed_up',
+  release: 'deal_release',
 } as const;
 export const DEAL_STAGE_ACTION_RE = /^deal_stage_(contacted|intalks|lost)$/;
 export const DEAL_COLD_ACTION_RE = /^deal_cold_(wait|noreply|saidno)$/;
@@ -96,6 +98,8 @@ export function buttonsFor(deal: PipelineRow, value: DealButtonValue): any[] {
   if (stage === 'Prospect' || stage === 'Contacted') {
     out.push(button('💬 In talks', DEAL_ACTION_IDS.inTalks, value, stage === 'Contacted' ? 'primary' : undefined));
   }
+  // One tap instead of the Log touch modal: stamps Last contact and pushes the follow-up a week out.
+  if (stage === 'Contacted') out.push(button('📨 Followed up', DEAL_ACTION_IDS.followedUp, value));
   out.push(button('🏆 Won', DEAL_ACTION_IDS.wonOpen, value, stage === 'In talks' ? 'primary' : undefined));
   out.push(button('❌ Lost', DEAL_ACTION_IDS.lost, value));
   out.push(button('📝 Log touch', DEAL_ACTION_IDS.touchOpen, value));
@@ -126,6 +130,36 @@ export function coldDealBlocks(deal: PipelineRow, slackUserId: string, line: str
       ],
     },
   ];
+}
+
+/**
+ * A claim still at Prospect two weeks on (the Wednesday DM's "claimed, not contacted"
+ * section). Released automatically a week after asking if it's still at Prospect.
+ */
+export function staleClaimBlocks(deal: PipelineRow, slackUserId: string, line: string): any[] {
+  const value: DealButtonValue = { d: deal.id, u: slackUserId };
+  return [
+    { type: 'section', block_id: dealSectionId(deal.id), text: { type: 'mrkdwn', text: line } },
+    {
+      type: 'actions',
+      block_id: dealActionsId(deal.id),
+      elements: [
+        button('📨 Sent it', DEAL_ACTION_IDS.contacted, value, 'primary'),
+        button('🔓 Release it', DEAL_ACTION_IDS.release, value),
+      ],
+    },
+  ];
+}
+
+/** Close out one deal in a message: keep its first line, append `note`, drop its buttons (a released deal has none). */
+export function finalizeDealBlocks(blocks: any[], dealId: string, note: string): any[] {
+  return blocks
+    .filter((b) => b?.block_id !== dealActionsId(dealId))
+    .map((b) => {
+      if (b?.block_id !== dealSectionId(dealId)) return b;
+      const line = String(b?.text?.text ?? '').split('\n')[0];
+      return { ...b, text: { type: 'mrkdwn', text: `${line}\n_${note}_` } };
+    });
 }
 
 /**

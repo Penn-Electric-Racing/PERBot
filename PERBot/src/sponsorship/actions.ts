@@ -10,12 +10,14 @@ import {
   DEAL_LOSS_ACTION_RE,
   DEAL_STAGE_ACTION_RE,
   decodeDealValue,
+  finalizeDealBlocks,
   lossReasonForAction,
   replaceDealBlocks,
   TOUCH_MODAL_ID,
   WON_MODAL_ID,
 } from './dealBlocks.js';
 import { announceWonNow } from './jobs/winPost.js';
+import { CHECK_REPLY_ACTION, nextActionAfterTouch } from './nextActions.js';
 import { SponsorNotion } from './notion.js';
 import { parseWon } from './slack.js';
 import { LossReason, PipelineRow, Stage, WON_KINDS, WonKind } from './types.js';
@@ -144,6 +146,59 @@ export function registerSponsorActions(app: App): void {
     }
   });
 
+  // --- 📨 Followed up (one tap, no modal) -------------------------------------------
+  app.action(DEAL_ACTION_IDS.followedUp, async ({ ack, body, action, respond }) => {
+    await ack();
+    const value = decodeDealValue((action as any)?.value);
+    const clicker = (body as any)?.user?.id as string | undefined;
+    if (!value || !clicker) return;
+    if (clicker !== value.u) {
+      await respond({ response_type: 'ephemeral', replace_original: false, text: "That deal list isn't yours — ask its DRI to update it." });
+      return;
+    }
+    try {
+      const deal = await notion.fetchDeal(value.d);
+      const today = todayIsoET();
+      await notion.logTouch(deal, 'Followed up (via Slack)', today);
+      const next = nextActionAfterTouch(deal, today);
+      const updated: PipelineRow = { ...deal, lastContact: today, ...(next ? { nextAction: next.action, nextActionDate: next.dateIso } : {}) };
+      const note = `📨 Followed up · ${nowTimeET()}${next?.dateIso ? ` · next nudge ${next.dateIso} if still no reply` : ''}`;
+      await rewriteDeal(respond, body, updated, value.u, note, deal.stage);
+      logger.info(`Followed up: ${clicker} on ${deal.company}.`);
+    } catch (err) {
+      logger.error('Followed-up button failed', err);
+      await respond({ response_type: 'ephemeral', replace_original: false, text: '✗ Could not log that in Notion — try `/sponsor log <company> - followed up`.' });
+    }
+  });
+
+  // --- 🔓 Release a claim that was never contacted --------------------------------------
+  app.action(DEAL_ACTION_IDS.release, async ({ ack, body, action, respond }) => {
+    await ack();
+    const value = decodeDealValue((action as any)?.value);
+    const clicker = (body as any)?.user?.id as string | undefined;
+    if (!value || !clicker) return;
+    if (clicker !== value.u) {
+      await respond({ response_type: 'ephemeral', replace_original: false, text: "That claim isn't yours — ask its DRI." });
+      return;
+    }
+    try {
+      const deal = await notion.fetchDeal(value.d);
+      if (deal.stage !== 'Prospect') {
+        await rewriteDeal(respond, body, deal, value.u, `Already at *${deal.stage ?? 'Prospect'}* in Notion — not released`, deal.stage);
+        return;
+      }
+      await notion.releaseClaim(deal);
+      const note = '🔓 Released back to the Bank — anyone can `/sponsor claim` it now';
+      const existing: any[] | undefined = (body as any)?.message?.blocks;
+      if (existing) await respond({ replace_original: true, blocks: finalizeDealBlocks(existing, deal.id, note), text: `${deal.company}: released` });
+      else await respond({ response_type: 'ephemeral', replace_original: false, text: `${deal.company}: ${note}` });
+      logger.info(`Release: ${clicker} released ${deal.company}.`);
+    } catch (err) {
+      logger.error('Release button failed', err);
+      await respond({ response_type: 'ephemeral', replace_original: false, text: '✗ Could not release that claim — try again, or move it in Notion.' });
+    }
+  });
+
   // --- Gone cold: Still waiting / No reply, close it / They said no ------------------
   app.action(DEAL_COLD_ACTION_RE, async ({ ack, body, action, respond }) => {
     await ack();
@@ -164,7 +219,7 @@ export function registerSponsorActions(app: App): void {
         note = `Already at *${deal.stage ?? 'Prospect'}* in Notion`;
       } else if (actionId === DEAL_ACTION_IDS.coldWait) {
         const due = isoDaysFromNowET(COLD_WAIT_DAYS);
-        const nextAction = 'Check for a reply (no reply after 30 days)';
+        const nextAction = CHECK_REPLY_ACTION;
         await notion.setNextAction(deal.id, nextAction, due);
         updated = { ...deal, nextAction, nextActionDate: due };
         note = `⏳ Still waiting · next check ${due} (it'll be in the Wednesday DM once due)`;
