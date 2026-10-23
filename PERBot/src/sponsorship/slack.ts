@@ -44,7 +44,24 @@ const USAGE = [
   '• `/sponsor leaderboard` — who’s raised what: $ won + active deals per person (only you see it)',
   '• `/sponsor quota` — where you (and the team) stand on this week’s quota (3 deals moved to Contacted) before Saturday’s audit',
   '• `/sponsor me` — show your active deals + next actions',
+  '• `/sponsor heatmap` — last season’s sponsor heatmap: what goes with a reply or a deal, and why companies said no',
 ].join('\n');
+
+/**
+ * The sponsor heatmap (PER_sponsor_heatmap.html), hosted as a page. It's built by hand from
+ * the team's sponsorship email, not from Notion, so it's a snapshot: update the date when the
+ * page is rebuilt. The link opens only for people the page has been shared with.
+ */
+export const HEATMAP_URL = 'https://claude.ai/artifact/MYtapBxCSWs2vZQG6eeh9W';
+export const HEATMAP_AS_OF = 'Sep 28, 2026';
+
+export function heatmapText(): string {
+  return [
+    `:bar_chart: *<${HEATMAP_URL}|Sponsor heatmap>* (data as of ${HEATMAP_AS_OF})`,
+    'What tends to go with a reply, a deal or a renewal, by company size and outreach channel, plus why companies didn’t give anything.',
+    '_Can’t open it? Ask Arjun to share the page with you._',
+  ].join('\n');
+}
 
 function fmtMoney(n: number): string {
   return `$${Math.round(n).toLocaleString('en-US')}`;
@@ -1129,6 +1146,10 @@ export function registerSponsorCommands(app: App): void {
         case 'me':
           await ack();
           await handleMe(client, respond, command.user_id);
+          break;
+
+        case 'heatmap':
+          await ack({ response_type: 'ephemeral', text: heatmapText() });
           break;
 
         default:
