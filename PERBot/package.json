@@ -5,6 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/app.ts",
+    "dev:test": "PERBOT_ENV=dev tsx watch src/app.ts",
+    "index:dev": "PERBOT_ENV=dev tsx src/indexer.ts",
+    "start:dev": "PERBOT_ENV=dev node --enable-source-maps dist/app.js",
     "start": "node --enable-source-maps dist/app.js",
     "start:cloud": "node scripts-run-cloud.mjs",
     "build": "tsc -p tsconfig.json",

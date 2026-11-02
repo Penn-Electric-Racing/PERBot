@@ -1,7 +1,5 @@
-import dotenv from 'dotenv';
 import path from 'node:path';
-
-dotenv.config();
+import { isDev, prodDefault } from './env.js';
 
 function required(name: string): string {
   const value = process.env[name]?.trim();
@@ -34,13 +32,22 @@ function optionalString(name: string, fallback: string): string {
   return process.env[name]?.trim() || fallback;
 }
 
+/** Like optionalString, but the fallback is a prod-only Notion ID/URL: dev mode never falls back to it. */
+function prodString(name: string, prodFallback: string): string {
+  return optionalString(name, prodDefault(prodFallback));
+}
+
 function optionalList(name: string, fallback: string[] = []): string[] {
   const value = process.env[name]?.trim();
   if (!value) return fallback;
   return value.split(',').map((item) => item.trim()).filter(Boolean);
 }
 
+// Separate on-disk index so a dev run never overwrites the prod one (and vice versa).
+const dataDir = isDev ? './data-dev' : './data';
+
 export const config = {
+  isDev,
   slack: {
     botToken: required('SLACK_BOT_TOKEN'),
     // Only Socket Mode (the main app) needs the app token; scheduled jobs that import
@@ -65,7 +72,7 @@ export const config = {
     indexDataSourceIds: optionalList('NOTION_INDEX_DATA_SOURCE_IDS'),
     // ⚙️ PERBot Job Log — per-day run records so late/duplicate cron fires never re-send
     // (see utils/schedule.ts). Empty disables dedup (with a warning).
-    jobLogDataSourceId: optionalString('NOTION_JOB_LOG_DS_ID', 'db0c6a0d-e10b-4edf-97fb-6f381d15a465'),
+    jobLogDataSourceId: prodString('NOTION_JOB_LOG_DS_ID', 'db0c6a0d-e10b-4edf-97fb-6f381d15a465'),
   },
   openai: {
     apiKey: process.env.OPENAI_API_KEY?.trim() || '',
@@ -88,42 +95,43 @@ export const config = {
   },
   sponsorship: {
     // Notion data-source IDs for the Sponsorship CRM (see CLAUDE.md "Notion IDs").
-    bankDataSourceId: optionalString('SPONSOR_BANK_DS_ID', 'fd42b16b-2833-42c3-b72d-f6322145ed4e'),
-    pipelineDataSourceId: optionalString('SPONSOR_PIPELINE_DS_ID', '64bb332e-543c-4286-9e67-c3bda963cfdd'),
+    bankDataSourceId: prodString('SPONSOR_BANK_DS_ID', 'fd42b16b-2833-42c3-b72d-f6322145ed4e'),
+    pipelineDataSourceId: prodString('SPONSOR_PIPELINE_DS_ID', '64bb332e-543c-4286-9e67-c3bda963cfdd'),
     // Won-deal win posts land here; also the semester goal for the running % line.
     winPostChannel: optionalString('SPONSOR_WIN_CHANNEL', 'operations'),
     semesterGoalUsd: optionalNumber('SPONSOR_SEMESTER_GOAL_USD', 100000),
     // The team's outreach template page ("Sponsorship Email Template" under REV12
     // Operations) — fetched live by /sponsor email so ops can edit it without a deploy.
-    emailTemplatePageId: optionalString('SPONSOR_EMAIL_TEMPLATE_PAGE_ID', '393560bc-c039-8097-be19-fdc8876bef9b'),
+    emailTemplatePageId: prodString('SPONSOR_EMAIL_TEMPLATE_PAGE_ID', '393560bc-c039-8097-be19-fdc8876bef9b'),
     // Weekly quota audit (Saturday 10am ET): who's on the hook (👥 Ops Quota Roster), the
     // per-week record (📋 Weekly Quota Audit), where the call-out lands, and the bar.
-    quotaRosterDataSourceId: optionalString('SPONSOR_QUOTA_ROSTER_DS_ID', '62729c68-535c-4dd0-a633-2feaf6e2b853'),
-    quotaAuditDataSourceId: optionalString('SPONSOR_QUOTA_AUDIT_DS_ID', '784770f3-8276-4347-89e0-d677c53576a2'),
-    quotaAuditUrl: optionalString('SPONSOR_QUOTA_AUDIT_URL', 'https://www.notion.so/acc29c47cfd44d02b5e5835d5ed6a090'),
+    quotaRosterDataSourceId: prodString('SPONSOR_QUOTA_ROSTER_DS_ID', '62729c68-535c-4dd0-a633-2feaf6e2b853'),
+    quotaAuditDataSourceId: prodString('SPONSOR_QUOTA_AUDIT_DS_ID', '784770f3-8276-4347-89e0-d677c53576a2'),
+    quotaAuditUrl: prodString('SPONSOR_QUOTA_AUDIT_URL', 'https://www.notion.so/acc29c47cfd44d02b5e5835d5ed6a090'),
     quotaChannel: optionalString('SPONSOR_QUOTA_CHANNEL', 'perbot_spam'),
     weeklyQuota: optionalNumber('SPONSOR_WEEKLY_QUOTA', 3),
   },
   opsTasks: {
     // Ops Tasks database under REV12 Operations (see CLAUDE.md "Notion IDs"): one row per
     // action item a member types under their name on the Saturday meeting page.
-    dataSourceId: optionalString('OPS_TASKS_DS_ID', 'a8afc6ec-29d6-4308-b779-ad4235b35e80'),
+    dataSourceId: prodString('OPS_TASKS_DS_ID', 'a8afc6ec-29d6-4308-b779-ad4235b35e80'),
     // Ops Meetings database (one row per Saturday meeting page, Date property). Tasks link to a
     // row via the `Meeting` relation; each page's "This week" table filters on that relation.
-    meetingsDataSourceId: optionalString('OPS_MEETINGS_DS_ID', 'f0e637cd-db29-4a8d-883f-c8c5603db02f'),
+    meetingsDataSourceId: prodString('OPS_MEETINGS_DS_ID', 'f0e637cd-db29-4a8d-883f-c8c5603db02f'),
     // The database's "My open" view (Owner = me, Status != Done) — linked from the digest DM.
-    myOpenViewUrl: optionalString(
+    myOpenViewUrl: prodString(
       'OPS_TASKS_MY_OPEN_URL',
       'https://www.notion.so/20cbf9381bcb45f99125e1468de321a3?v=3d8560bcc0398150b213000c6479f533'
     ),
   },
   benbuys: {
     // BenBuys ordering helper (/benbuys prep|done). Source of truth = Purchasing (PEFS) DB.
-    purchasingDataSourceId: optionalString('BENBUYS_PURCHASING_DS_ID', '39e560bc-c039-83db-9f16-076cb18f7d7b'),
+    purchasingDataSourceId: prodString('BENBUYS_PURCHASING_DS_ID', '39e560bc-c039-83db-9f16-076cb18f7d7b'),
     season: optionalString('BENBUYS_SEASON', 'REV12'),
     // Shared across vendors: the sending mailbox, the constant CC pair, and the BEN approval bar.
     from: optionalString('BENBUYS_FROM', 'electric@engineering.upenn.edu'),
-    cc: optionalList('BENBUYS_CC', ['oat@engineering.upenn.edu', 'arjunsh@sas.upenn.edu']),
+    // Dev mode never defaults to real recipients — set BENBUYS_CC / BENBUYS_DIGIKEY_TO in .env.dev to test sends.
+    cc: optionalList('BENBUYS_CC', isDev ? [] : ['oat@engineering.upenn.edu', 'arjunsh@sas.upenn.edu']),
     approvalThreshold: optionalNumber('BENBUYS_APPROVAL_THRESHOLD', 500),
     // DigiKey's customer-reference field is length-capped (spec assumes 35; confirm on the first real run).
     referenceMaxChars: optionalNumber('BENBUYS_REFERENCE_MAX_CHARS', 35),
@@ -136,7 +144,7 @@ export const config = {
       webhookUrl: process.env.BENBUYS_MAIL_WEBHOOK_URL?.trim() || '',
     },
     digikey: {
-      to: optionalList('BENBUYS_DIGIKEY_TO', ['purchasing@engineering.upenn.edu']),
+      to: optionalList('BENBUYS_DIGIKEY_TO', isDev ? [] : ['purchasing@engineering.upenn.edu']),
       description: optionalString('BENBUYS_DIGIKEY_DESCRIPTION', 'PER electrical purchase'),
       justification: optionalString('BENBUYS_DIGIKEY_JUSTIFICATION', "This is a purchase for PER's electrical subteam."),
       // Slack user ids allowed to run `done` (Katherine Shen).
@@ -154,8 +162,8 @@ export const config = {
   priceCheck: {
     // 💸 Price Check Savings (under Purchasing — PEFS): one row per price-listener alert, updated
     // when someone taps Use / Keep / Undo; /pricecheck stats reads it. Empty disables the ledger.
-    ledgerDataSourceId: optionalString('PRICE_CHECK_LEDGER_DS_ID', 'dd1818e3-82cd-461b-8071-12af3b0f1341'),
-    ledgerUrl: optionalString('PRICE_CHECK_LEDGER_URL', 'https://www.notion.so/9269079476304d29be9dcb3dedac7e15'),
+    ledgerDataSourceId: prodString('PRICE_CHECK_LEDGER_DS_ID', 'dd1818e3-82cd-461b-8071-12af3b0f1341'),
+    ledgerUrl: prodString('PRICE_CHECK_LEDGER_URL', 'https://www.notion.so/9269079476304d29be9dcb3dedac7e15'),
   },
   arrivals: {
     // Packing-slip photos posted here are matched to open Purchasing rows (same DB + season as
@@ -199,17 +207,18 @@ export const config = {
   github: {
     token: process.env.GITHUB_TOKEN?.trim() || '',
     repo: optionalString('GITHUB_REPO', 'Penn-Electric-Racing/PERBot'),
-    indexReleaseTag: optionalString('GITHUB_INDEX_RELEASE_TAG', 'notion-index-latest'),
+    // Dev mode never pulls the prod index (built from the prod Notion workspace).
+    indexReleaseTag: optionalString('GITHUB_INDEX_RELEASE_TAG', isDev ? 'notion-index-dev' : 'notion-index-latest'),
   },
   app: {
     currentRev: optionalString('CURRENT_REV', 'REV12'),
     topKResults: optionalNumber('TOP_K_RESULTS', 5),
     // Two-file index: lean JSON (pages + chunk text) next to one raw Float32Array of embeddings.
     // The old single-file format grew past Node's max string length and could not be loaded.
-    indexPath: path.resolve(optionalString('INDEX_PATH', './data/index.json')),
-    embeddingsPath: path.resolve(optionalString('EMBEDDINGS_PATH', './data/embeddings.i8')),
-    buildCachePath: path.resolve(optionalString('INDEX_BUILD_CACHE_PATH', './data/build-cache.json')),
-    statusPath: path.resolve(optionalString('INDEX_STATUS_PATH', './data/index-status.json')),
+    indexPath: path.resolve(optionalString('INDEX_PATH', `${dataDir}/index.json`)),
+    embeddingsPath: path.resolve(optionalString('EMBEDDINGS_PATH', `${dataDir}/embeddings.i8`)),
+    buildCachePath: path.resolve(optionalString('INDEX_BUILD_CACHE_PATH', `${dataDir}/build-cache.json`)),
+    statusPath: path.resolve(optionalString('INDEX_STATUS_PATH', `${dataDir}/index-status.json`)),
     chunkTargetChars: optionalNumber('CHUNK_TARGET_CHARS', 900),
     chunkMaxChars: optionalNumber('CHUNK_MAX_CHARS', 1400),
     chunkMinChars: optionalNumber('CHUNK_MIN_CHARS', 250),

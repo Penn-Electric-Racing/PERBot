@@ -5,6 +5,8 @@
  * customize the kickoff message, or change the Slack workspace.
  */
 
+import { prodDefault } from '../env.js';
+
 export interface Subsystem {
   /** Display name in the Notion meeting notes page (must match section headings) */
   name: string;
@@ -21,8 +23,12 @@ export const SUBSYSTEMS: Subsystem[] = [
   { name: 'Vehicle Dynamics', slackChannel: 'vehicledynamics' },
 ];
 
-/** Parent Notion page where new "MM/DD Mechanical Meeting" pages are created under */
-export const NOTION_PARENT_PAGE_ID = '33b560bcc03980599c0cd06080df6d5a'; // "REV12 Mechanical Meeting Notes"
+/**
+ * Parent Notion page where new "MM/DD Mechanical Meeting" pages are created under.
+ * Set via MEETING_NOTES_PARENT_PAGE_ID (defaults to "REV12 Mechanical Meeting Notes" outside dev mode).
+ */
+export const NOTION_PARENT_PAGE_ID =
+  process.env.MEETING_NOTES_PARENT_PAGE_ID?.trim() || prodDefault('33b560bcc03980599c0cd06080df6d5a');
 
 /** Used to build clickable Slack permalinks in the Notion page. Replace if PER's workspace subdomain differs. */
 export const SLACK_WORKSPACE_SUBDOMAIN = 'pennelectricracing';

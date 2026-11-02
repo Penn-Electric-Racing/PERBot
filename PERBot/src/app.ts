@@ -201,7 +201,8 @@ function startBackgroundReindex(options: { channelId?: string; threadTs?: string
   const child = spawn(
     'node',
     [`--max-old-space-size=${config.app.indexerHeapMb}`, '--enable-source-maps', 'dist/indexer.js'],
-    { stdio: 'inherit', env: process.env, shell: process.platform === 'win32' }
+    // PERBOT_ENV carries dev mode to the child even when it was enabled with `--dev`.
+    { stdio: 'inherit', env: { ...process.env, ...(config.isDev ? { PERBOT_ENV: 'dev' } : {}) }, shell: process.platform === 'win32' }
   );
 
   const notify = async (text: string) => {
@@ -495,6 +496,9 @@ registerPriceCheckActions(app);
 registerPriceCheckStats(app);
 
 async function main(): Promise<void> {
+  if (config.isDev) {
+    logger.warn('[PERBot] DEV MODE: using .env.dev, ./data-dev, and no prod Notion ID fallbacks.');
+  }
   logger.info('[PERBot] Starting Slack Socket Mode...');
   await app.start();
   logger.info('⚡️ PERBot is running in Slack Socket Mode.');
