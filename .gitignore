@@ -1,7 +1,9 @@
 node_modules/
 dist/
 data/
+data-dev/
 .env
+.env.dev
 *.tmp
 .DS_Store
 
