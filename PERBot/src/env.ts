@@ -21,7 +21,17 @@ export const isDev =
 
 dotenv.config({ path: process.env.DOTENV_CONFIG_PATH || (isDev ? '.env.dev' : '.env') });
 
+/** Every prod Notion ID/URL registered through prodDefault — dev tooling refuses to write to these. */
+export const PROD_NOTION_IDS = new Set<string>();
+
+/** Normalize a Notion ID (dashed or not, or a URL ending in one) for comparison. */
+export function normalizeNotionId(value: string): string {
+  const match = value.match(/[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}/i);
+  return (match ? match[0] : value).replace(/-/g, '').toLowerCase();
+}
+
 /** Prod-only fallback (a Notion ID/URL in the prod workspace): dev mode never falls back to it. */
 export function prodDefault(prodValue: string): string {
+  PROD_NOTION_IDS.add(normalizeNotionId(prodValue));
   return isDev ? '' : prodValue;
 }

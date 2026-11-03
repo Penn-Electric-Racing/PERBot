@@ -152,7 +152,59 @@ PERBOT_ENV=dev npm run arrivals:try -- <args>
 
 ---
 
-## 5. Hosting the dev bot (optional)
+## 5. Seeding test data: PEFS (Purchasing)
+
+`npm run dev:pefs` inserts test rows into the **sandbox** Purchasing (PEFS) database, so you can
+exercise BenBuys, arrivals and price check without typing rows by hand. Code: `src/dev/`.
+
+It **refuses to run** unless dev mode is on, `BENBUYS_PURCHASING_DS_ID` is set in `.env.dev`, and
+that ID isn't the prod database.
+
+```bash
+npm run dev:pefs -- schema                    # check the sandbox copy has every column the bot uses
+npm run dev:pefs -- seed benbuys --dry-run    # preview
+npm run dev:pefs -- seed benbuys              # insert
+npm run dev:pefs -- list                      # show seeded rows (+ PEFS Ready? / exported / arrived)
+npm run dev:pefs -- clean                     # trash ALL seeded rows (or: clean <batch>)
+```
+
+| Preset | Rows | Exercise with |
+|---|---|---|
+| `benbuys` | 3 ready DigiKey rows (two share a part number → one cart line) + 1 missing-fields row | `/benbuys prep digikey` or `PERBOT_ENV=dev npm run benbuys:prep -- digikey` |
+| `mcmaster` | 2 McMaster-Carr rows | `/benbuys prep mcmaster` |
+| `arrivals` | 3 rows already ordered (exported, Run ID `DEV-<batch>`, Submitted, `Arrived?` = No) | post a packing-slip photo in the arrivals channel, or `PERBOT_ENV=dev npm run arrivals:try` |
+| `pricecheck` | 1 un-exported DigiKey row | `PERBOT_ENV=dev npm run price-check:try -- <row url> <price> --to <your Slack ID>` |
+| `all` | all of the above | |
+
+**Defaults on every row:** Season = `$BENBUYS_SEASON` (REV12), Payment Method = BenBuys, not
+exported, Order Batch `dev-<batch>`. Anything in a preset or file overrides these.
+
+**Custom rows:** `npm run dev:pefs -- seed --file my-rows.json`, where the file is an array of
+`{ "Column name": value }` objects. Values are converted using the sandbox column types: text,
+number, checkbox, select/status (name), multi-select (array or `"a, b"`), url, and date (ISO).
+
+```json
+[
+  { "Name": "Fuse 30A", "Cat. or model no.": "F4772-ND", "Quant.": 4, "Unit cost": 2.5,
+    "Subsystem": ["Electrical"], "Link to product webpage": "https://www.digikey.com/...", "Vendor": "DigiKey" }
+]
+```
+
+**How cleanup finds rows:** every seeded row starts its `Notes (internal)` with
+`[dev-seed <batch>]`. `list` and `clean` only ever touch rows carrying that tag, never rows someone
+typed into the sandbox.
+
+**Notes:**
+- Formula columns (`PEFS Ready?`, `Electrical BENBuys`, …) can't be written. They compute from the
+  other columns, so they only come out right if the sandbox copy kept the prod formulas. Check
+  with `list`.
+- `Point of contact` (person) isn't set. If the sandbox's `PEFS Ready?` formula requires it, rows
+  show ❌ until you fill it in Notion.
+- Columns the sandbox lacks are skipped with a warning. Run `schema` to see what's missing.
+
+---
+
+## 6. Hosting the dev bot (optional)
 
 The bot uses Socket Mode (outbound connection only, no inbound ports), so it runs fine in a
 separate container next to prod.
@@ -171,7 +223,7 @@ separate container next to prod.
 
 ---
 
-## 6. Gotchas
+## 7. Gotchas
 
 - **GitHub Actions cron jobs only run on `main`.** Scheduled workflows (digests, win posts, quota
   audit, meeting notes) won't fire from `dev`. Run them locally with `PERBOT_ENV=dev` instead.
