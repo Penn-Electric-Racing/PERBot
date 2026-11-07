@@ -188,7 +188,7 @@ export async function handlePhoto(client: WebClient, event: any, opts: { correct
   } catch (err) {
     logger.error('Arrivals: photo handling failed', err);
     // Stay quiet in threads (most thread photos are banter); a top-level failure or an asked-for look gets one line.
-    if (!inThread || opts.correction) await reply(':warning: I couldn’t process that photo. Mark the order in Notion for now; the error is in the Render logs.').catch(() => undefined);
+    if (!inThread || opts.correction) await reply(':warning: I couldn’t process that photo. Mark the order in Notion for now; the error is in the server logs.').catch(() => undefined);
   }
 }
 

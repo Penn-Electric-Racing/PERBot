@@ -48,7 +48,7 @@ export function buildBM25Index(docs: string[]): BM25Index {
     }
   }
 
-  // Pack into typed arrays: ~2M postings as plain JS arrays cost >100 MB of heap on Render.
+  // Pack into typed arrays: ~2M postings as plain JS arrays cost >100 MB of heap in production.
   const postings = new Map<string, { docs: Uint32Array; tfs: Uint16Array }>();
   for (const [term, p] of building) {
     postings.set(term, { docs: Uint32Array.from(p.docs), tfs: Uint16Array.from(p.tfs) });

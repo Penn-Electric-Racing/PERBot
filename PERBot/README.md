@@ -97,33 +97,101 @@ OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 - `OPENAI_EMBEDDING_MODEL` = model used for semantic search embeddings
 
 
-## Cloud deployment (recommended: Render background worker)
+## Cloud deployment (AWS Lightsail)
 
-Because PERBot uses Slack **Socket Mode**, it does **not** need a public Slack request URL. The cleanest cloud deployment is a **background worker** that maintains the outbound WebSocket connection to Slack. Render background workers are a good fit for this pattern. Slack’s Socket Mode docs explain that Socket Mode uses a WebSocket connection instead of a public HTTP Request URL, and Render’s worker docs describe long-running processes that do not receive inbound traffic.
+PERBot runs as a single always-on Node process on an AWS Lightsail instance, managed by systemd. It uses Slack **Socket Mode**, so it opens an outbound WebSocket to Slack and needs no public URL, load balancer, or inbound ports other than SSH. On startup it downloads the pre-built search index from the `notion-index-latest` GitHub release, so the instance needs no persistent index storage.
 
-### Included deployment files
-- `render.yaml` — one-click-ish Render worker blueprint
-- `scripts-run-cloud.mjs` — startup script that can build the Notion index, then start the Slack app
+Run only one copy of a given Slack app at a time. Slack splits events between all connected Socket Mode clients, so a second copy would receive only some of them. Stop the old process before starting a new one with the same tokens.
 
-### How to deploy on Render
-1. Push this project to a GitHub repo.
-2. In Render, create a new service from that repo.
-3. Render should detect `render.yaml`; if not, choose **Background Worker** manually.
-4. Add these environment variables in Render:
-   - `SLACK_BOT_TOKEN`
-   - `SLACK_APP_TOKEN`
-   - `NOTION_TOKEN`
-   - `OPENAI_API_KEY` (recommended)
-5. Keep `ALWAYS_REINDEX_ON_START=true` for the first deploy so the worker builds the Notion index before connecting to Slack.
-6. Deploy.
+### Instance
+- **Image:** Ubuntu 24.04 LTS
+- **Size:** 2 GB of memory. The bot needs a Node heap of about 500 MB to load the index, and memory peaks at about 800 MB to 1 GB during an index refresh, so 512 MB and 1 GB plans are too small.
+- **Networking:** attach a static IP.
+- **Firewall:** allow only port 22 (SSH), for both IPv4 and IPv6. Delete the default HTTP rule.
+
+### First-time setup
+SSH in with the instance's key:
+
+```bash
+ssh -i <key>.pem ubuntu@<server-ip>
+```
+
+Add swap, install Node 22, and build the bot:
+
+```bash
+sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
+sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt-get install -y nodejs git
+
+sudo git clone https://github.com/Penn-Electric-Racing/PERBot.git /opt/perbot
+sudo chown -R ubuntu:ubuntu /opt/perbot
+cd /opt/perbot/PERBot && npm ci && npm run build
+```
+
+Create `/opt/perbot/PERBot/.env` with the bot's environment variables, then run `chmod 600 .env`. Keep each value on one line, and base64-encode `GDRIVE_SERVICE_ACCOUNT_JSON` if you set it. Use relative index paths:
+
+```env
+INDEX_PATH=./data/index.json
+EMBEDDINGS_PATH=./data/embeddings.i8
+INDEX_STATUS_PATH=./data/index-status.json
+```
+
+Create `/etc/systemd/system/perbot.service`:
+
+```ini
+[Unit]
+Description=PERBot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/opt/perbot/PERBot
+EnvironmentFile=/opt/perbot/PERBot/.env
+ExecStart=/usr/bin/node --enable-source-maps --max-old-space-size=1024 dist/app.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`WorkingDirectory` matters because `dist/indexer.js` and `./data` are relative paths.
+
+Start the bot and make it start on boot:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now perbot
+```
+
+### Deploying updates
+There is no auto-deploy. To release what is on `main`, SSH in and run:
+
+```bash
+cd /opt/perbot/PERBot
+git pull && npm ci && npm run build && sudo systemctl restart perbot
+```
+
+### Operating the bot
+
+```bash
+journalctl -u perbot -f            # follow the logs
+sudo systemctl status perbot       # check that it is running
+sudo systemctl restart perbot      # restart, also needed after editing .env
+sudo systemctl stop perbot         # stop
+```
 
 ### Important cloud behavior
-- `npm run start:cloud` will build the Notion index at startup **if** there is no index yet, or whenever `ALWAYS_REINDEX_ON_START=true`.
-- This is fine for an MVP with hundreds of pages, but it means cold starts and deploys may take longer.
-- Later, you will probably want a separate scheduled reindex job instead of rebuilding on every start.
+- The nightly `build-index.yml` GitHub Action builds the index, and the bot checks hourly for a newer one (`INDEX_REFRESH_MINUTES`). The scheduled sponsorship, ops, and meeting notes jobs also run in GitHub Actions, not on the instance.
+- Avoid `/reindex` on a 2 GB instance. The default 1536 MB indexer heap plus the running bot won't fit in memory. Run the **Build Notion Index** workflow instead.
+- If the index can't be downloaded at startup and `AUTO_BOOTSTRAP_ON_MISSING_INDEX=true`, the bot starts a full reindex on its own, which has the same memory cost.
 
 ### If you later add Notion webhooks
-Socket Mode removes the need for a public Slack endpoint, but **Notion webhooks still require a public HTTP endpoint**. For the current MVP, the included worker setup skips webhooks and relies on startup/manual reindexing instead.
+Socket Mode removes the need for a public Slack endpoint, but **Notion webhooks still require a public HTTP endpoint**. The current setup skips webhooks and relies on the nightly index build instead.
 
 ## Install
 
@@ -233,13 +301,13 @@ What it adds:
 - embedding checkpoints are saved every few batches
 - Node heap cap for the indexer
 
-Recommended Render env vars:
+Recommended production env vars:
 
 ```env
-ALWAYS_REINDEX_ON_START=false
 AUTO_BOOTSTRAP_ON_MISSING_INDEX=true
-INDEX_PATH=/YOUR-DISK-MOUNT-PATH/notion-index.json
-INDEX_STATUS_PATH=/YOUR-DISK-MOUNT-PATH/index-status.json
+INDEX_PATH=./data/index.json
+EMBEDDINGS_PATH=./data/embeddings.i8
+INDEX_STATUS_PATH=./data/index-status.json
 INDEXER_HEAP_MB=1536
 SAVE_CHECKPOINT_EVERY_BATCHES=10
 SLACK_REINDEX_ALLOWED_USER_IDS=U12345678
