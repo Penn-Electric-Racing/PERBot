@@ -216,7 +216,7 @@ function startBackgroundReindex(options: { channelId?: string; threadTs?: string
   child.on('error', async (error) => {
     reindexInProgress = false;
     logger.error('Background reindex failed to start.', error);
-    await notify(':x: PERBot failed to start the reindex job. Check the Render logs.');
+    await notify(':x: PERBot failed to start the reindex job. Check the server logs.');
   });
 
   child.on('exit', async (code, signal) => {
@@ -228,11 +228,11 @@ function startBackgroundReindex(options: { channelId?: string; threadTs?: string
         await notify(':white_check_mark: PERBot finished reindexing and is using the new index.');
       } catch (err) {
         logger.error('Reindex finished but the new index failed to load.', err);
-        await notify(':x: Reindex finished but the new index could not be loaded. Check Render logs.');
+        await notify(':x: Reindex finished but the new index could not be loaded. Check the server logs.');
       }
     } else {
       logger.error(`[PERBot] Background reindex exited with code=${code ?? 'null'} signal=${signal ?? 'null'}`);
-      await notify(':x: PERBot reindexing failed. Run `/indexstatus` and check Render logs for details.');
+      await notify(':x: PERBot reindexing failed. Run `/indexstatus` and check the server logs for details.');
     }
   });
 
@@ -479,7 +479,7 @@ app.event('app_mention', async ({ event, client, context }) => {
     await reply(`PERBot results for: ${query}`, buildResultBlocks(query, summary, results, meta));
   } catch (error) {
     logger.error('Mention handler failed.', error);
-    await reply('PERBot hit an error while answering. Check Render logs and try `/indexstatus`.');
+    await reply('PERBot hit an error while answering. Check the server logs and try `/indexstatus`.');
   }
 });
 

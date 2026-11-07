@@ -154,7 +154,7 @@ type StoredVector = { q: Int8Array; scale: number };
 async function loadPreviousEmbeddings(): Promise<Map<string, StoredVector>> {
   const reuse = new Map<string, StoredVector>();
   if (!config.app.indexIncremental) return reuse;
-  // On Render the bot has index + embeddings but never the build cache; fetch whatever is missing.
+  // In production the bot has index + embeddings but never the build cache; fetch whatever is missing.
   await downloadBuildInputsFromRelease();
   if (!(await indexExists())) return reuse;
   try {
