@@ -227,7 +227,7 @@ Sources:
 ${sourceText}`;
 
   const response = await getOpenAIClient().responses.create({
-    model: config.openai.responseModel,
+    model: config.openai.answerModel,
     input: prompt,
     reasoning: { effort: 'low' },
   });
@@ -309,7 +309,7 @@ Thread transcript:
 ${transcript}`;
 
   const response = await getOpenAIClient().responses.create({
-    model: config.openai.responseModel,
+    model: config.openai.answerModel,
     input: prompt,
     reasoning: { effort: 'low' },
   });
