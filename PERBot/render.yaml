@@ -19,6 +19,8 @@ services:
         sync: false
       - key: OPENAI_RESPONSE_MODEL
         value: gpt-5-mini
+      - key: OPENAI_ANSWER_MODEL
+        value: gpt-5
       - key: OPENAI_EMBEDDING_MODEL
         value: text-embedding-3-small
       - key: GROQ_API_KEY

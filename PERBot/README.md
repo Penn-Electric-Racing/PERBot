@@ -87,13 +87,15 @@ OPENAI_API_KEY=sk-your-real-openai-api-key
 ### OpenAI-related `.env` values
 ```env
 OPENAI_API_KEY=sk-your-real-openai-api-key
-OPENAI_RESPONSE_MODEL=gpt-5
+OPENAI_ANSWER_MODEL=gpt-5
+OPENAI_RESPONSE_MODEL=gpt-5-mini
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 ```
 
 ### What each one does
 - `OPENAI_API_KEY` = lets PERBot call OpenAI
-- `OPENAI_RESPONSE_MODEL` = model used to write the short best-answer summary
+- `OPENAI_ANSWER_MODEL` = model that writes search answers and thread summaries
+- `OPENAI_RESPONSE_MODEL` = smaller model for structured side tasks (arrivals order matching)
 - `OPENAI_EMBEDDING_MODEL` = model used for semantic search embeddings
 
 
