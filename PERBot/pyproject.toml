@@ -1,0 +1,32 @@
+[project]
+name = "perbot"
+version = "0.1.0"
+description = "Penn Electric Racing's Slack + Notion bot"
+requires-python = ">=3.11"
+dependencies = [
+    "slack-bolt>=1.21",
+    "slack-sdk>=3.33",
+    "httpx>=0.27",
+    "openai>=1.99",
+    "numpy>=1.26",
+    "python-dotenv>=1.0",
+    "cryptography>=43",
+    "pypdf>=5.0",
+    "mammoth>=1.8",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["perbot*"]
+
+[tool.setuptools.package-data]
+"perbot.search.eval" = ["golden.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
