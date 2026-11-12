@@ -16,21 +16,18 @@ permissions:
 jobs:
   build-index:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: PERBot
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-python@v5
         with:
-          node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: PERBot/package-lock.json
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
-        run: npm ci
+        run: pip install -r requirements.txt
 
       # Incremental build: the indexer downloads the previous release's index, embeddings and
       # raw-markdown cache, re-fetches only pages whose last_edited_time changed, and re-embeds
@@ -42,7 +39,7 @@ jobs:
           # Google Shared Drive source (service account key JSON, raw or base64). Unset ⇒ Notion only.
           GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
           GITHUB_TOKEN: ${{ github.token }}
-          # Slack tokens are required by config.ts at load time but unused by the indexer
+          # Slack tokens are required by config.py at load time but unused by the indexer
           SLACK_BOT_TOKEN: unused
           SLACK_APP_TOKEN: unused
           CURRENT_REV: REV12
@@ -51,8 +48,7 @@ jobs:
           EMBEDDINGS_PATH: ./data/embeddings.i8
           INDEX_BUILD_CACHE_PATH: ./data/build-cache.json
           INDEX_STATUS_PATH: ./data/index-status.json
-          NODE_OPTIONS: --max-old-space-size=4096
-        run: npm run index
+        run: python -m indexer
 
       - name: Compress artifacts
         run: |

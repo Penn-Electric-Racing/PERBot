@@ -1,0 +1,54 @@
+services:
+  - type: worker
+    name: perbot
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: SLACK_BOT_TOKEN
+        sync: false
+      - key: SLACK_APP_TOKEN
+        sync: false
+      - key: NOTION_TOKEN
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_RESPONSE_MODEL
+        value: gpt-5-mini
+      - key: OPENAI_EMBEDDING_MODEL
+        value: text-embedding-3-small
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      # Only needed if /reindex on Render should include Google Drive (the nightly Action does).
+      - key: GDRIVE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: GITHUB_REPO
+        value: Penn-Electric-Racing/PERBot
+      - key: INDEX_PATH
+        value: ./data/index.json
+      - key: EMBEDDINGS_PATH
+        value: ./data/embeddings.i8
+      - key: INDEX_STATUS_PATH
+        value: ./data/index-status.json
+      - key: CURRENT_REV
+        value: REV12
+      - key: TOP_K_RESULTS
+        value: 5
+      # /race: REV12 members' time trial leaderboard (Supabase project per-race; service_role key)
+      - key: RACE_SUPABASE_URL
+        sync: false
+      - key: RACE_SUPABASE_SERVICE_KEY
+        sync: false
+      # BenBuys ordering helper (/benbuys done sends the requisition email from electric@)
+      - key: BENBUYS_GMAIL_CLIENT_ID
+        sync: false
+      - key: BENBUYS_GMAIL_CLIENT_SECRET
+        sync: false
+      - key: BENBUYS_GMAIL_REFRESH_TOKEN
+        sync: false
