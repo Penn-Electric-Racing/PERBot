@@ -174,7 +174,9 @@ async function answerQuery(query: string): Promise<Answer> {
     };
   }
 
-  const { results, weak } = await searchIndex(loaded, query);
+  const { results, weak } = await searchIndex(loaded, query, {
+    topK: Math.max(config.app.topKResults, config.app.maxResultsToSummarize),
+  });
   const sources = results.slice(0, config.app.maxResultsToSummarize).map((r, i) => ({
     n: i + 1,
     title: r.page.title,
@@ -182,7 +184,7 @@ async function answerQuery(query: string): Promise<Answer> {
     url: r.page.url,
     isHistorical: r.page.isHistorical,
     revNumber: r.page.revNumber,
-    text: contextForResult(loaded, r, i === 0 ? 2600 : 1600),
+    text: contextForResult(loaded, r, i === 0 ? config.answers.topSourceChars : config.answers.otherSourceChars),
   }));
   const summary = await answerFromSources(query, sources, weak);
   return {

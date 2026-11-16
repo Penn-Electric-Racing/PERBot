@@ -26,6 +26,14 @@ function getGroqClient(): OpenAI {
   return groqClient;
 }
 
+/**
+ * Drops lone UTF-16 surrogates. Page text gets cut at fixed lengths, which can split an emoji;
+ * a half surrogate makes the request body invalid JSON and OpenAI rejects it with a 400.
+ */
+export function wellFormed(text: string): string {
+  return text.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '');
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -134,18 +142,24 @@ function parseIndexList(raw: string, n: number): number[] | null {
  */
 export async function rerankResults(query: string, candidates: RerankCandidate[]): Promise<string[]> {
   const fallback = candidates.map((c) => c.pageId);
-  if (candidates.length < 2 || !hasGroq()) return fallback;
+  const provider = config.answers.rerankProvider;
+  if (candidates.length < 2 || provider === 'off') return fallback;
+  if (provider === 'groq' && !hasGroq()) return fallback;
+  if (provider !== 'groq' && !hasOpenAI()) return fallback;
 
   const list = candidates
     .map((c, i) => `[${i}] ${c.title}  (${c.pathText})\n${c.text}`)
     .join('\n\n');
 
-  // gpt-oss-120b at low reasoning has emitted bare-number arrays without commas; single-key
-  // objects force separators (see CLAUDE.md "Groq quirks").
-  const prompt = `You rank documentation pages from Penn Electric Racing's Notion for a teammate's question.
-Order ALL candidates from most to least useful for answering the question. Prefer pages that directly
-document the thing asked about over meeting notes that merely mention it; prefer current-season
-material over older REVs unless the question asks about history.
+  // The incoming order comes from hybrid search, which already gets the right page first on
+  // ~98% of the golden set; an unconstrained reranker made that worse. So the model is told to
+  // treat the order as a strong prior and only promote pages that clearly answer better.
+  // Single-key objects force separators (gpt-oss emitted bare-number arrays without commas).
+  const prompt = `You rank documentation pages from Penn Electric Racing's Notion and Drive for a teammate's question.
+The candidates are already ordered by a search engine that is usually right. Keep that order unless a lower
+page clearly answers the question better: it directly documents the thing asked about (not meeting notes that
+merely mention it), or it is current-season material where a higher page is an older REV and the question
+doesn't ask about history. Drop nothing.
 
 Question: ${query}
 
@@ -155,14 +169,24 @@ ${list}
 Reply with ONLY a JSON array of objects like [{"i": 2}, {"i": 0}, ...] covering every index once.`;
 
   try {
-    const response = await getGroqClient().chat.completions.create({
-      model: config.groq.model,
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0,
-      reasoning_effort: 'low',
-      max_tokens: 1024,
-    });
-    const raw = response.choices[0]?.message?.content ?? '';
+    let raw: string;
+    if (provider === 'groq') {
+      const response = await getGroqClient().chat.completions.create({
+        model: config.groq.model,
+        messages: [{ role: 'user', content: wellFormed(prompt) }],
+        temperature: 0,
+        reasoning_effort: 'low',
+        max_tokens: 1024,
+      });
+      raw = response.choices[0]?.message?.content ?? '';
+    } else {
+      const response = await getOpenAIClient().responses.create({
+        model: config.answers.rerankModel,
+        input: wellFormed(prompt),
+        reasoning: { effort: 'low' },
+      });
+      raw = response.output_text ?? '';
+    }
     const order = parseIndexList(raw, candidates.length);
     if (!order) {
       logger.warn('Reranker returned an unparsable list; keeping fused order.');
@@ -195,32 +219,43 @@ const NO_OPENAI_NOTE =
   'Here are the most relevant PER Notion pages. (Set `OPENAI_API_KEY` for PERBot to write an answer from them.)';
 
 export async function answerFromSources(query: string, sources: AnswerSource[], weak: boolean): Promise<string> {
-  if (!hasOpenAI()) return NO_OPENAI_NOTE;
-  if (sources.length === 0) return 'I could not find anything relevant in the indexed PER docs.';
+  if (!hasOpenAI()) return sources.length ? NO_OPENAI_NOTE : 'I could not find anything relevant in the indexed PER docs.';
 
-  const sourceText = sources
-    .map((s) => {
-      const tags = [s.revNumber ? `REV${s.revNumber}` : null, s.isHistorical ? 'HISTORICAL (older season)' : null]
-        .filter(Boolean)
-        .join(', ');
-      return `[${s.n}] ${s.title}${tags ? ` — ${tags}` : ''}\nLocation: ${s.pathText}\n${s.text}`;
-    })
-    .join('\n\n---\n\n');
+  const sourceText = sources.length
+    ? sources
+        .map((s) => {
+          const tags = [s.revNumber ? `REV${s.revNumber}` : null, s.isHistorical ? 'HISTORICAL (older season)' : null]
+            .filter(Boolean)
+            .join(', ');
+          return `[${s.n}] ${s.title}${tags ? ` — ${tags}` : ''}\nLocation: ${s.pathText}\n${s.text}`;
+        })
+        .join('\n\n---\n\n')
+    : '(no matching pages)';
 
   const confidence = weak
-    ? 'Retrieval confidence is LOW: the sources may not cover this question. If they do not, say so in one sentence and name the closest page instead of guessing.'
-    : 'If the sources only partly answer the question, say what is covered and what is not.';
+    ? 'Search confidence is LOW: the sources may well not cover this question.'
+    : 'Search confidence is normal, but the sources may still only partly cover the question.';
 
-  const prompt = `You are PERBot, the documentation assistant for Penn Electric Racing (Penn's Formula SAE Electric team).
-Answer the teammate's question using ONLY the sources below.
+  // Not every question is in the docs. PERBot answers from the docs when it can, and otherwise
+  // says the docs are thin and falls back to general knowledge, clearly separated from PER facts.
+  const prompt = `You are PERBot, the assistant for Penn Electric Racing (Penn's Formula SAE Electric team), in the team's Slack. The current season is ${config.app.currentRev}.
+Below are excerpts from the team's Notion and Drive that search found for the question. ${confidence} Read all of them before answering; the best detail is often in a lower-ranked source.
+
+Decide which case applies:
+A) The sources answer the question → answer from them.
+B) The sources partly answer it → answer the covered part from them, then say plainly what the docs don't cover and fill that gap from general knowledge.
+C) The sources don't really address it (common for general engineering, school, or random questions) → start with one short line saying the PER docs are thin on this (name the closest page if one is genuinely related), then give your best answer from general knowledge, like a helpful, knowledgeable assistant would.
 
 Rules:
-- Cite sources inline like [1] or [2][3]. Every factual sentence needs a citation.
-- ${confidence}
-- Say when something comes from a historical (older REV) page.
-- Do not invent facts, names, numbers, or part choices.
-- If the question is clearly a joke or a dig at a teammate, you may add one short, good-natured line of humor about the question, but never make claims about a real person (events, relationships, grades, looks, rankings) that the sources don't directly state.
-- 3–6 sentences in Slack mrkdwn: *bold* for key terms, no headers, no markdown links.
+- Lead with the direct answer, then the supporting detail.
+- Doc facts: be specific (exact part numbers, values, names, dates, steps, page titles) and cite inline like [1] or [2][3]. Every sentence based on a source needs a citation.
+- General knowledge: never cite it, and keep it visibly separate from doc facts — put it after a line starting with "*General answer:*" (or "*Beyond the docs:*" in case B). Never present general knowledge as what PER does or decided.
+- Never invent PER-specific facts: the team's designs, part choices, decisions, dates, or anything about a specific teammate. If the question is about PER specifically and the docs don't say, say so and suggest who or where to ask instead of guessing; general background on the topic is still fine.
+- Never state facts or rumors about a real person (events, relationships, grades, health, looks, rankings) that the sources don't directly state, even in a general answer.
+- When sources disagree or come from different seasons, prefer the current season and say what changed. Say when something comes from a historical (older REV) page.
+- If the question is clearly a joke or a dig at a teammate, you may add one short, good-natured line of humor about the question.
+- Match length to the question: a quick fact or definition in 1–3 sentences; a how-to as short numbered steps; an explain/why/compare question in up to ~200 words, using "•" bullets where it helps.
+- Slack mrkdwn: *bold* for key terms, no headers, no markdown links. Stay under 2,500 characters.
 
 Question: ${query}
 
@@ -229,8 +264,8 @@ ${sourceText}`;
 
   const response = await getOpenAIClient().responses.create({
     model: config.openai.answerModel,
-    input: prompt,
-    reasoning: { effort: 'low' },
+    input: wellFormed(prompt),
+    reasoning: { effort: config.answers.reasoningEffort as 'low' | 'medium' | 'high' },
   });
   return response.output_text?.trim() || 'I found relevant pages but could not write a summary.';
 }
@@ -262,9 +297,9 @@ export async function classifyMention(text: string, inThread: boolean): Promise<
 
   const prompt = `Classify a Slack message addressed to PERBot, a bot that answers questions from Penn Electric Racing's engineering documentation.
 Intents:
-- "docs": a question or request for information about the team, the car, its subsystems, processes, tools, parts, or history — anything a documentation search could answer.
+- "docs": any genuine question or request for information — about the team, the car, its subsystems, processes, tools, parts or history, and also general engineering, school, or other questions PERBot can answer from general knowledge.
 - "thread": asks PERBot to summarize, recap, or answer from the current conversation thread (only possible when in_thread is true).
-- "chat": banter, reactions, jokes, instructions to people, insults, thanks, or anything that is not an information request.
+- "chat": banter, reactions, jokes, gossip-bait about teammates, requests PERBot obviously can't do (order food, send money), instructions to people, insults, thanks — anything that is not a sincere information request.
 
 in_thread: ${inThread}
 message: ${JSON.stringify(text.slice(0, 500))}

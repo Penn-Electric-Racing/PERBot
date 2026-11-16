@@ -152,6 +152,8 @@ export interface IndexStatus {
 export interface SearchResult {
   page: PageRecord;
   chunk: ChunkRecord;
+  /** Chunk index (within the page) of the page's second-best matching chunk, if any. */
+  secondChunkIndex?: number;
   /** Fused + boosted score used for ordering before the reranker. */
   score: number;
   lexicalScore: number;

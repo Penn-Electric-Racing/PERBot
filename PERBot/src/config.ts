@@ -84,6 +84,17 @@ export const config = {
     // (a reasoning model; call sites run it at reasoning_effort: 'low' for these bounded tasks).
     model: optionalString('GROQ_MODEL', 'openai/gpt-oss-120b'),
   },
+  answers: {
+    // LLM rerank of the top search hits, interleaved with search's own order (see searchIndex):
+    // 'openai' (default), 'groq', or 'off'. Groq's free tier caps at 8k tokens/min (~3
+    // questions) and then the SDK's 429 retries added 10–20s per answer, so OpenAI is the default.
+    rerankProvider: optionalString('RERANK_PROVIDER', 'openai'),
+    rerankModel: optionalString('RERANK_MODEL', 'gpt-5.4-mini'),
+    // How much of each hit the answer model reads: the top hit gets more room than the rest.
+    topSourceChars: optionalNumber('ANSWER_TOP_SOURCE_CHARS', 6000),
+    otherSourceChars: optionalNumber('ANSWER_OTHER_SOURCE_CHARS', 3000),
+    reasoningEffort: optionalString('ANSWER_REASONING_EFFORT', 'medium'),
+  },
   hunter: {
     // Contact/email enrichment + verification. Free tier = 50 credits/mo.
     apiKey: process.env.HUNTER_API_KEY?.trim() || '',
@@ -205,7 +216,7 @@ export const config = {
   },
   app: {
     currentRev: optionalString('CURRENT_REV', 'REV12'),
-    topKResults: optionalNumber('TOP_K_RESULTS', 5),
+    topKResults: optionalNumber('TOP_K_RESULTS', 6),
     // Two-file index: lean JSON (pages + chunk text) next to one raw Float32Array of embeddings.
     // The old single-file format grew past Node's max string length and could not be loaded.
     indexPath: path.resolve(optionalString('INDEX_PATH', './data/index.json')),
@@ -220,7 +231,7 @@ export const config = {
     minRecordBodyChars: optionalNumber('MIN_RECORD_BODY_CHARS', 300),
     // Any page needs at least this much cleaned text to be worth a chunk.
     minPageChars: optionalNumber('MIN_PAGE_CHARS', 80),
-    maxResultsToSummarize: optionalNumber('MAX_RESULTS_TO_SUMMARIZE', 5),
+    maxResultsToSummarize: optionalNumber('MAX_RESULTS_TO_SUMMARIZE', 6),
     // Score multiplier for pages older than last season when the query doesn't ask for history.
     // Swept on the golden set 2026-09-25: 0.7–0.8 best (hit@1 93%), 0.6 hurts.
     historicalPenalty: optionalNumber('SEARCH_HISTORICAL_PENALTY', 0.7),

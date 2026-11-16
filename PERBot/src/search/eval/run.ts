@@ -38,7 +38,7 @@ async function main(): Promise<void> {
   const { index, embeddings } = await readIndexFiles(indexPath, embeddingsPath);
   const loaded = assembleIndex(index, embeddings);
   console.log(
-    `Index: ${index.pages.length} pages, ${index.chunks.length} chunks, generated ${index.generatedAt}${rerank ? ' (with Groq rerank)' : ''}\n`
+    `Index: ${index.pages.length} pages, ${index.chunks.length} chunks, generated ${index.generatedAt}${rerank ? ` (with rerank: ${config.answers.rerankProvider})` : ''}\n`
   );
 
   let hit1 = 0;
