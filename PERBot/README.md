@@ -87,7 +87,7 @@ OPENAI_API_KEY=sk-your-real-openai-api-key
 ### OpenAI-related `.env` values
 ```env
 OPENAI_API_KEY=sk-your-real-openai-api-key
-OPENAI_ANSWER_MODEL=gpt-5
+OPENAI_ANSWER_MODEL=gpt-6.1-terra
 OPENAI_RESPONSE_MODEL=gpt-5-mini
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 ```
