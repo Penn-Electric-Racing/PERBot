@@ -163,6 +163,8 @@ export interface RankedPage {
   page: PageRecord;
   chunk: ChunkRecord;
   chunkIdx: number;
+  /** Chunk index (within the page) of the page's second-best matching chunk, if any. */
+  secondChunkIndex?: number;
   score: number;
   semanticScore: number;
   lexicalScore: number;
@@ -197,14 +199,17 @@ export function rankPages(loaded: LoadedIndex, parsed: ParsedQuery, queryEmbeddi
   const fused = reciprocalRankFusion([vec.map((v) => String(v.idx)), lex.map((l) => String(l.idx))]);
 
   // Best chunk per page, with a little credit for a second matching chunk.
-  const byPage = new Map<string, { best: number; bestScore: number; second: number }>();
+  const byPage = new Map<string, { best: number; bestScore: number; second: number; secondIdx?: number }>();
   for (const [key, score] of fused) {
     const idx = Number(key);
     const pid = index.chunks[idx]!.pageId;
     const cur = byPage.get(pid);
     if (!cur) byPage.set(pid, { best: idx, bestScore: score, second: 0 });
-    else if (score > cur.bestScore) byPage.set(pid, { best: idx, bestScore: score, second: cur.bestScore });
-    else if (score > cur.second) cur.second = score;
+    else if (score > cur.bestScore) byPage.set(pid, { best: idx, bestScore: score, second: cur.bestScore, secondIdx: cur.best });
+    else if (score > cur.second) {
+      cur.second = score;
+      cur.secondIdx = idx;
+    }
   }
 
   const terms = contentTerms(queryText);
@@ -246,6 +251,7 @@ export function rankPages(loaded: LoadedIndex, parsed: ParsedQuery, queryEmbeddi
       page,
       chunk,
       chunkIdx: agg.best,
+      secondChunkIndex: agg.secondIdx !== undefined ? index.chunks[agg.secondIdx]!.chunkIndex : undefined,
       score,
       semanticScore: vecScore.get(agg.best) ?? 0,
       lexicalScore: lexScore.get(agg.best) ?? 0,
@@ -255,6 +261,21 @@ export function rankPages(loaded: LoadedIndex, parsed: ParsedQuery, queryEmbeddi
 
   ranked.sort((a, b) => b.score - a.score);
   return ranked;
+}
+
+/** fused[0], reranked[0], fused[1], reranked[1], … with duplicates dropped. */
+export function interleave(fused: RankedPage[], reranked: RankedPage[]): RankedPage[] {
+  const out: RankedPage[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < Math.max(fused.length, reranked.length); i++) {
+    for (const r of [fused[i], reranked[i]]) {
+      if (r && !seen.has(r.page.id)) {
+        seen.add(r.page.id);
+        out.push(r);
+      }
+    }
+  }
+  return out;
 }
 
 export interface SearchOptions {
@@ -279,11 +300,15 @@ export async function searchIndex(loaded: LoadedIndex, rawQuery: string, opts: S
         pageId: r.page.id,
         title: r.page.title,
         pathText: r.page.path.slice(0, -1).join(' › ') || r.page.source,
-        text: r.chunk.text.slice(0, 500),
+        text: r.chunk.text.slice(0, 900),
       }))
     );
-    const pos = new Map(order.map((id, i) => [id, i]));
-    ordered = ordered.slice().sort((a, b) => (pos.get(a.page.id) ?? 99) - (pos.get(b.page.id) ?? 99));
+    // Interleave instead of replacing: search's own #1 is right ~98% of the time on the golden
+    // set and a reranker alone dropped that to 73%, but the reranker rescues pages search ranks
+    // low (e.g. "REV12 Sensor List" at fused rank 10 for "document with all sensors on REV12").
+    const byId = new Map(ordered.map((r) => [r.page.id, r]));
+    const reranked = order.map((id) => byId.get(id)!).filter(Boolean);
+    ordered = interleave(ordered, reranked);
   }
 
   const top = ordered.slice(0, topK);
@@ -295,6 +320,7 @@ export async function searchIndex(loaded: LoadedIndex, rawQuery: string, opts: S
     results: top.map((r) => ({
       page: r.page,
       chunk: r.chunk,
+      secondChunkIndex: r.secondChunkIndex,
       score: r.score,
       lexicalScore: r.lexicalScore,
       semanticScore: r.semanticScore,
@@ -303,13 +329,41 @@ export async function searchIndex(loaded: LoadedIndex, rawQuery: string, opts: S
   };
 }
 
-/** The best chunk plus its neighbour on the same page, for the answer model. */
+/**
+ * What the answer model reads for one hit: the best chunk with the chunks around it, plus the
+ * page's second-best matching chunk when it sits elsewhere on the page. Chunks are ~900 chars,
+ * so the old "best + next" (capped at 1.6–2.6k) often cut off the actual answer.
+ */
 export function contextForResult(loaded: LoadedIndex, result: SearchResult, maxChars: number): string {
   // Chunks are stored in page order, so a page's k-th chunk is idxs[k].
   const idxs = loaded.chunkIdxByPage.get(result.page.id) ?? [];
-  const parts = [result.chunk.text];
-  const next = idxs[result.chunk.chunkIndex + 1];
-  if (next !== undefined) parts.push(loaded.index.chunks[next]!.text);
+  const k = result.chunk.chunkIndex;
+  const picked = new Set<number>([k]);
+  let used = result.chunk.text.length;
+  const tryAdd = (j: number) => {
+    const idx = idxs[j];
+    if (idx === undefined || picked.has(j)) return false;
+    const len = loaded.index.chunks[idx]!.text.length;
+    if (used + len > maxChars) return false;
+    picked.add(j);
+    used += len;
+    return true;
+  };
+  if (result.secondChunkIndex !== undefined) tryAdd(result.secondChunkIndex);
+  // Grow outward from the best chunk: next, previous, next+1, previous-1, ...
+  for (let step = 1; step < idxs.length; step++) {
+    const a = tryAdd(k + step);
+    const b = tryAdd(k - step);
+    if (!a && !b && used >= maxChars * 0.8) break;
+  }
+  const ordered = [...picked].sort((x, y) => x - y);
+  const parts: string[] = [];
+  for (let i = 0; i < ordered.length; i++) {
+    if (i > 0 && ordered[i]! !== ordered[i - 1]! + 1) parts.push('[…]');
+    const idx = idxs[ordered[i]!];
+    parts.push(idx === undefined ? result.chunk.text : loaded.index.chunks[idx]!.text);
+  }
   const joined = parts.join('\n\n');
   return joined.length > maxChars ? `${joined.slice(0, maxChars)}…` : joined;
 }
+
