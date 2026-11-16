@@ -15,7 +15,7 @@ import {
 } from './services/index-store.js';
 import { downloadIndexFromRelease, fetchIndexStamp } from './services/index-downloader.js';
 import { contextForResult, searchIndex } from './services/search.js';
-import { answerFromSources, classifyMention, summarizeThread, type ThreadMessage } from './services/llm.js';
+import { answerFromSources, chatReply, classifyMention, summarizeThread, type ThreadMessage } from './services/llm.js';
 import { buildResultBlocks } from './services/slack-format.js';
 import { registerOpsTaskActions } from './opsTasks/actions.js';
 import { assignFromMention, registerAssignCommand, registerAssignShortcut } from './opsTasks/assign.js';
@@ -406,11 +406,6 @@ async function fetchThread(client: any, channel: string, threadTs: string, botUs
   return messages;
 }
 
-const CHAT_REPLIES = [
-  "I'm a docs bot — ask me something about the car or the team and I'll dig through Notion. Try `@PERBot how does the PCM talk to the motor controllers?`",
-  "Nothing to look up there. Ask me a docs question (`@PERBot what changed in the REV11 accumulator?`) or `@PERBot summarize this thread` inside a thread.",
-];
-
 app.event('app_mention', async ({ event, client, context }) => {
   const rawText = 'text' in event ? event.text : '';
   const threadTs = event.thread_ts || event.ts;
@@ -460,7 +455,9 @@ app.event('app_mention', async ({ event, client, context }) => {
     logger.info(`Mention intent=${intent} inThread=${inThread} text="${query.slice(0, 80)}"`);
 
     if (intent === 'chat') {
-      await reply(CHAT_REPLIES[Math.floor(Math.random() * CHAT_REPLIES.length)]!);
+      const userId: string | undefined = (event as any).user;
+      const name = userId ? await displayName(client, userId) : undefined;
+      await reply(await chatReply(query, name && name !== userId ? name : undefined));
       return;
     }
 

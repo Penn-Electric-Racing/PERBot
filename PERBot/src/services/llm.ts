@@ -219,6 +219,7 @@ Rules:
 - ${confidence}
 - Say when something comes from a historical (older REV) page.
 - Do not invent facts, names, numbers, or part choices.
+- If the question is clearly a joke or a dig at a teammate, you may add one short, good-natured line of humor about the question, but never make claims about a real person (events, relationships, grades, looks, rankings) that the sources don't directly state.
 - 3–6 sentences in Slack mrkdwn: *bold* for key terms, no headers, no markdown links.
 
 Question: ${query}
@@ -287,6 +288,62 @@ Reply with ONLY JSON: {"intent": "docs" | "thread" | "chat"}`;
     logger.warn('Mention classifier failed; using heuristic.', err);
   }
   return guess;
+}
+
+const CHAT_FALLBACKS = [
+  "I'm a docs bot — ask me something about the car or the team and I'll dig through Notion. Try `@PERBot how does the PCM talk to the motor controllers?`",
+  "Nothing to look up there. Ask me a docs question (`@PERBot what changed in the REV11 accumulator?`) or `@PERBot summarize this thread` inside a thread.",
+];
+
+export function chatFallback(): string {
+  return CHAT_FALLBACKS[Math.floor(Math.random() * CHAT_FALLBACKS.length)]!;
+}
+
+/**
+ * Banter replies for mentions that aren't information requests ("doordash me asads", "why are
+ * you ignoring me"). Funny but safe: the team pokes at real people, so the bot jokes about itself,
+ * the car and the request — never invents facts, rumors or rankings about a real person.
+ */
+/** One comedic angle per reply, picked at random so banter doesn't repeat the same bit. */
+const CHAT_ANGLES = [
+  'the request itself — take it absurdly literally, deadpan',
+  'life at FSAE comp: tech inspection, the rules book, waiting in line, things that break the night before',
+  'the shop at 2am: zip ties, solder fumes, a CAN bus that works only when nobody is looking',
+  'sponsorship: cold emails, follow-ups nobody sends, begging companies for free connectors',
+  'yourself as an underappreciated team member who wants a seat on the car or a spot on the roster',
+  'Notion: pages titled "Untitled", docs last edited three REVs ago, meeting notes that just say "TBD"',
+  'the car: the accumulator, precharge, the shutdown circuit, the IMD tripping for no reason',
+  'the budget: purchase requests, shipping costs, someone ordering the wrong part again',
+];
+
+export async function chatReply(text: string, askerName?: string): Promise<string> {
+  if (!hasOpenAI()) return chatFallback();
+  const angle = CHAT_ANGLES[Math.floor(Math.random() * CHAT_ANGLES.length)]!;
+  const prompt = `You are PERBot, the Slack bot for Penn Electric Racing (Penn's Formula SAE Electric team). Someone just @-mentioned you with banter, not a real documentation question.
+
+Facts about you, if relevant: you're a TypeScript app on Node.js, you search the team's Notion and Google Drive, run sponsorship tracking (/sponsor), log package arrivals in #packages, and summarize threads. You can't browse the web, order food, send money, or do anything outside Slack.
+
+Reply with ONE short, genuinely funny line (two at most) in the voice of a dry, slightly overworked race-team bot. Suggested angle for this one: ${angle}. Use it only if it fits; otherwise go with whatever is funniest about the message. Avoid stock filler about how many pages you've read or what server you run on. Playful roasting of the request is fine; a nudge toward something you can actually do is optional.
+
+Hard rules:
+- Never state or imply facts, rumors, events, relationships, grades, health, money, or crimes about a real person, even as a joke. If the message is about a specific person, joke about the question or about yourself instead.
+- Never rank, rate, or compare real people (attractiveness, coolness, who's best, marry/kill, etc.). Decline with humor.
+- No sexual content, slurs, or punching down.
+- Slack mrkdwn, no headers, under 40 words. Don't start with "Ah" or "Oh".
+${askerName ? `\nThe person talking to you is ${askerName}.` : ''}
+Message: ${JSON.stringify(text.slice(0, 500))}`;
+
+  try {
+    const response = await getOpenAIClient().responses.create({
+      model: config.openai.answerModel,
+      input: prompt,
+      reasoning: { effort: 'low' },
+    });
+    return response.output_text?.trim() || chatFallback();
+  } catch (err) {
+    logger.warn('Chat reply failed; using canned reply.', err);
+    return chatFallback();
+  }
 }
 
 export interface ThreadMessage {
