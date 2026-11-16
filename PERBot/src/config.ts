@@ -72,7 +72,7 @@ export const config = {
     // Small structured tasks (arrivals order matching) — gpt-5-mini is plenty and ~10x cheaper/faster.
     responseModel: optionalString('OPENAI_RESPONSE_MODEL', 'gpt-5-mini'),
     // Writes the search answers and thread summaries teammates actually read, so it gets the bigger model.
-    answerModel: optionalString('OPENAI_ANSWER_MODEL', 'gpt-5'),
+    answerModel: optionalString('OPENAI_ANSWER_MODEL', 'gpt-6.1-terra'),
     embeddingModel: optionalString('OPENAI_EMBEDDING_MODEL', 'text-embedding-3-small'),
     // text-embedding-3 models can be shortened; 768 dims halves the vector memory for a negligible
     // ranking loss (the bot holds every vector in RAM on a 512 MB worker).
