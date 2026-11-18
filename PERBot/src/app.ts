@@ -460,7 +460,12 @@ app.event('app_mention', async ({ event, client, context }) => {
     if (intent === 'chat') {
       const userId: string | undefined = (event as any).user;
       const name = userId ? await displayName(client, userId) : undefined;
-      await reply(await chatReply(query, name && name !== userId ? name : undefined));
+      // Keep the other people in the message ("roast @sam") as names the reply can tag back.
+      const ids = [...new Set([...withoutBot.matchAll(/<@([A-Z0-9]+)(?:\|[^>]*)?>/g)].map((m) => m[1]!))];
+      const people = await Promise.all(ids.map(async (id) => ({ id, name: await displayName(client, id) })));
+      let chatText = withoutBot.replace(/^\s*PERBot[:,\-]?\s*/i, '');
+      for (const p of people) chatText = chatText.replace(new RegExp(`<@${p.id}(?:\\|[^>]*)?>`, 'g'), `@${p.name}`);
+      await reply(await chatReply(chatText || query, name && name !== userId ? { id: userId!, name } : undefined, people));
       return;
     }
 
