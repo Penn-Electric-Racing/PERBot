@@ -181,6 +181,19 @@ npm start
 @PERBot what do we have on accumulator shutdown logic?
 ```
 
+### Purchasing questions
+Mentions about the team's own orders are answered from the Purchasing (PEFS) Notion database
+(`src/purchasing/`), read live with a 3-minute cache. They cover whether something was ordered,
+arrival status, spending totals and breakdowns:
+```text
+@PERBot have the accumulator cells been ordered?
+@PERBot did the SSR relays arrive?
+@PERBot what has drivetrain ordered that is still not here
+@PERBot how much has accumulator spent this season by vendor
+```
+A small model turns the question into a filter. The code then does the matching, counting and
+summing, and the answer model writes the reply from those rows only.
+
 ### Filter examples
 ```text
 /dt season:REV11 subsystem:chassis cooling layout
