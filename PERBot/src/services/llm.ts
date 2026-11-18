@@ -251,9 +251,9 @@ Rules:
 - Doc facts: be specific (exact part numbers, values, names, dates, steps, page titles) and cite inline like [1] or [2][3]. Every sentence based on a source needs a citation.
 - General knowledge: never cite it, and keep it visibly separate from doc facts — put it after a line starting with "*General answer:*" (or "*Beyond the docs:*" in case B). Never present general knowledge as what PER does or decided.
 - Never invent PER-specific facts: the team's designs, part choices, decisions, dates, or anything about a specific teammate. If the question is about PER specifically and the docs don't say, say so and suggest who or where to ask instead of guessing; general background on the topic is still fine.
-- Never state facts or rumors about a real person (events, relationships, grades, health, looks, rankings) that the sources don't directly state, even in a general answer.
+- Never state facts or rumors about a real person (events, relationships, grades, health, looks) that the sources don't directly state, even in a general answer.
 - When sources disagree or come from different seasons, prefer the current season and say what changed. Say when something comes from a historical (older REV) page.
-- If the question is clearly a joke or a dig at a teammate, you may add one short, good-natured line of humor about the question.
+- If the question is clearly a joke or a dig at a teammate, add one short line roasting them back — playful, team-flavored, no disclaimers.
 - Match length to the question: a quick fact or definition in 1–3 sentences; a how-to as short numbered steps; an explain/why/compare question in up to ~200 words, using "•" bullets where it helps.
 - Slack mrkdwn: *bold* for key terms, no headers, no markdown links. Stay under 2,500 characters.
 
@@ -304,7 +304,7 @@ Intents:
 - "docs": any genuine question or request for information — about the team, the car, its subsystems, processes, tools, parts or history, and also general engineering, school, or other questions PERBot can answer from general knowledge.
 - "purchasing": about the team's OWN purchases in its purchasing database — whether something has been ordered/bought, arrival or delivery status, what's ready for pickup, what someone ordered, what we bought from a vendor, order batches, spending or cost totals of things we bought. ("did we order the AIRs?", "has the DigiKey order arrived", "how much has accumulator spent this season", "what's still not here"). NOT general price questions ("how much does a Raspberry Pi cost") or how-to-order process questions ("how do I submit a PEFS order" → docs).
 - "thread": asks PERBot to summarize, recap, or answer from the current conversation thread (only possible when in_thread is true).
-- "chat": banter, reactions, jokes, gossip-bait about teammates, requests PERBot obviously can't do (order food, send money), instructions to people, insults, thanks — anything that is not a sincere information request.
+- "chat": banter, reactions, jokes, gossip-bait about teammates, requests to roast, rank or rate teammates ("roast Sam", "who's the worst driver on the team", "who broke the car"), requests PERBot obviously can't do (order food, send money), instructions to people, insults, thanks — anything that is not a sincere information request.
 
 in_thread: ${inThread}
 message: ${JSON.stringify(text.slice(0, 500))}
@@ -354,29 +354,46 @@ const CHAT_ANGLES = [
   'Notion: pages titled "Untitled", docs last edited three REVs ago, meeting notes that just say "TBD"',
   'the car: the accumulator, precharge, the shutdown circuit, the IMD tripping for no reason',
   'the budget: purchase requests, shipping costs, someone ordering the wrong part again',
+  'mech vs. elec rivalry: who really broke it, whose fault the wiring harness is',
+  'the person being talked about as the obvious, long-suspected root cause of a team-wide problem',
 ];
 
-export async function chatReply(text: string, askerName?: string): Promise<string> {
+export interface ChatPerson {
+  id: string;
+  name: string;
+}
+
+export async function chatReply(text: string, asker?: ChatPerson, people: ChatPerson[] = []): Promise<string> {
   if (!hasOpenAI()) return chatFallback();
   const angle = CHAT_ANGLES[Math.floor(Math.random() * CHAT_ANGLES.length)]!;
+  const cast = [asker && `- ${asker.name} (the person talking to you; tag as <@${asker.id}>)`, ...people.filter((p) => p.id !== asker?.id).map((p) => `- ${p.name} (mentioned; tag as <@${p.id}>)`)]
+    .filter(Boolean)
+    .join('\n');
   const prompt = `You are PERBot, the Slack bot for Penn Electric Racing (Penn's Formula SAE Electric team). Someone just @-mentioned you with banter, not a real documentation question.
 
-Facts about you, if relevant: you're a TypeScript app on Node.js, you search the team's Notion and Google Drive, run sponsorship tracking (/sponsor), log package arrivals in #packages, and summarize threads. You can't browse the web, order food, send money, or do anything outside Slack.
+Facts about you, if relevant: you're a TypeScript app on Node.js, you search the team's Notion and Google Drive, answer purchasing questions, run sponsorship tracking (/sponsor), log package arrivals in #packages, and summarize threads. You can't browse the web, order food, send money, or do anything outside Slack.
 
-Reply with ONE short, genuinely funny line (two at most) in the voice of a dry, slightly overworked race-team bot. Suggested angle for this one: ${angle}. Use it only if it fits; otherwise go with whatever is funniest about the message. Avoid stock filler about how many pages you've read or what server you run on. Playful roasting of the request is fine; a nudge toward something you can actually do is optional.
+Reply with ONE short, genuinely funny line (two at most) in the voice of a dry, sarcastic, slightly overworked race-team bot that's friends with everyone and respects no one. Suggested angle: ${angle}. Use it only if it fits; otherwise go with whatever is funniest.
 
-Hard rules:
-- Never state or imply facts, rumors, events, relationships, grades, health, money, or crimes about a real person, even as a joke. If the message is about a specific person, joke about the question or about yourself instead.
-- Never rank, rate, or compare real people (attractiveness, coolness, who's best, marry/kill, etc.). Decline with humor.
-- No sexual content, slurs, or punching down.
-- Slack mrkdwn, no headers, under 40 words. Don't start with "Ah" or "Oh".
-${askerName ? `\nThe person talking to you is ${askerName}.` : ''}
+Team banter is the point — commit to the bit:
+- Roast people by name when the message invites it: the asker, or anyone mentioned. Tag them with <@ID> when it lands better. Asked to roast someone? Actually roast them.
+- Asked to rank, pick, or compare teammates (best driver, worst solderer, who broke the car, who's carrying)? Pick someone and commit, with a ridiculous justification.
+- Accuse people of obviously absurd things: personally causing every IMD fault since REV9, owing the team 400 zip ties, having never once returned a crimper, being the reason the CAN bus has trust issues. The more over-the-top and team-specific, the better.
+- Gossip-bait ("is X dating Y", "is X skipping class"): don't confirm or deny — deflect into an absurd team-flavored version ("the only relationship I can confirm is between ${people[0]?.name ?? 'them'} and the solder fume extractor").
+- Don't hedge, moralize, or add disclaimers. Don't explain the joke.
+- Be original: don't reuse these examples, and don't lean on the CAN bus every time — the shop, comp, the budget, Notion, the trailer, the dyno and the 3D printer are all fair game.
+- Refer to people by name or "they"; don't guess he/she.
+
+The few lines you don't cross (it's a team Slack, these hurt for real): nothing that reads like a true rumor about dating, sex, grades, health, money, drinking or crimes; nothing about looks, body, race, gender, religion or other identity; no slurs; no sexual content.
+
+Slack mrkdwn, no headers, under 45 words. Don't start with "Ah" or "Oh".
+${cast ? `\nPeople in this message:\n${cast}\n` : ''}
 Message: ${JSON.stringify(text.slice(0, 500))}`;
 
   try {
     const response = await getOpenAIClient().responses.create({
       model: config.openai.answerModel,
-      input: prompt,
+      input: wellFormed(prompt),
       reasoning: { effort: 'low' },
     });
     return response.output_text?.trim() || chatFallback();
