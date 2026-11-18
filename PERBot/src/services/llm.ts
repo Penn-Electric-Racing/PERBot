@@ -9,7 +9,7 @@ const MAX_EMBED_RETRIES = 8;
 let openaiClient: OpenAI | null = null;
 let groqClient: OpenAI | null = null;
 
-function getOpenAIClient(): OpenAI {
+export function getOpenAIClient(): OpenAI {
   if (!hasOpenAI()) {
     throw new Error('OPENAI_API_KEY is not configured. Embeddings are required for search to function.');
   }
@@ -274,13 +274,17 @@ ${sourceText}`;
 // Mention routing
 // ---------------------------------------------------------------------------------------------
 
-export type MentionIntent = 'docs' | 'thread' | 'chat';
+export type MentionIntent = 'docs' | 'purchasing' | 'thread' | 'chat';
 
 const THREAD_HINT = /\b(summari[sz]e|tl;?dr|recap|catch me up|what did (?:we|they|\w+) (?:say|decide|conclude)|this thread|the thread|above)\b/i;
+
+const PURCHASING_HINT =
+  /\b(?:(?:did|have|has) (?:we|you|they|\w+) (?:order|buy|purchase|get)|(?:been|was|were|get|got) (?:ordered|purchased|delivered)|(?:arrived?|arrival|shipped|delivered)\b.*\b(?:yet|status)|order status|ready for pickup|pefs|benbuys|purchas(?:e|es|ed|ing)\b|how much (?:have|did|has) (?:we|\w+) spen[dt])/i;
 
 function heuristicIntent(text: string, inThread: boolean): MentionIntent {
   const t = text.trim();
   if (inThread && THREAD_HINT.test(t)) return 'thread';
+  if (PURCHASING_HINT.test(t)) return 'purchasing';
   const words = t.replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/).filter(Boolean);
   if (/\?$/.test(t) || words.length >= 3) return 'docs';
   return 'chat';
@@ -298,13 +302,14 @@ export async function classifyMention(text: string, inThread: boolean): Promise<
   const prompt = `Classify a Slack message addressed to PERBot, a bot that answers questions from Penn Electric Racing's engineering documentation.
 Intents:
 - "docs": any genuine question or request for information — about the team, the car, its subsystems, processes, tools, parts or history, and also general engineering, school, or other questions PERBot can answer from general knowledge.
+- "purchasing": about the team's OWN purchases in its purchasing database — whether something has been ordered/bought, arrival or delivery status, what's ready for pickup, what someone ordered, what we bought from a vendor, order batches, spending or cost totals of things we bought. ("did we order the AIRs?", "has the DigiKey order arrived", "how much has accumulator spent this season", "what's still not here"). NOT general price questions ("how much does a Raspberry Pi cost") or how-to-order process questions ("how do I submit a PEFS order" → docs).
 - "thread": asks PERBot to summarize, recap, or answer from the current conversation thread (only possible when in_thread is true).
 - "chat": banter, reactions, jokes, gossip-bait about teammates, requests PERBot obviously can't do (order food, send money), instructions to people, insults, thanks — anything that is not a sincere information request.
 
 in_thread: ${inThread}
 message: ${JSON.stringify(text.slice(0, 500))}
 
-Reply with ONLY JSON: {"intent": "docs" | "thread" | "chat"}`;
+Reply with ONLY JSON: {"intent": "docs" | "purchasing" | "thread" | "chat"}`;
 
   try {
     const response = await getGroqClient().chat.completions.create({
@@ -318,7 +323,7 @@ Reply with ONLY JSON: {"intent": "docs" | "thread" | "chat"}`;
     const raw = response.choices[0]?.message?.content ?? '';
     const parsed = JSON.parse(raw) as { intent?: string };
     if (parsed.intent === 'thread' && !inThread) return 'docs';
-    if (parsed.intent === 'docs' || parsed.intent === 'thread' || parsed.intent === 'chat') return parsed.intent;
+    if (['docs', 'purchasing', 'thread', 'chat'].includes(parsed.intent ?? '')) return parsed.intent as MentionIntent;
   } catch (err) {
     logger.warn('Mention classifier failed; using heuristic.', err);
   }

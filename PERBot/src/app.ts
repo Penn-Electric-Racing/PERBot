@@ -15,6 +15,7 @@ import {
 } from './services/index-store.js';
 import { downloadIndexFromRelease, fetchIndexStamp } from './services/index-downloader.js';
 import { contextForResult, searchIndex } from './services/search.js';
+import { answerPurchasing, buildPurchasingBlocks } from './purchasing/answer.js';
 import { answerFromSources, chatReply, classifyMention, summarizeThread, type ThreadMessage } from './services/llm.js';
 import { buildResultBlocks } from './services/slack-format.js';
 import { registerOpsTaskActions } from './opsTasks/actions.js';
@@ -460,6 +461,12 @@ app.event('app_mention', async ({ event, client, context }) => {
       const userId: string | undefined = (event as any).user;
       const name = userId ? await displayName(client, userId) : undefined;
       await reply(await chatReply(query, name && name !== userId ? name : undefined));
+      return;
+    }
+
+    if (intent === 'purchasing') {
+      const answer = await answerPurchasing(query);
+      await reply(answer.summary.slice(0, 2900), buildPurchasingBlocks(answer));
       return;
     }
 
