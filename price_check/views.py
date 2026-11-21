@@ -24,12 +24,11 @@ from __future__ import annotations
 import json
 import logging
 import re
-import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable
 
-from core import utils
+from core import aio, utils
 from core.blocks import Actions, Button, Confirm, Section, render
 from core.types.slack import Block
 from core.ui import Interaction, View, button
@@ -225,10 +224,10 @@ def replace_actions(existing: list[Block], replacement: list[Block]) -> list[Blo
 
 @dataclass
 class SwapDeps:
-    fetch_row: Callable[[str], PriceRow]
-    write_row: Callable[[str, RowPatch], None]
+    fetch_row: Callable[[str], Awaitable[PriceRow]]
+    write_row: Callable[[str, RowPatch], Awaitable[None]]
     # The clicker's name for the Notion audit line (None → "a Slack user").
-    display_name: Callable[[str], str | None]
+    display_name: Callable[[str], Awaitable[str | None]]
     now: Callable[[], datetime]
 
 
@@ -270,7 +269,7 @@ class SwapHandler:
     def __init__(self, deps: SwapDeps):
         self.deps = deps
 
-    def handle(self, inp: ClickInput) -> ClickResult:
+    async def handle(self, inp: ClickInput) -> ClickResult:
         deps, money, settle = self.deps, utils.price, ClickResult.settle
         kind = ClickKind.from_action_id(inp.action_id)
         v = SwapValue.from_json(inp.raw_value)
@@ -292,7 +291,7 @@ class SwapHandler:
         if kind == ClickKind.UNDO and v.issued_at is not None and deps.now().timestamp() - v.issued_at > UNDO_WINDOW_S:
             return ClickResult(log='undo expired', whisper='Too late to undo from here. Change *Unit cost* in Notion.')
 
-        row = deps.fetch_row(v.row_id)
+        row = await deps.fetch_row(v.row_id)
         plan = row.plan_swap(kind, v)
         if plan.kind == SwapPlanKind.REFUSE:
             # A refused Undo leaves the earlier Use standing, so only a refused Use is recorded.
@@ -310,12 +309,12 @@ class SwapHandler:
             notes = Notes(row.notes)
             if kind == ClickKind.USE:
                 date = deps.now().astimezone(utils.EASTERN).strftime('%Y-%m-%d')
-                new = notes.append_line(v.note_line(deps.display_name(inp.clicker) or 'a Slack user', date))
+                new = notes.append_line(v.note_line(await deps.display_name(inp.clicker) or 'a Slack user', date))
             else:
                 new = notes.drop_last_line(v.note_prefix)
             if new is not None:
                 patch.notes = new
-        deps.write_row(v.row_id, patch)
+        await deps.write_row(v.row_id, patch)
 
         supplier = f' ({utils.escape(v.supplier)})' if v.supplier else ''
         if kind == ClickKind.USE:
@@ -341,15 +340,14 @@ class PriceAlertView(View):
     def __init__(self, purchasing: 'PurchasingPrices', ledger: 'SavingsLedger'):
         self.purchasing, self.ledger = purchasing, ledger
         self._in_flight: set[str] = set()
-        self._lock = threading.Lock()
 
     @button(VIEW_RE)
-    def view_listing(self, interaction: Interaction) -> None:
+    async def view_listing(self, interaction: Interaction) -> None:
         """Link buttons: Slack opens the URL itself but still reports the click, and an un-acked
         click shows an error icon on the button. The View acks it; nothing else to do."""
 
     @button(ACTION_RE)
-    def swap(self, interaction: Interaction) -> None:
+    async def swap(self, interaction: Interaction) -> None:
         clicker, action_id = interaction.user_id, interaction.action_id
         if not clicker:
             return
@@ -358,15 +356,14 @@ class PriceAlertView(View):
         except ValueError:
             parsed = None  # SwapHandler reports the bad value
         row_id = (parsed.get('r') or '') if isinstance(parsed, dict) else ''
-        with self._lock:
-            busy = bool(row_id) and row_id in self._in_flight
-            if row_id and not busy:
-                self._in_flight.add(row_id)
+        busy = bool(row_id) and row_id in self._in_flight
+        if row_id and not busy:
+            self._in_flight.add(row_id)
         if busy:
-            interaction.whisper('Already updating this row, one moment.')
+            await interaction.whisper('Already updating this row, one moment.')
             return
         try:
-            result = SwapHandler(
+            result = await SwapHandler(
                 SwapDeps(
                     fetch_row=self.purchasing.price_row,
                     write_row=self.purchasing.write_price,
@@ -375,24 +372,23 @@ class PriceAlertView(View):
                 )
             ).handle(ClickInput(action_id, interaction.value, clicker, interaction.message_blocks))
             if result.blocks is not None:
-                interaction.replace(result.blocks, result.text or 'Price check')
+                await interaction.replace(result.blocks, result.text or 'Price check')
             elif result.whisper:
-                interaction.whisper(result.whisper)
+                await interaction.whisper(result.whisper)
             logger.info(f"Price check button: {clicker} → {action_id} on {row_id or '?'}: {result.log}")
             if result.ledger:
                 # After the reply, so the ledger never slows the click down or fails it.
-                threading.Thread(target=self._record, args=(result.ledger, interaction, row_id), daemon=True).start()
+                aio.background(self._record, result.ledger, interaction, row_id, name='price-ledger')
         except Exception as err:
             logger.error(f'Price check button {action_id} failed', exc_info=err)
-            interaction.whisper('✗ Could not update Notion. Try again, or change *Unit cost* in Notion.')
+            await interaction.whisper('✗ Could not update Notion. Try again, or change *Unit cost* in Notion.')
         finally:
             if row_id:
-                with self._lock:
-                    self._in_flight.discard(row_id)
+                self._in_flight.discard(row_id)
 
-    def _record(self, event: LedgerEvent, interaction: Interaction, row_id: str) -> None:
+    async def _record(self, event: LedgerEvent, interaction: Interaction, row_id: str) -> None:
         try:
-            what = self.ledger.record(event, interaction.display_name(event.clicker) or event.clicker, self.purchasing.price_row)
+            what = await self.ledger.record(event, await interaction.display_name(event.clicker) or event.clicker, self.purchasing.price_row)
             logger.info(f'Price check ledger: {row_id}: {what}')
         except Exception as err:
             logger.warning(f"Price check ledger: couldn't record {event.kind} on {row_id}", exc_info=err)

@@ -4,10 +4,10 @@ tapped. Off when ARRIVALS_CHANNEL is empty.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
-import time
 
-from slack_bolt import App
+from slack_bolt.async_app import AsyncApp
 
 from arrivals.slack import SWEEP_EVERY_S, handle_message, sweep_once
 from arrivals.views import PackageCardView
@@ -32,7 +32,7 @@ class Arrivals(Feature):
     def enabled(self) -> bool:
         return bool(config.arrivals.channel)
 
-    def register(self, app: App) -> None:
+    def register(self, app: AsyncApp) -> None:
         if not self.enabled:
             logger.info('Arrivals: ARRIVALS_CHANNEL unset; delivery-photo listener disabled.')
             return
@@ -40,14 +40,14 @@ class Arrivals(Feature):
         super().register(app)
 
     @event('message')
-    def message(self, event, client) -> None:
-        handle_message(client, event)
+    async def message(self, event, client) -> None:
+        await handle_message(client, event)
 
     @task
-    def sweep(self) -> None:
+    async def sweep(self) -> None:
         if not self.enabled or self.client is None:
             return
-        time.sleep(self.SWEEP_DELAY_S)
+        await asyncio.sleep(self.SWEEP_DELAY_S)
         while True:
-            sweep_once(self.client)
-            time.sleep(self.SWEEP_EVERY_S)
+            await sweep_once(self.client)
+            await asyncio.sleep(self.SWEEP_EVERY_S)

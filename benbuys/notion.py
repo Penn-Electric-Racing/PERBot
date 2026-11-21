@@ -12,13 +12,12 @@ Status (select: Submitted) · Last Email Update (date).
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 from benbuys.models import VendorAdapter
-from core import utils
+from core import aio, utils
 from core.config import config
 from core.notion import Notion
 from core.purchasing import PurchasingRow
@@ -56,11 +55,11 @@ class PurchasingNotion:
         self.client = Notion(token, config.notion.api_version) if token else Notion.shared()
         self.data_source_id = data_source_id or config.benbuys.purchasing_data_source_id
 
-    def _query_all(self, filter: Any) -> list[PurchasingRow]:
+    async def _query_all(self, filter: Any) -> list[PurchasingRow]:
         rows: list[PurchasingRow] = []
         cursor: str | None = None
         while True:
-            response = self.client.data_sources.query(
+            response = await self.client.data_sources.query(
                 data_source_id=self.data_source_id,
                 filter=filter,
                 sorts=[
@@ -75,33 +74,32 @@ class PurchasingNotion:
             if not cursor:
                 return rows
 
-    def select_rows(self, adapter: VendorAdapter) -> RowSelection:
+    async def select_rows(self, adapter: VendorAdapter) -> RowSelection:
         """The vendor's un-exported BenBuys rows for the season, split by `PEFS Ready?`. Two queries
         (with / without the readiness clause) diffed by id, so the "fix in Notion" list comes from
         the same formula the PEFS - Ready Export view uses."""
         base = _base_filter(adapter)
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            ready_f = pool.submit(
-                self._query_all,
-                {'and': [*base, {'property': 'PEFS Ready?', 'formula': {'string': {'equals': READY_VALUE}}}]},
-            )
-            all_f = pool.submit(self._query_all, {'and': base})
-            ready, every = ready_f.result(), all_f.result()
+        ready_f = aio.spawn(
+            self._query_all,
+            {'and': [*base, {'property': 'PEFS Ready?', 'formula': {'string': {'equals': READY_VALUE}}}]},
+        )
+        all_f = aio.spawn(self._query_all, {'and': base})
+        ready, every = await ready_f, await all_f
         ready_ids = {r.id for r in ready}
         not_ready = [r for r in every if r.id not in ready_ids]
         logger.info(f'BenBuys {adapter.key}: {len(ready)} ready, {len(not_ready)} not ready.')
         return RowSelection(ready, not_ready)
 
-    def run_id_exists(self, run_id: str) -> bool:
+    async def run_id_exists(self, run_id: str) -> bool:
         """True when any row already carries this Run ID (guards a double `done`)."""
-        response = self.client.data_sources.query(
+        response = await self.client.data_sources.query(
             data_source_id=self.data_source_id,
             filter={'property': 'Run ID', 'rich_text': {'equals': run_id}},
             page_size=1,
         )
         return bool(response.get('results'))
 
-    def mark_ordered(self, page_ids: list[str], run_id: str, now: datetime | None = None) -> WriteBackResult:
+    async def mark_ordered(self, page_ids: list[str], run_id: str, now: datetime | None = None) -> WriteBackResult:
         """Mark the cached rows ordered. Sequential so one failure never hides the others. Also
         clears `Include in next order` — the tick is consumed by the order it selected, so a stale
         tick can never pull an already-ordered row into a later prep."""
@@ -109,7 +107,7 @@ class PurchasingNotion:
         result = WriteBackResult()
         for id_ in page_ids:
             try:
-                self.client.pages.update(
+                await self.client.pages.update(
                     id_,
                     properties={
                         'Exported?': {'checkbox': True},

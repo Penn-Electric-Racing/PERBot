@@ -2,18 +2,18 @@
 the results: `find()` is the price check's search. The CLI around it is llm_scraper.py, whose
 docstring lists the providers and their keys.
 """
+import asyncio
 import json
 import os
 import re
+import socket
 import sys
-import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
-import requests
 from bs4 import BeautifulSoup
 
+from core import aio, http
 from core.errors import ScraperError
 from price_check.scrapers import distributors
 from price_check.scrapers.ranking import Scorer
@@ -28,7 +28,7 @@ from price_check.scrapers.websearch import (
 __all__ = [
     'PROVIDERS', 'BATCH_DEFAULT', 'PAGE_CHARS', 'LD_CHARS', 'SYSTEM', 'LLMError', 'LLM',
     'page_text', 'to_info', 'search_term', 'drop_unseen_prices', 'BATCH_SYSTEM', 'pages_info',
-    'part_info', 'snippets_info', 'apply_qty', 'find',
+    'snippets_info', 'apply_qty', 'find',
 ]
 
 # provider -> (base url, api key env var or None, default model)
@@ -104,18 +104,18 @@ class LLM:
             raise LLMError(f"{env} not set")
         self.provider, self.url = provider, base + "/chat/completions"
         self.model = model or os.getenv("LLM_MODEL") or default
-        self.gap, self.next_at, self.lock = 60.0 / rpm, 0.0, threading.Lock()
+        self.gap, self.next_at = 60.0 / rpm, 0.0
         self.verbose = verbose
 
-    def _wait_turn(self):
-        """Block until this thread may send its next request (shared across threads)."""
-        with self.lock:
-            now = time.monotonic()
-            at = max(now, self.next_at)
-            self.next_at = at + self.gap
-        time.sleep(at - now)
+    async def _wait_turn(self):
+        """Wait until this task may send its next request (the pace is shared by every task;
+        the slot is taken before the first await, so no lock is needed)."""
+        now = time.monotonic()
+        at = max(now, self.next_at)
+        self.next_at = at + self.gap
+        await asyncio.sleep(at - now)
 
-    def json(self, system, user, retries=4):
+    async def json(self, system, user, retries=4):
         """Send one chat request and return the reply parsed as a JSON object.
 
         Retries 429/5xx (honouring Retry-After), network errors and non-JSON replies up
@@ -132,11 +132,11 @@ class LLM:
             body["temperature"] = 0
         last = None
         for attempt in range(retries + 1):
-            self._wait_turn()
+            await self._wait_turn()
             try:
-                r = requests.post(self.url, json=body, timeout=90,
+                r = await http.post(self.url, json=body, timeout=90,
                                   headers={"Authorization": f"Bearer {self.key}"})
-            except requests.RequestException as e:
+            except http.RequestError as e:
                 last = str(e)
                 continue
             if r.status_code in (429, 500, 502, 503):
@@ -144,7 +144,7 @@ class LLM:
                 wait = _to_float(r.headers.get("Retry-After")) or 5 * 2 ** attempt
                 if self.verbose:
                     print(f"[{self.provider}] {last}, retrying in {wait:.0f}s", file=sys.stderr)
-                time.sleep(min(wait, 60))
+                await asyncio.sleep(min(wait, 60))
                 continue
             if r.status_code != 200:
                 raise LLMError(f"HTTP {r.status_code}: {r.text[:300]}")
@@ -160,10 +160,12 @@ class LLM:
         raise LLMError(last or "unknown error")
 
 def _ollama_up():
-    """True if an Ollama server answers on localhost:11434."""
+    """True if something listens on Ollama's port, localhost:11434. A plain TCP connect, since
+    this runs inside LLM()'s (sync) constructor and only when no API key is set."""
     try:
-        return requests.get("http://localhost:11434/api/tags", timeout=1).ok
-    except requests.RequestException:
+        with socket.create_connection(("localhost", 11434), timeout=1):
+            return True
+    except OSError:
         return False
 
 # ---------------------------------------------------------------- page -> prompt
@@ -237,15 +239,15 @@ def search_term(r):
     maker = r.get("manufacturer")
     return f"{maker} {mpn}" if maker and maker.lower() not in mpn.lower() else mpn
 
-def _read_page(result):
+async def _read_page(result):
     """Fetch a result page: (info with fetch_error if it failed, prompt text for the LLM)."""
     info = _blank_info()
     info["listing_page"] = bool(LISTING_URL_RE.search(result["url"]))
     title = ld = text = ""
     try:
-        title, ld, text = page_text(_fetch_html(result["url"]))
+        title, ld, text = page_text(await _fetch_html(result["url"]))
         info["page_title"] = title or None
-    except (BackendError, requests.RequestException) as e:
+    except (BackendError, http.RequestError) as e:
         info["fetch_error"] = str(e)
     except Exception as e:  # one malformed page must not abort the whole thread pool
         info["fetch_error"] = f"parse error: {e!r}"
@@ -310,18 +312,18 @@ BATCH_SYSTEM = SYSTEM.replace(
     ('\nEach listing is marked "=== [n] ===". Return {"results": [ {"index": n, ...those '
      'keys...}, ... ]} with one entry per listing, never mixing details between listings.')
 
-def _ask(results, pages, llm, query):
+async def _ask(results, pages, llm, query):
     """One LLM request for a group of fetched pages; returns their finished result dicts."""
     if len(results) == 1:
         try:
-            return [_finish(results[0], pages[0][0], llm.json(SYSTEM, f"Searching for: {query}\n"
+            return [_finish(results[0], pages[0][0], await llm.json(SYSTEM, f"Searching for: {query}\n"
                                                                      + pages[0][1]))]
         except LLMError as e:
             return [_finish(results[0], pages[0][0], error=e)]
     prompt = f"Searching for: {query}\n\n" + "\n".join(
         f"=== [{i}] ===\n{text}" for i, (_, text) in enumerate(pages))
     try:
-        rows = llm.json(BATCH_SYSTEM, prompt).get("results")
+        rows = (await llm.json(BATCH_SYSTEM, prompt)).get("results")
     except LLMError as e:
         return [_finish(r, info, error=e) for r, (info, _) in zip(results, pages)]
     by_idx = {row.get("index"): row for row in rows if isinstance(row, dict)} \
@@ -330,20 +332,21 @@ def _ask(results, pages, llm, query):
             _finish(r, info, error="no reply for this page in the batch")
             for i, (r, (info, _)) in enumerate(zip(results, pages))]
 
-def pages_info(results, llm, query, batch=1):
+async def pages_info(results, llm, query, batch=1):
     """Fetch every result page, then have the LLM read them `batch` pages per request."""
-    with ThreadPoolExecutor(max_workers=min(10, len(results) or 1)) as pool:
-        pages = list(pool.map(_read_page, results))
+    pages = list(await aio.map(_read_page, results, limit=min(10, len(results) or 1)))
     groups = [(results[i:i + batch], pages[i:i + batch]) for i in range(0, len(results), batch)]
-    with ThreadPoolExecutor(max_workers=min(8, len(groups) or 1)) as pool:  # llm paces itself
-        done = pool.map(lambda g: _ask(g[0], g[1], llm, query), groups)
+    async def ask(group):
+        return await _ask(group[0], group[1], llm, query)
+
+    done = await aio.map(ask, groups, limit=min(8, len(groups) or 1))
     return [r for group in done for r in group]
 
-def part_info(result, llm, query):
+async def part_info(result, llm, query):
     """Fetch one result page and have the LLM pull cost / supplier / shipping details."""
-    return pages_info([result], llm, query)[0]
+    return (await pages_info([result], llm, query))[0]
 
-def snippets_info(results, llm, query):
+async def snippets_info(results, llm, query):
     """--no-fetch: one LLM call over every search snippet."""
     listing = "\n".join(f"[{i}] {r['title']} | {r['url']} | {r['snippet']}"
                         for i, r in enumerate(results))
@@ -351,7 +354,7 @@ def snippets_info(results, llm, query):
                             "for each search result below") + \
         '\nReturn {"results": [ {"index": <n>, ...those keys...}, ... ]}, one per result.'
     try:
-        rows = llm.json(system, f"Searching for: {query}\n{listing}").get("results", [])
+        rows = (await llm.json(system, f"Searching for: {query}\n{listing}")).get("results", [])
     except LLMError as e:
         sys.exit(f"LLM failed: {e}")
     by_idx = {row.get("index"): row for row in rows if isinstance(row, dict)}
@@ -392,7 +395,7 @@ def apply_qty(r, qty):
     return r
 
 # ---------------------------------------------------------------- search + rank
-def find(base, qty, llm, scorer=None, pool=30, api_n=10, batch=None, exact=False,
+async def find(base, qty, llm, scorer=None, pool=30, api_n=10, batch=None, exact=False,
          no_fetch=False, verbose=False, extra=(), read=()):
     """Search, read and score every candidate for `qty` x `base`.
 
@@ -405,9 +408,9 @@ def find(base, qty, llm, scorer=None, pool=30, api_n=10, batch=None, exact=False
     scorer = scorer or Scorer()
     query = base if exact or "price" in base.lower() else base + " price"
     variants = () if exact else (f"buy {base}", f"{base} in stock")
-    api, used = distributors.lookup(base, qty, api_n, verbose) if api_n else ([], [])
+    api, used = (await distributors.lookup(base, qty, api_n, verbose)) if api_n else ([], [])
     try:
-        source, results = search(query, pool, verbose, variants)
+        source, results = await search(query, pool, verbose, variants)
     except RuntimeError as e:
         if not (api or extra or read):
             raise
@@ -426,13 +429,13 @@ def find(base, qty, llm, scorer=None, pool=30, api_n=10, batch=None, exact=False
               f"{llm.provider}/{llm.model}...", file=sys.stderr)
 
     if no_fetch and results:  # no LLM call when only API results are left
-        results = snippets_info(results, llm, base)
+        results = await snippets_info(results, llm, base)
     else:
         batch = batch or BATCH_DEFAULT.get(llm.provider, 1)
         if verbose:
             print(f"[{llm.provider}] {-(-len(results) // batch)} LLM request(s), "
                   f"{batch} page(s) each", file=sys.stderr)
-        results = pages_info(results, llm, base, batch)
+        results = await pages_info(results, llm, base, batch)
     results = [apply_qty(r, qty) for r in results + list(read) + api]
     scorer.score_all(results, base, qty)
     return query, source, results

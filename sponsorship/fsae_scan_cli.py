@@ -9,11 +9,9 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
-import threading
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-from core import utils
+from core import aio, http, utils
 from core.log import setup_logging
 from sponsorship.domain import extract_hostname
 from sponsorship.fsae_ties import FsaeScan, format_fsae_evidence, scan_fsae_ties
@@ -34,7 +32,7 @@ def _csv_cell(s: str) -> str:
     return ' | '.join(part.strip() for part in s.split('\n')) if '\n' in s else s
 
 
-def main(argv: list[str]) -> int:
+async def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog='python -m sponsorship.fsae_scan_cli')
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--rescan', action='store_true')
@@ -44,11 +42,11 @@ def main(argv: list[str]) -> int:
 
     notion = SponsorNotion()
     if not args.dry_run:
-        added = notion.ensure_fsae_columns()
+        added = await notion.ensure_fsae_columns()
         if added:
             print(f"Added Bank columns: {', '.join(added)}")
 
-    live = notion.query_rankable_prospects()
+    live = await notion.query_rankable_prospects()
     todo = [r for r in live if args.rescan or not r.fsae_scanned_at]
     if args.limit is not None:
         todo = todo[: args.limit]
@@ -56,30 +54,27 @@ def main(argv: list[str]) -> int:
 
     today = utils.today_iso()
     results: list[_Result] = []
-    lock = threading.Lock()
 
-    def scan_one(row: BankLeadRow) -> None:
+    async def scan_one(row: BankLeadRow) -> None:
         host = extract_hostname(row.domain)
         if not host:
             result = _Result(row, error='no domain')
         else:
             try:
-                scan = scan_fsae_ties(row.company, host)
+                scan = await scan_fsae_ties(row.company, host)
                 if not args.dry_run:
-                    notion.write_fsae_scan(row.id, scan, today)
+                    await notion.write_fsae_scan(row.id, scan, today)
                 result = _Result(row, scan=scan)
                 if scan.ties or scan.company_mentions:
                     evidence = ' / '.join(format_fsae_evidence(scan).split('\n'))
                     print(f"  {'🏁' if scan.ties else '· '} {row.company}: {evidence}")
             except Exception as err:
                 result = _Result(row, error=str(err))
-        with lock:
-            results.append(result)
-            if len(results) % 25 == 0:
-                print(f'  …{len(results)}/{len(todo)}')
+        results.append(result)
+        if len(results) % 25 == 0:
+            print(f'  …{len(results)}/{len(todo)}')
 
-    with ThreadPoolExecutor(max_workers=CONCURRENCY) as pool:
-        list(pool.map(scan_one, todo))
+    await aio.map(scan_one, todo, limit=CONCURRENCY)
 
     ties = [r for r in results if r.scan and r.scan.ties]
     company = [r for r in results if r.scan and not r.scan.ties and r.scan.company_mentions]
@@ -118,4 +113,4 @@ def main(argv: list[str]) -> int:
 
 if __name__ == '__main__':
     setup_logging()
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(http.run(main(sys.argv[1:])))

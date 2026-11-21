@@ -135,15 +135,15 @@ def _pending_prep_warning(deps: BenbuysDeps, adapter: VendorAdapter, user_id: st
     )
 
 
-def handle_prep(deps: BenbuysDeps, adapter: VendorAdapter, user_id: str, respond: Respond) -> None:
+async def handle_prep(deps: BenbuysDeps, adapter: VendorAdapter, user_id: str, respond: Respond) -> None:
     pending_warning = _pending_prep_warning(deps, adapter, user_id)
-    selection = deps.notion.select_rows(adapter)
+    selection = await deps.notion.select_rows(adapter)
     prep = build_prep(adapter, selection.ready, selection.not_ready)
     blocks = format_prep(adapter, prep, config.benbuys.approval_threshold)
 
     if not prep.lines:
         deps.cache.clear(user_id, adapter.key)
-        respond(response_type='ephemeral', text=f'{pending_warning}*{adapter.label} — nothing to order.*\n{blocks.summary}')
+        await respond(response_type='ephemeral', text=f'{pending_warning}*{adapter.label} — nothing to order.*\n{blocks.summary}')
         return
 
     deps.cache.set(user_id, adapter.key, prep)
@@ -154,28 +154,28 @@ def handle_prep(deps: BenbuysDeps, adapter: VendorAdapter, user_id: str, respond
     cart_chunks = chunk_fenced(blocks.cart)
     tail = f'{_fence(blocks.ben)}\n{blocks.summary}'
     if len(cart_chunks) == 1 and len(header) + len(cart_chunks[0]) + len(tail) < MAX_MESSAGE_CHARS:
-        respond(response_type='ephemeral', text=f'{header}\n{cart_chunks[0]}\n{tail}')
+        await respond(response_type='ephemeral', text=f'{header}\n{cart_chunks[0]}\n{tail}')
         return
-    respond(response_type='ephemeral', text=f'{header}\n_(cart is long — pasted in {len(cart_chunks)} parts, in order)_')
+    await respond(response_type='ephemeral', text=f'{header}\n_(cart is long — pasted in {len(cart_chunks)} parts, in order)_')
     for i, chunk in enumerate(cart_chunks):
-        respond(response_type='ephemeral', text=f'Part {i + 1}/{len(cart_chunks)}\n{chunk}')
-    respond(response_type='ephemeral', text=tail)
+        await respond(response_type='ephemeral', text=f'Part {i + 1}/{len(cart_chunks)}\n{chunk}')
+    await respond(response_type='ephemeral', text=tail)
 
 
-def handle_done(deps: BenbuysDeps, adapter: VendorAdapter, user_id: str, parsed: ParsedBenbuys, respond: Respond) -> None:
+async def handle_done(deps: BenbuysDeps, adapter: VendorAdapter, user_id: str, parsed: ParsedBenbuys, respond: Respond) -> None:
     if user_id not in adapter.operator_slack_ids:
-        respond(response_type='ephemeral', text=f'Only the {adapter.label} operator can run `/benbuys done`.')
+        await respond(response_type='ephemeral', text=f'Only the {adapter.label} operator can run `/benbuys done`.')
         return
     cached = deps.cache.get(user_id, adapter.key)
     if not cached:
-        respond(
+        await respond(
             response_type='ephemeral',
             text=f'No `/benbuys prep {adapter.key}` from you in the last 24h — run prep first so I know exactly which rows you ordered.',
         )
         return
     run_id = f'BENBUYS-{parsed.requisition}'
-    if deps.notion.run_id_exists(run_id):
-        respond(
+    if await deps.notion.run_id_exists(run_id):
+        await respond(
             response_type='ephemeral',
             text=f'Requisition {parsed.requisition} is already recorded in Notion (Run ID `{run_id}`). Nothing sent.',
         )
@@ -194,7 +194,7 @@ def handle_done(deps: BenbuysDeps, adapter: VendorAdapter, user_id: str, parsed:
     flag = 'APPROVAL REQUIRED' if email.approval_required else 'no approval required'
 
     if parsed.dry_run:
-        respond(
+        await respond(
             response_type='ephemeral',
             text='\n'.join([
                 f'*Dry run* — nothing sent, nothing written. Requisition {parsed.requisition} · ${money(parsed.total)} · {len(prep.lines)} lines · {flag}.',
@@ -206,7 +206,7 @@ def handle_done(deps: BenbuysDeps, adapter: VendorAdapter, user_id: str, parsed:
         return
 
     if not deps.mailer:
-        respond(
+        await respond(
             response_type='ephemeral',
             text='Email sending isn’t configured on this PERBot deploy (set the BENBUYS_MAIL_* env vars). Nothing sent, nothing written — use `--no-send` to preview.',
         )
@@ -214,16 +214,16 @@ def handle_done(deps: BenbuysDeps, adapter: VendorAdapter, user_id: str, parsed:
 
     # Email first, so a Notion failure never loses the email.
     try:
-        deps.mailer.send(email)
+        await deps.mailer.send(email)
     except Exception as err:
         logger.error('BenBuys email send failed', exc_info=err)
-        respond(
+        await respond(
             response_type='ephemeral',
             text=f'✗ Couldn’t send the requisition email ({err}). Notion was NOT updated — fix the mail config and run `done` again.',
         )
         return
 
-    result = deps.notion.mark_ordered([r.id for r in prep.rows], run_id)
+    result = await deps.notion.mark_ordered([r.id for r in prep.rows], run_id)
     if not result.failed:
         deps.cache.clear(user_id, adapter.key)
 
@@ -241,4 +241,4 @@ def handle_done(deps: BenbuysDeps, adapter: VendorAdapter, user_id: str, parsed:
             f'⚠️ {len(result.failed)} rows failed to update (email already sent — fix by hand or re-run `done`; '
             'the Run ID guard will block until you clear it):\n' + '\n'.join(failed_rows)
         )
-    respond(response_type='ephemeral', text='\n'.join(lines))
+    await respond(response_type='ephemeral', text='\n'.join(lines))

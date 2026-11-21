@@ -15,10 +15,9 @@ import logging
 import os
 import re
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from core import utils
+from core import aio, http, utils
 from core.config import config
 from core.job_log import JobLog
 from core.log import setup_logging
@@ -76,7 +75,7 @@ def _plural(n: int, word: str) -> str:
     return f"{n} {word}{'' if n == 1 else 's'}"
 
 
-def run_weekly_digest(force: bool | None = None) -> None:
+async def run_weekly_digest(force: bool | None = None) -> None:
     if force is None:
         force = (os.environ.get('FORCE_DIGEST') or '').lower() == 'true'
     if not force and not utils.is_slot_open('Saturday', 9):
@@ -84,17 +83,16 @@ def run_weekly_digest(force: bool | None = None) -> None:
         return
     # Late-tolerant gate + two DST crons ⇒ dedupe via the Job Log (DM jobs can't read DM history).
     dry_run = (os.environ.get('DIGEST_DRY_RUN') or '').lower() == 'true'
-    if not force and not dry_run and not JobLog.shared().claim_run('sponsor-weekly-digest'):
+    if not force and not dry_run and not await JobLog.shared().claim_run('sponsor-weekly-digest'):
         return
 
     client = Slack.shared()
     notion = SponsorNotion()
 
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        f_deals = pool.submit(notion.query_all_deals)
-        f_users = pool.submit(notion.list_notion_users)
-        f_prospects = pool.submit(notion.query_rankable_prospects)
-        deals, notion_users, prospects = f_deals.result(), f_users.result(), f_prospects.result()
+    f_deals = aio.spawn(notion.query_all_deals)
+    f_users = aio.spawn(notion.list_notion_users)
+    f_prospects = aio.spawn(notion.query_rankable_prospects)
+    deals, notion_users, prospects = await f_deals, await f_users, await f_prospects
 
     won = [d for d in deals if d.stage == 'Won']
     total = total_raised(won)
@@ -122,14 +120,14 @@ def run_weekly_digest(force: bool | None = None) -> None:
         team_lines.append(f":tada: Won this week: {' · '.join(_win_line(d) for d in week_wins)}")
 
     notion_user_by_id = {u.id: u for u in notion_users}
-    slack_dir = Slack.wrap(client).fetch_directory()
+    slack_dir = await Slack.wrap(client).fetch_directory()
 
     for notion_id, user_deals in by_user.items():
         notion_user = notion_user_by_id.get(notion_id)
         if not notion_user:
             logger.warning(f'Weekly digest: DRI {notion_id} not in Notion directory — skipping.')
             continue
-        slack_user_id = Slack.wrap(client).notion_user_to_slack_id(notion_user, slack_dir)
+        slack_user_id = await Slack.wrap(client).notion_user_to_slack_id(notion_user, slack_dir)
         if not slack_user_id:
             logger.warning(f'Weekly digest: no Slack match for {notion_user.name or notion_id} — skipping.')
             continue
@@ -168,14 +166,14 @@ def run_weekly_digest(force: bool | None = None) -> None:
         if dry_run:
             logger.info(f'Weekly digest (dry run) → {notion_user.name or slack_user_id}:\n{text}')
             continue
-        client.chat_postMessage(channel=slack_user_id, text=text, blocks=blocks, unfurl_links=False)
+        await client.chat_postMessage(channel=slack_user_id, text=text, blocks=blocks, unfurl_links=False)
         logger.info(f'Weekly digest: sent to {notion_user.name or slack_user_id}.')
 
 
 if __name__ == '__main__':
     setup_logging()
     try:
-        run_weekly_digest()
+        http.run(run_weekly_digest())
     except Exception as err:
         logger.error('Weekly digest job failed.', exc_info=err)
         sys.exit(1)

@@ -9,18 +9,18 @@ from __future__ import annotations
 import os
 import sys
 
-from core import utils
+from core import http, utils
 from core.log import setup_logging
 from sponsorship.next_actions import backfill_next_action
 from sponsorship.notion import SponsorNotion
 
 
-def main(argv: list[str]) -> int:
+async def main(argv: list[str]) -> int:
     apply = '--apply' in argv or (os.environ.get('APPLY') or '').lower() == 'true'
     notion = SponsorNotion()
     today = utils.today_iso()
 
-    deals = notion.query_all_deals()
+    deals = await notion.query_all_deals()
     plan = [(d, change) for d in deals if (change := backfill_next_action(d, today))]
 
     follow_ups = [p for p in plan if p[1].action]
@@ -38,7 +38,7 @@ def main(argv: list[str]) -> int:
     code = 0
     for deal, change in plan:
         try:
-            notion.apply_next_action(deal.id, change)
+            await notion.apply_next_action(deal.id, change)
             done += 1
         except Exception as err:
             print(f'  ✗ {deal.company or deal.id}: {err}', file=sys.stderr)
@@ -49,4 +49,4 @@ def main(argv: list[str]) -> int:
 
 if __name__ == '__main__':
     setup_logging()
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(http.run(main(sys.argv[1:])))

@@ -12,11 +12,11 @@ from __future__ import annotations
 import base64
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
-import httpx
-
 from benbuys.email import RequisitionEmail
+from core import http
 from core.config import config
 
 logger = logging.getLogger(__name__)
@@ -27,7 +27,7 @@ __all__ = ['Mailer', 'to_rfc822', 'GmailApiMailer', 'WebhookMailer', 'create_mai
 class Mailer(Protocol):
     name: str
 
-    def send(self, email: RequisitionEmail) -> str:
+    async def send(self, email: RequisitionEmail) -> str:
         """Sends the email; returns the transport's message id ('' when it has none)."""
         ...
 
@@ -51,7 +51,7 @@ def to_rfc822(email: RequisitionEmail) -> str:
     return '\r\n'.join(h for h in headers if h) + '\r\n\r\n' + body
 
 
-def _json(res: httpx.Response) -> Any:
+def _json(res: http.Response) -> Any:
     try:
         return res.json()
     except ValueError:
@@ -61,32 +61,37 @@ def _json(res: httpx.Response) -> Any:
 class GmailApiMailer:
     name = 'gmail'
 
-    def __init__(self, client_id: str, client_secret: str, refresh_token: str, http: httpx.Client | None = None):
+    def __init__(
+        self, client_id: str, client_secret: str, refresh_token: str, request: Callable[..., Awaitable[http.Response]] = http.request
+    ):
         self._creds = {'client_id': client_id, 'client_secret': client_secret, 'refresh_token': refresh_token}
-        self._http = http or httpx.Client(timeout=20)
+        self._request = request
 
-    def _access_token(self) -> str:
-        res = self._http.post(
+    async def _access_token(self) -> str:
+        res = await self._request(
+            'POST',
             'https://oauth2.googleapis.com/token',
             data={**self._creds, 'grant_type': 'refresh_token'},
             timeout=15,
         )
         data = _json(res)
-        if not res.is_success or not data.get('access_token'):
+        if not res.ok or not data.get('access_token'):
             raise RuntimeError(
                 f"Gmail OAuth token refresh failed: {res.status_code} {data.get('error', '')} {data.get('error_description', '')}".strip()
             )
         return data['access_token']
 
-    def send(self, email: RequisitionEmail) -> str:
-        token = self._access_token()
-        res = self._http.post(
+    async def send(self, email: RequisitionEmail) -> str:
+        token = await self._access_token()
+        res = await self._request(
+            'POST',
             'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
             headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
             json={'raw': _b64url(to_rfc822(email))},
+            timeout=20,
         )
         data = _json(res)
-        if not res.is_success:
+        if not res.ok:
             raise RuntimeError(f"Gmail send failed: {res.status_code} {(data.get('error') or {}).get('message', '')}".strip())
         logger.info(f"BenBuys email sent via Gmail (id {data.get('id')}): {email.subject}")
         return str(data.get('id') or '')
@@ -95,12 +100,13 @@ class GmailApiMailer:
 class WebhookMailer:
     name = 'webhook'
 
-    def __init__(self, url: str, http: httpx.Client | None = None):
+    def __init__(self, url: str, request: Callable[..., Awaitable[http.Response]] = http.request):
         self._url = url
-        self._http = http or httpx.Client(timeout=20)
+        self._request = request
 
-    def send(self, email: RequisitionEmail) -> str:
-        res = self._http.post(
+    async def send(self, email: RequisitionEmail) -> str:
+        res = await self._request(
+            'POST',
             self._url,
             json={
                 'from': email.from_addr,
@@ -109,8 +115,9 @@ class WebhookMailer:
                 'subject': email.subject,
                 'body': email.body,
             },
+            timeout=20,
         )
-        if not res.is_success:
+        if not res.ok:
             raise RuntimeError(f'Email webhook failed: {res.status_code} {res.text[:200]}')
         logger.info(f'BenBuys email sent via webhook: {email.subject}')
         return res.headers.get('x-ms-workflow-run-id') or ''

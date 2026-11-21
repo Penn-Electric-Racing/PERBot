@@ -3,8 +3,8 @@ it answers with `@button(action_id_pattern)`, and each callback gets an `Interac
 
     class PriceAlertView(View):
         @button(r'^price_swap_keep$')
-        def keep(self, interaction: Interaction) -> None:
-            interaction.replace(blocks, 'Kept')
+        async def keep(self, interaction: Interaction) -> None:
+            await interaction.replace(blocks, 'Kept')
 
     PriceAlertView().register(app)
 
@@ -13,10 +13,11 @@ instance serves every message that carries its buttons (they survive restarts).
 """
 from __future__ import annotations
 
+import inspect
 import re
 from typing import Any, Callable
 
-from slack_bolt import App
+from slack_bolt.async_app import AsyncApp
 
 from core.bolt import listener
 from core.types.slack import ActionPayload, Block, InteractionBody
@@ -50,18 +51,18 @@ class Interaction:
         """The clicked message's blocks (absent on some containers)."""
         return (self.body.get('message') or {}).get('blocks')
 
-    def whisper(self, text: str) -> None:
+    async def whisper(self, text: str) -> None:
         """Tell only the clicker, leaving the message as is."""
-        self.respond(response_type='ephemeral', replace_original=False, text=text)
+        await self.respond(response_type='ephemeral', replace_original=False, text=text)
 
-    def replace(self, blocks: list[Block], text: str) -> None:
+    async def replace(self, blocks: list[Block], text: str) -> None:
         """Rewrite the clicked message."""
-        self.respond(replace_original=True, blocks=blocks, text=text)
+        await self.respond(replace_original=True, blocks=blocks, text=text)
 
-    def display_name(self, user_id: str | None = None) -> str | None:
+    async def display_name(self, user_id: str | None = None) -> str | None:
         """A Slack user's real name (the clicker by default), or None."""
         try:
-            u = self.client.users_info(user=user_id or self.user_id).get('user') or {}
+            u = (await self.client.users_info(user=user_id or self.user_id)).get('user') or {}
         except Exception:
             return None
         return (u.get('profile') or {}).get('real_name') or u.get('real_name') or u.get('name') or None
@@ -79,12 +80,15 @@ def button(action_id: 'str | re.Pattern[str]') -> Callable[[Callable[..., Any]],
     return deco
 
 
-def _listener(callback: Callable[[Interaction], Any]) -> Callable[..., None]:
+def _listener(callback: Callable[[Interaction], Any]) -> Callable[..., Any]:
+    if not inspect.iscoroutinefunction(callback):
+        raise TypeError(f'{callback.__qualname__}: button callbacks must be `async def`')
+
     # Bolt passes listener arguments by parameter name (an unknown name gets None), so the
     # callback is closed over rather than passed as a default.
-    def listener(ack: Any, body: Any, action: Any, respond: Any, client: Any) -> None:
-        ack()
-        callback(Interaction(body, action, respond, client))
+    async def listener(ack: Any, body: Any, action: Any, respond: Any, client: Any) -> None:
+        await ack()
+        await callback(Interaction(body, action, respond, client))
 
     return listener
 
@@ -122,7 +126,7 @@ class View:
         cls.__buttons__ = [(p, n) for n, p in found.items()]
         cls.__modals__ = [(c, n) for n, c in modals.items()]
 
-    def register(self, app: App) -> None:
+    def register(self, app: AsyncApp) -> None:
         for pattern, name in self.__buttons__:
             app.action(pattern)(_listener(getattr(self, name)))
         for callback_id, name in self.__modals__:

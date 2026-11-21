@@ -16,16 +16,19 @@ BOLT_ARGS = ('ack', 'body', 'payload', 'command', 'event', 'action', 'view', 'sh
 
 
 def listener(method: Callable[..., Any]) -> Callable[..., Any]:
-    """A plain function Bolt can call that forwards the arguments `method` asks for by name."""
+    """An async function Bolt's AsyncApp can call that forwards the arguments `method` asks for
+    by name. `method` must be a coroutine function (AsyncApp only runs those)."""
+    if not inspect.iscoroutinefunction(method):
+        raise TypeError(f'{method.__qualname__}: Slack listeners must be `async def`')
     args = inspect.getfullargspec(method).args
     wanted = args[1:] if inspect.ismethod(method) else args  # drop self / cls
     unknown = [a for a in wanted if a not in BOLT_ARGS]
     if unknown:
         raise TypeError(f'{method.__qualname__}: Bolt cannot inject {unknown}')
 
-    def bolt_listener(ack, body, payload, command, event, action, view, shortcut, message, respond, say, client, context, logger):  # noqa: ANN001
+    async def bolt_listener(ack, body, payload, command, event, action, view, shortcut, message, respond, say, client, context, logger):  # noqa: ANN001
         given = locals()
-        return method(**{a: given[a] for a in wanted})
+        return await method(**{a: given[a] for a in wanted})
 
     bolt_listener.__qualname__ = f'listener({method.__qualname__})'
     return bolt_listener

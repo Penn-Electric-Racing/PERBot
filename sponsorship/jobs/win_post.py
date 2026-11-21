@@ -24,6 +24,7 @@ import logging
 import os
 import sys
 
+from core import http
 from core.config import config
 from core.job_log import JobLog
 from core.log import setup_logging
@@ -40,7 +41,7 @@ from sponsorship.wins import (
 logger = logging.getLogger(__name__)
 
 
-def run_win_post(backfill: bool | None = None) -> None:
+async def run_win_post(backfill: bool | None = None) -> None:
     """WIN_POST_BACKFILL=true (one-time, at rollout): claim every currently-Won deal in the Job Log
     WITHOUT posting. Wins announced before the claim existed have no record, and the ones that
     already scrolled out of #operations' recent history would otherwise be re-announced on the next
@@ -50,35 +51,35 @@ def run_win_post(backfill: bool | None = None) -> None:
     client = Slack.shared()
     notion = SponsorNotion()
 
-    channel_id = Slack.wrap(client).resolve_channel_id(config.sponsorship.win_post_channel)
+    channel_id = await Slack.wrap(client).resolve_channel_id(config.sponsorship.win_post_channel)
     if not channel_id:
         logger.error(f'Win post: could not resolve channel "{config.sponsorship.win_post_channel}".')
         return
 
-    won = notion.query_won_deals()
+    won = await notion.query_won_deals()
     if not won:
         logger.info('Win post: no Won deals.')
         return
 
     if backfill:
-        claimed = sum(1 for deal in won if JobLog.shared().claim_once(win_claim_key(deal), 'sponsor-win'))
+        claimed = sum([1 for deal in won if await JobLog.shared().claim_once(win_claim_key(deal), 'sponsor-win')])
         logger.info(f'Win post: backfill marked {claimed}/{len(won)} Won deals as announced — nothing posted.')
         return
 
     # Directories for DRI shoutouts — fetched once, reused across all deals.
-    notion_users_by_id = {u.id: u for u in notion.list_notion_users()}
-    slack_dir = Slack.wrap(client).fetch_directory()
+    notion_users_by_id = {u.id: u for u in await notion.list_notion_users()}
+    slack_dir = await Slack.wrap(client).fetch_directory()
 
     total = total_raised(won)
     for deal in won:
-        dri = resolve_dri_mentions(client, deal.dri_user_ids, notion_users_by_id, slack_dir)
-        announce_win_if_new(client, channel_id, deal, total, dri, latest_won_note(deal))
+        dri = await resolve_dri_mentions(client, deal.dri_user_ids, notion_users_by_id, slack_dir)
+        await announce_win_if_new(client, channel_id, deal, total, dri, latest_won_note(deal))
 
 
 if __name__ == '__main__':
     setup_logging()
     try:
-        run_win_post()
+        http.run(run_win_post())
     except Exception as err:
         logger.error('Win post job failed.', exc_info=err)
         sys.exit(1)

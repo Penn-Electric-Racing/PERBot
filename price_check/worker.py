@@ -15,10 +15,11 @@ The queue lives in the Job Log, so a restart loses nothing. No webhooks: the bot
 """
 from __future__ import annotations
 
+import asyncio
 import logging
-import threading
 import time
 from collections import deque
+from collections.abc import Awaitable
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -71,12 +72,12 @@ class Poller:
     def due(self) -> bool:
         return self.clock() >= self.next_at
 
-    def poll(self) -> list[str]:
+    async def poll(self) -> list[str]:
         now = self.clock()
         cfg = self.cfg
         window = cfg.lookback_hours * 3600 if self.first else cfg.poll_seconds + cfg.settle_seconds + WINDOW_SLACK
         self.next_at = now + cfg.poll_seconds  # also after a failure: try again next interval
-        found = CheckQueue(self.notion, cfg).queue_new_rows(
+        found = await CheckQueue(self.notion, cfg).queue_new_rows(
             since=datetime.fromtimestamp(now, timezone.utc) - timedelta(seconds=window),
             settled_before=datetime.fromtimestamp(now - cfg.settle_seconds - NOTION_MINUTE, timezone.utc),
             dry_run=self.dry_run,
@@ -99,24 +100,24 @@ class Worker:
         limit: HourlyLimit,
         poller: Poller | None = None,
         clock: Callable[[], float] = time.time,
-        sleep: Callable[[float], None] = time.sleep,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         dry_run: bool = False,
     ):
         self.cfg, self.notion, self.checker, self.limit, self.poller = cfg, notion, checker, limit, poller
         self.clock, self.sleep, self.dry_run = clock, sleep, dry_run
-        self.stopped = threading.Event()
+        self.stopped = asyncio.Event()
         self.next_queue_look = 0.0
         self.backoff_until = 0.0
         self.failures = 0
         self.preview: list[str] = []  # dry run: rows that would have been queued...
         self.seen: set[str] = set()  # ...and rows already checked (nothing is marked done)
 
-    def poll(self) -> int:
+    async def poll(self) -> int:
         """Queue new rows the poller finds, when it's due. Returns how many were new."""
         if not (self.poller and self.poller.due()):
             return 0
         try:
-            found = self.poller.poll()
+            found = await self.poller.poll()
         except Exception as e:
             logger.warning(f'Price check: polling Purchasing failed ({e}); trying again next interval')
             return 0
@@ -128,14 +129,14 @@ class Worker:
             self.next_queue_look = 0.0
         return len(found)
 
-    def check_next(self) -> CheckStatus | None:
+    async def check_next(self) -> CheckStatus | None:
         """Check the oldest queued row if the hourly limit and any backoff allow. Returns its
         status, or None if nothing was done."""
         now = self.clock()
         if now < self.backoff_until or now < self.next_queue_look or self.limit.wait() > 0:
             return None
         entries: list[tuple[str | None, str]] = [
-            e for e in CheckQueue(self.notion, self.cfg).entries(len(self.seen) + 1) if e[1] not in self.seen
+            e for e in await CheckQueue(self.notion, self.cfg).entries(len(self.seen) + 1) if e[1] not in self.seen
         ][:1]
         if not entries and self.preview:
             entries = [(None, self.preview.pop(0))]
@@ -144,7 +145,7 @@ class Worker:
         if not entries:
             self.next_queue_look = now + QUEUE_POLL_SECONDS
             return None
-        status = next(iter(self.checker.drain(entries)))
+        status = next(iter(await self.checker.drain(entries)))
         if status == CheckStatus.RETRY:
             self.failures += 1
             delay = min(RETRY_BASE_SECONDS * 2 ** (self.failures - 1), RETRY_MAX_SECONDS)
@@ -156,20 +157,20 @@ class Worker:
                 self.limit.record()  # only real searches count against the limit
         return status
 
-    def step(self) -> CheckStatus | None:
-        self.poll()
-        return self.check_next()
+    async def step(self) -> CheckStatus | None:
+        await self.poll()
+        return await self.check_next()
 
-    def run(self) -> None:
+    async def run(self) -> None:
         while not self.stopped.is_set():
             try:
-                status = self.step()
-            except Exception as e:  # e.g. Notion down while reading the queue: keep the thread
+                status = await self.step()
+            except Exception as e:  # e.g. Notion down while reading the queue: keep the task
                 logger.warning(f'Price check: worker step failed ({e}); trying again in 60 s')
-                self.sleep(60)
+                await self.sleep(60)
                 continue
             if status is None:
-                self.sleep(2)
+                await self.sleep(2)
 
     @classmethod
     def from_config(cls, dry_run: bool = False, verbose: bool = False) -> 'Worker | None':

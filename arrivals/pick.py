@@ -247,11 +247,11 @@ def ground_picks(picks: list[Pick], pkg: Extraction) -> list[Pick]:
 
 
 
-def pick_orders(pkg: Extraction, orders: list[OpenOrder], message_text: str) -> list[Pick]:
+async def pick_orders(pkg: Extraction, orders: list[OpenOrder], message_text: str) -> list[Pick]:
     if not config.has_openai or not orders:
         return []
     built = build_pick_prompt(pkg, orders, message_text)
-    response = LLM.shared().openai.responses.create(
+    response = await LLM.shared().openai.responses.create(
         model=config.openai.response_model,
         reasoning={'effort': 'low'},
         input=built.prompt,

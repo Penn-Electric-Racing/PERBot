@@ -9,6 +9,7 @@ import pytest
 from price_check.scrapers import distributors as d
 from price_check.scrapers import ranking as rk
 from price_check.scrapers import regex_reader
+from tests.aio import awaitable
 
 
 class FakeResponse:
@@ -74,7 +75,7 @@ def keys(monkeypatch):
         if url == d.DIGIKEY_SEARCH_URL:
             return FakeResponse(DIGIKEY_REPLY)
         raise AssertionError(url)
-    monkeypatch.setattr(d.requests, "post", post)
+    monkeypatch.setattr(d.http, "post", awaitable(post))
     return calls
 
 
@@ -92,8 +93,8 @@ def test_order_units_rounds_up_to_minimum_and_multiple():
 
 
 # ---------------------------------------------------------------- Mouser
-def test_mouser_parts(keys):
-    rs = d.mouser("LM7805", qty=1, n=10)
+async def test_mouser_parts(keys):
+    rs = await d.mouser("LM7805", qty=1, n=10)
     assert [r["title"].split()[0] for r in rs] == ["LM7805CT/NOPB", "LM7805CT-REEL"]  # quote-only skipped
     r = rs[0]
     assert r["cost"] == 0.89 and r["currency"] == "USD" and r["cost_source"] == "api"
@@ -105,28 +106,28 @@ def test_mouser_parts(keys):
     assert reel["shipping_time"] == "16 weeks" and reel["min_order"] == 2500
 
 
-def test_mouser_errors_raise(keys, monkeypatch):
-    monkeypatch.setattr(d.requests, "post",
-                        lambda *a, **k: FakeResponse({"Errors": [{"Message": "Invalid key"}]}))
+async def test_mouser_errors_raise(keys, monkeypatch):
+    monkeypatch.setattr(d.http, "post",
+                        awaitable(lambda *a, **k: FakeResponse({"Errors": [{"Message": "Invalid key"}]})))
     with pytest.raises(d.APIError, match="Invalid key"):
-        d.mouser("LM7805")
+        await d.mouser("LM7805")
 
 
-def test_missing_keys_skip_quietly(monkeypatch):
+async def test_missing_keys_skip_quietly(monkeypatch):
     for k in ("MOUSER_API_KEY", "DIGIKEY_CLIENT_ID", "DIGIKEY_CLIENT_SECRET"):
         monkeypatch.delenv(k, raising=False)
-    assert d.lookup("LM7805") == ([], [])
+    assert await d.lookup("LM7805") == ([], [])
 
 
-def test_minimum_order_sets_quantity_bought(keys):
-    reel = d.mouser("LM7805", qty=10)[1]
+async def test_minimum_order_sets_quantity_bought(keys):
+    reel = (await d.mouser("LM7805", qty=10))[1]
     r = regex_reader.apply_qty(reel, 10)
     assert r["packs_needed"] == 2500 and r["subtotal"] == 750.0
 
 
 # ---------------------------------------------------------------- DigiKey
-def test_digikey_parts(keys):
-    rs = d.digikey("LM7805", qty=1, n=10)
+async def test_digikey_parts(keys):
+    rs = await d.digikey("LM7805", qty=1, n=10)
     assert len(rs) == 1  # no-pricing product skipped
     r = rs[0]
     assert "LM7805CT/NOPB-ND" in r["title"]  # Digi-Reel (excludes reeling fee) not chosen
@@ -136,8 +137,8 @@ def test_digikey_parts(keys):
     assert search["headers"]["Authorization"] == "Bearer tok"
 
 
-def test_digikey_token_is_cached(keys):
-    d.digikey("LM7805"); d.digikey("LM7805")
+async def test_digikey_token_is_cached(keys):
+    await d.digikey("LM7805"); await d.digikey("LM7805")
     assert sum(url == d.DIGIKEY_TOKEN_URL for url, _ in keys) == 1
 
 
@@ -150,8 +151,8 @@ def test_api_sites_dropped_from_web_results():
     assert d.drop_api_sites(web, []) == web
 
 
-def test_api_results_rank_with_price_breaks(keys):
-    api, used = d.lookup("LM7805", qty=50, n=10)
+async def test_api_results_rank_with_price_breaks(keys):
+    api, used = await d.lookup("LM7805", qty=50, n=10)
     assert used == ["mouser", "digikey"]
     rs = [regex_reader.apply_qty(r, 50) for r in api]
     rk.Scorer().score_all(rs, "LM7805", 50)
@@ -161,51 +162,51 @@ def test_api_results_rank_with_price_breaks(keys):
 
 
 # ---------------------------------------------------------------- errors and edges
-def test_http_errors_raise(keys, monkeypatch):
-    monkeypatch.setattr(d.requests, "post", lambda url, **kw: FakeResponse({}, status=500))
+async def test_http_errors_raise(keys, monkeypatch):
+    monkeypatch.setattr(d.http, "post", awaitable(lambda url, **kw: FakeResponse({}, status=500)))
     with pytest.raises(d.APIError, match="Mouser HTTP 500"):
-        d.mouser("LM7805")
+        await d.mouser("LM7805")
     with pytest.raises(d.APIError, match="DigiKey token HTTP 500"):
-        d.digikey("LM7805")
+        await d.digikey("LM7805")
     d._token.update(value="tok", expires=d.time.time() + 600)
     with pytest.raises(d.APIError, match="DigiKey HTTP 500"):
-        d.digikey("LM7805")
+        await d.digikey("LM7805")
 
 
-def test_digikey_needs_keys(monkeypatch):
+async def test_digikey_needs_keys(monkeypatch):
     monkeypatch.delenv("DIGIKEY_CLIENT_ID", raising=False)
     with pytest.raises(d.APIError, match="DIGIKEY_CLIENT_ID"):
-        d.digikey("LM7805")
+        await d.digikey("LM7805")
 
 
-def test_results_capped_at_n(keys):
-    assert len(d.mouser("LM7805", n=1)) == 1
+async def test_results_capped_at_n(keys):
+    assert len(await d.mouser("LM7805", n=1)) == 1
 
 
-def test_mouser_stock_from_availability_text(keys, monkeypatch):
+async def test_mouser_stock_from_availability_text(keys, monkeypatch):
     part = {**MOUSER_REPLY["SearchResults"]["Parts"][0], "AvailabilityInStock": None,
             "Availability": "3,000 In Stock"}
-    monkeypatch.setattr(d.requests, "post", lambda url, **kw: FakeResponse(
-        {"Errors": [], "SearchResults": {"Parts": [part]}}))
-    assert d.mouser("LM7805")[0]["stock"] == 3000
+    monkeypatch.setattr(d.http, "post", awaitable(lambda url, **kw: FakeResponse(
+        {"Errors": [], "SearchResults": {"Parts": [part]}})))
+    assert (await d.mouser("LM7805"))[0]["stock"] == 3000
 
 
-def test_digikey_reel_uses_full_reel_multiples(keys, monkeypatch):
+async def test_digikey_reel_uses_full_reel_multiples(keys, monkeypatch):
     product = {"ManufacturerProductNumber": "LM7805", "Manufacturer": {"Name": "TI"},
                "QuantityAvailable": 0, "ManufacturerLeadWeeks": "12", "ProductVariations": [
                    {"PackageType": {"Name": "Tape & Reel (TR)"}, "MinimumOrderQuantity": 2500,
                     "StandardPackage": 2500, "StandardPricing": [{"BreakQuantity": 2500, "UnitPrice": 0.2}]},
                    {"PackageType": {"Name": "Bulk"}, "StandardPricing": []}]}
-    monkeypatch.setattr(d.requests, "post", lambda url, **kw: FakeResponse(
-        {"access_token": "t"} if url == d.DIGIKEY_TOKEN_URL else {"Products": [product]}))
-    r = d.digikey("LM7805", qty=3000)[0]
+    monkeypatch.setattr(d.http, "post", awaitable(lambda url, **kw: FakeResponse(
+        {"access_token": "t"} if url == d.DIGIKEY_TOKEN_URL else {"Products": [product]})))
+    r = (await d.digikey("LM7805", qty=3000))[0]
     assert (r["min_order"], r["order_mult"]) == (2500, 2500)
     assert r["in_stock"] is False and r["shipping_time"] == "12 weeks"
 
 
-def test_lookup_logs_failures(keys, monkeypatch, capsys):
-    monkeypatch.setattr(d, "APIS", [("mouser", lambda *a: (_ for _ in ()).throw(d.APIError("down")))])
-    assert d.lookup("LM7805", verbose=True) == ([], [])
+async def test_lookup_logs_failures(keys, monkeypatch, capsys):
+    monkeypatch.setattr(d, "APIS", [("mouser", awaitable(lambda *a: (_ for _ in ()).throw(d.APIError("down"))))])
+    assert await d.lookup("LM7805", verbose=True) == ([], [])
     assert "[mouser api] skipped: down" in capsys.readouterr().err
 
 

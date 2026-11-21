@@ -47,8 +47,18 @@ def page(pid='p1', part='LM7805CT/NOPB', qty=50, cost=1.00, link='https://www.di
 
 
 class _Sub:
+    """A client sub-resource (`notion.pages`, ...): its methods are coroutines, like the real client's."""
+
     def __init__(self, **fns: Any):
-        self.__dict__.update(fns)
+        for name, fn in fns.items():
+            setattr(self, name, _awaitable(fn))
+
+
+def _awaitable(fn: Any) -> Any:
+    async def call(*args: Any, **kwargs: Any) -> Any:
+        return fn(*args, **kwargs)
+
+    return call
 
 
 class FakeNotion:
@@ -113,13 +123,13 @@ class FakeSlack:
                         for i, n, e in members]
         self.posts, self.blocks = [], []
 
-    def users_list(self, limit=200, cursor=None):
+    async def users_list(self, limit=200, cursor=None):
         return {'members': self.members, 'response_metadata': {}}
 
-    def users_lookupByEmail(self, email):
+    async def users_lookupByEmail(self, email):
         raise RuntimeError('users_not_found')
 
-    def chat_postMessage(self, channel, text, blocks=None, unfurl_links=None):
+    async def chat_postMessage(self, channel, text, blocks=None, unfurl_links=None):
         self.posts.append((channel, text))
         self.blocks.append(blocks)
         return {'ok': True}

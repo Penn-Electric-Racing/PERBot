@@ -33,6 +33,7 @@ PERBot/
     notion.py                 # Notion: the API client (Notion.shared()); collect, plain_text, dashed_id, ...
     slack.py                  # Slack: the client (Slack.shared()), directory; match_by_name, unwrap_links, ...
     llm.py                    # LLM: OpenAI + Groq clients (LLM.shared())
+    http.py aio.py            # HTTP over aiohttp (http.get/post/run); spawn/map/background for tasks
     job_log.py                # JobLog: once-only records in the ⚙️ Job Log (cron dedup, alerts, queue)
     purchasing.py             # Purchasing (PEFS) database: PurchasingRow, Purchasing.rows / row
     utils.py log.py           # helper functions (text, timestamps, Eastern time); setup_logging()
@@ -71,6 +72,15 @@ buttons, and `app.py` only does `PERBot.add_feature(...)` for each.
 | `Choice` / `SelectOption` enums (they compare equal to plain strings) | `core/enums.py` |
 | `PERBotError` → `ConfigError`, `NotionError`, `SlackError`, `ScraperError` | `core/errors.py` |
 | TypedDicts for raw payloads | `core/types/` |
+| HTTP (`http.get`, `http.post`, `http.request`, `http.download`; `http.run(main())` for entrypoints) | `core/http.py` |
+| Running work side by side: `aio.spawn`, `aio.map(fn, items, limit=)`, `aio.background` | `core/aio.py` |
+
+Everything is async on one asyncio loop: Bolt's `AsyncApp` over the aiohttp Socket Mode client,
+`AsyncWebClient` for Slack, Notion and every other HTTP call through `core/http.py` (aiohttp), and
+`AsyncOpenAI` on aiohttp for the LLMs. Listeners, `@task`s and anything that does I/O are `async def`
+and are awaited; there are no threads (CPU-heavy parsing, like the search index or a PDF, goes
+through `asyncio.to_thread`). Each job and CLI is `async def main()` run with `http.run(main())`,
+which closes the loop's HTTP session when it's done.
 
 A feature has `feature.py` and, as it needs them, `views.py`, `models.py`, `types.py`, `enums.py`,
 `database.py` and its own CLIs (`price_check/` has the full set).
@@ -213,7 +223,7 @@ Watches the Purchasing (PEFS) Notion database and, when a new row's price has mo
 Point of contact on Slack. Rows can come from anywhere: typed into Notion, imported, or another app.
 Each new row is re-priced at its quantity (web search, Mouser/DigiKey APIs and an LLM reading the
 product pages) and compared with the `Unit cost` in Notion. This used to be the separate
-`PER-Purchasing` repo. It now runs **inside the bot** on a background thread when
+`PER-Purchasing` repo. It now runs **inside the bot** as a background task when
 `PRICE_CHECK_ENABLED=true`. It's all in `price_check/` and uses the shared clients in `core/` (`Notion`, `Slack`, `JobLog`,
 `PurchasingRow`, `config.price_check`):
 
@@ -336,6 +346,10 @@ python app.py
 ```bash
 pytest
 ```
+
+Tests are `async def` (pytest-asyncio, `asyncio_mode = "auto"`). Fakes for coroutine functions
+come from `tests/aio.py` (`awaitable`, `returning`, `FakeHTTP` for code that takes `request=`), and
+a test that opens a real HTTP session fails.
 
 ## Scheduled jobs and CLIs
 

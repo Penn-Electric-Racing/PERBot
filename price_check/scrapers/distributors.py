@@ -22,8 +22,7 @@ import sys
 import time
 from urllib.parse import urlparse
 
-import requests
-
+from core import http
 from core.errors import ScraperError
 
 __all__ = [
@@ -98,12 +97,12 @@ def _candidate(title, url, snippet, supplier, **info):
 
 
 # ---------------------------------------------------------------- Mouser
-def mouser(query, qty=1, n=10):
+async def mouser(query, qty=1, n=10):
     """Up to `n` priced parts from Mouser's keyword search (needs MOUSER_API_KEY)."""
     key = os.getenv("MOUSER_API_KEY")
     if not key:
         raise APIError("MOUSER_API_KEY not set")
-    r = requests.post(MOUSER_URL, params={"apiKey": key}, timeout=TIMEOUT, json={
+    r = await http.post(MOUSER_URL, params={"apiKey": key}, timeout=TIMEOUT, json={
         "SearchByKeywordRequest": {"keyword": query, "records": min(n * 2, MAX_RECORDS),
                                    "startingRecord": 0}})
     if r.status_code != 200:
@@ -146,11 +145,11 @@ def mouser(query, qty=1, n=10):
 _token = {"value": None, "expires": 0.0}
 
 
-def _digikey_token(client_id, secret):
+async def _digikey_token(client_id, secret):
     """OAuth2 client-credentials token, cached until shortly before it expires."""
     if _token["value"] and time.time() < _token["expires"]:
         return _token["value"]
-    r = requests.post(DIGIKEY_TOKEN_URL, timeout=TIMEOUT, data={
+    r = await http.post(DIGIKEY_TOKEN_URL, timeout=TIMEOUT, data={
         "client_id": client_id, "client_secret": secret, "grant_type": "client_credentials"})
     if r.status_code != 200:
         raise APIError(f"DigiKey token HTTP {r.status_code}")
@@ -182,15 +181,15 @@ def _best_variation(variations, qty):
     return best
 
 
-def digikey(query, qty=1, n=10):
+async def digikey(query, qty=1, n=10):
     """Up to `n` priced parts from DigiKey's v4 keyword search
     (needs DIGIKEY_CLIENT_ID and DIGIKEY_CLIENT_SECRET)."""
     cid, secret = os.getenv("DIGIKEY_CLIENT_ID"), os.getenv("DIGIKEY_CLIENT_SECRET")
     if not (cid and secret):
         raise APIError("DIGIKEY_CLIENT_ID / DIGIKEY_CLIENT_SECRET not set")
     currency = os.getenv("DIGIKEY_CURRENCY", "USD")
-    r = requests.post(DIGIKEY_SEARCH_URL, timeout=TIMEOUT, headers={
-        "Authorization": f"Bearer {_digikey_token(cid, secret)}",
+    r = await http.post(DIGIKEY_SEARCH_URL, timeout=TIMEOUT, headers={
+        "Authorization": f"Bearer {await _digikey_token(cid, secret)}",
         "X-DIGIKEY-Client-Id": cid,
         "X-DIGIKEY-Locale-Site": os.getenv("DIGIKEY_SITE", "US"),
         "X-DIGIKEY-Locale-Language": "en",
@@ -238,14 +237,14 @@ APIS = [("mouser", mouser), ("digikey", digikey)]
 
 
 # ---------------------------------------------------------------- merging
-def lookup(query, qty=1, n=10, verbose=False):
+async def lookup(query, qty=1, n=10, verbose=False):
     """Results from every configured API: (results, names of APIs that returned some).
     Unconfigured or failing APIs are skipped (logged with `verbose`)."""
     out, used = [], []
     for name, fn in APIS:
         try:
-            res = fn(query, qty, n)
-        except (APIError, requests.RequestException, ValueError, KeyError) as e:
+            res = await fn(query, qty, n)
+        except (APIError, http.RequestError, ValueError, KeyError) as e:
             if verbose:
                 print(f"[{name} api] skipped: {e}", file=sys.stderr)
             continue

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from core import utils
 from core.config import PriceCheckConfig, config
@@ -71,13 +71,13 @@ class PurchasingPrices(Purchasing):
             {'property': Col.UNIT_COST, 'number': {'greater_than': 0}},
         ]
 
-    def open_rows(self, limit: int | None = None) -> list[PurchasingRow]:
+    async def open_rows(self, limit: int | None = None) -> list[PurchasingRow]:
         """Every open row (oldest first), for a manual sweep."""
-        return self.query({'and': self.open_filter()}, [{'timestamp': 'created_time', 'direction': 'ascending'}], limit)
+        return await self.query({'and': self.open_filter()}, [{'timestamp': 'created_time', 'direction': 'ascending'}], limit)
 
-    def edited_since(self, since: datetime) -> list[Any]:
+    async def edited_since(self, since: datetime) -> list[Any]:
         """Open rows' pages edited since `since`, oldest edit first."""
-        return self.pages(
+        return await self.pages(
             {'and': self.open_filter() + [{'timestamp': 'last_edited_time', 'last_edited_time': {'on_or_after': utils.to_iso(since)}}]},
             [{'timestamp': 'last_edited_time', 'direction': 'ascending'}],
         )
@@ -95,13 +95,13 @@ class PurchasingPrices(Purchasing):
             return 'part number, Quant. or Unit cost missing'
         return None
 
-    def price_row(self, page_id: str) -> PriceRow:
+    async def price_row(self, page_id: str) -> PriceRow:
         """The row as a click sees it."""
-        return PriceRow.from_page(self.client.pages.retrieve(page_id), db=self)
+        return PriceRow.from_page(await self.client.pages.retrieve(page_id), db=self)
 
-    def write_price(self, page_id: str, patch: RowPatch) -> None:
+    async def write_price(self, page_id: str, patch: RowPatch) -> None:
         props = patch.props()
-        self.client.pages.update(page_id, properties=props)
+        await self.client.pages.update(page_id, properties=props)
         logger.info(f"Price check: row {page_id} → Unit cost {patch.unit_cost}{', link updated' if Col.LINK in props else ''}.")
 
 
@@ -120,32 +120,32 @@ class CheckQueue:
     def key(cls, page_id: str) -> str:
         return f'{cls.JOB} {page_id}'
 
-    def enqueue(self, page_id: str, dry_run: bool = False) -> bool:
+    async def enqueue(self, page_id: str, dry_run: bool = False) -> bool:
         """Queue a row (no-op if it was ever queued). True if newly queued (dry run: would be)."""
-        return self.log.claim_once(self.key(page_id), self.JOB, dry_run=dry_run)
+        return await self.log.claim_once(self.key(page_id), self.JOB, dry_run=dry_run)
 
-    def mark_done(self, entry_id: str) -> None:
+    async def mark_done(self, entry_id: str) -> None:
         """Mark a queue entry checked; it stays in the Job Log so the row isn't queued again."""
-        self.log.set_job(entry_id, self.DONE_JOB)
+        await self.log.set_job(entry_id, self.DONE_JOB)
 
-    def entries(self, limit: int | None = None) -> list[tuple[str, str]]:
+    async def entries(self, limit: int | None = None) -> list[tuple[str, str]]:
         """Queued rows, oldest first: [(Job Log entry id, Purchasing page id)]."""
         out = []
-        for e in self.log.entries(self.JOB, limit):
+        for e in await self.log.entries(self.JOB, limit):
             key = Properties(e).text('Run key')
             if key.startswith(self.JOB + ' '):
                 out.append((e['id'], key[len(self.JOB) + 1 :].strip()))
         return out
 
-    def queue_new_rows(self, since: datetime, settled_before: datetime | None = None, dry_run: bool = False) -> list[str]:
+    async def queue_new_rows(self, since: datetime, settled_before: datetime | None = None, dry_run: bool = False) -> list[str]:
         """Queue this season's open, complete rows edited since `since` that were never queued,
         skipping rows edited after `settled_before` (still being typed in). Returns the page ids
         newly queued (dry run: the ones that would be)."""
         return [
             pg['id']
-            for pg in self.purchasing.edited_since(since)
+            for pg in await self.purchasing.edited_since(since)
             if (settled_before is None or utils.parse_iso(pg.get('last_edited_time') or '') <= settled_before)
-            and self.enqueue(pg['id'], dry_run)
+            and await self.enqueue(pg['id'], dry_run)
         ]
 
 
@@ -213,21 +213,21 @@ class SavingsLedger(Database[LedgerRow]):
 
     # --- reads and writes ------------------------------------------------------------------------
 
-    def log_alert(self, f: Finding, now: datetime | None = None) -> bool:
+    async def log_alert(self, f: Finding, now: datetime | None = None) -> bool:
         """Log a sent alert as Pending. Never raises: a missed row only costs a statistic (the
         first click on the alert creates it anyway)."""
         if not self.enabled:
             return False
         try:
-            self.create(alert_row_props(f, now))
+            await self.create(alert_row_props(f, now))
             return True
         except Exception as err:
             logger.warning(f"Price check ledger: couldn't log the alert for {f.row.id}", exc_info=err)
             return False
 
-    def find(self, v: SwapValue) -> Any | None:
+    async def find(self, v: SwapValue) -> Any | None:
         """The alert's ledger page (newest if a row somehow has two), or None."""
-        pages = self.pages(
+        pages = await self.pages(
             {
                 'and': [
                     {'property': 'Row ID', 'rich_text': {'equals': dashed_id(v.row_id)}},
@@ -241,33 +241,33 @@ class SavingsLedger(Database[LedgerRow]):
         pages.sort(key=lambda p: utils.parse_iso(p.get('created_time') or '1970-01-01'), reverse=True)
         return pages[0] if pages else None
 
-    def record(self, e: LedgerEvent, who: str, fetch_row: Callable[[str], PriceRow]) -> str:
+    async def record(self, e: LedgerEvent, who: str, fetch_row: Callable[[str], Awaitable[PriceRow]]) -> str:
         """Write a click: update the alert's row, creating it first when the alert wasn't logged.
         Test alerts (`x`) are skipped. Returns what happened, for the log."""
         if not self.enabled:
             return 'ledger off'
         if e.value.test:
             return 'test alert, not logged'
-        page = self.find(e.value)
+        page = await self.find(e.value)
         current = LedgerRow.from_page(page).outcome if page else None
         props = e.props(who, current)
         if not props:
             return f'kept {current}'
         if not page:
-            page = self.create(click_row_props(e.value, fetch_row(e.value.row_id)))
-        self.update(page['id'], props)
+            page = await self.create(click_row_props(e.value, await fetch_row(e.value.row_id)))
+        await self.update(page['id'], props)
         return f"{current or 'new'} → {e.kind}"
 
-    def rows(self) -> list[LedgerRow]:
-        return self.query()
+    async def rows(self) -> list[LedgerRow]:
+        return await self.query()
 
-    def sweep_realized(self, fetch_row: Callable[[str], PriceRow], now: datetime | None = None) -> int:
+    async def sweep_realized(self, fetch_row: Callable[[str], Awaitable[PriceRow]], now: datetime | None = None) -> int:
         """Mark Used rows Realized once their Purchasing row is ordered (Exported?) with Unit cost
         still at the price that was used. Returns how many were marked."""
         if not self.enabled:
             return 0
         when = now or datetime.now(timezone.utc)
-        open_rows = self.pages(
+        open_rows = await self.pages(
             {'and': [{'property': 'Outcome', 'select': {'equals': Outcome.USED}}, {'property': 'Realized', 'checkbox': {'equals': False}}]}
         )
         marked = 0
@@ -278,10 +278,10 @@ class SavingsLedger(Database[LedgerRow]):
             if not row_id or used is None:
                 continue
             try:
-                row = fetch_row(row_id)
+                row = await fetch_row(row_id)
                 if row.deleted or not row.exported or row.unit_cost is None or abs(row.unit_cost - used) > 1e-6:
                     continue
-                self.update(page['id'], {'Realized': {'checkbox': True}, 'Ordered at': date_value(when)})
+                await self.update(page['id'], {'Realized': {'checkbox': True}, 'Ordered at': date_value(when)})
                 marked += 1
             except Exception as err:
                 logger.warning(f"Price check ledger: couldn't check row {row_id} for Realized", exc_info=err)

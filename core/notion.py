@@ -11,15 +11,13 @@ transient 5xx are retried with backoff, as the JS SDK did.
 """
 from __future__ import annotations
 
+import asyncio
 import random
 import re
-import threading
-import time
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
-import httpx
-
+from core import http
 from core.errors import NotionError
 
 __all__ = [
@@ -59,12 +57,13 @@ class NotionUser:
 _PAGE_ID_RE = re.compile(r'([0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$', re.I)
 
 
-def collect(fn: Any, limit: int | None = None, **kwargs: Any) -> list[Any]:
-    """All results of a cursor-paginated list/query call (the first `limit` when given)."""
+async def collect(fn: Any, limit: int | None = None, **kwargs: Any) -> list[Any]:
+    """All results of a cursor-paginated list/query call (the first `limit` when given). `fn` is
+    an async call like `notion.data_sources.query`."""
     out: list[Any] = []
     cursor: str | None = None
     while True:
-        res = fn(**kwargs, start_cursor=cursor)
+        res = await fn(**kwargs, start_cursor=cursor)
         out.extend(res.get('results') or [])
         if limit is not None and len(out) >= limit:
             return out[:limit]
@@ -100,28 +99,25 @@ def same_id(a: str, b: str) -> bool:
 
 class Notion:
     _shared: ClassVar['Notion | None'] = None
-    _lock: ClassVar[threading.Lock] = threading.Lock()
 
     @classmethod
     def shared(cls) -> 'Notion':
         """The bot's client, built once (NOTION_TOKEN / NOTION_API_VERSION)."""
-        with cls._lock:
-            if cls._shared is None:
-                from core.config import config
+        if cls._shared is None:
+            from core.config import config
 
-                cls._shared = cls(config.notion.token, config.notion.api_version)
-            return cls._shared
+            cls._shared = cls(config.notion.token, config.notion.api_version)
+        return cls._shared
 
     def __init__(self, auth: str, notion_version: str | None = None, timeout: float = 60.0):
-        self._http = httpx.Client(
-            base_url=API,
-            timeout=timeout,
-            headers={
-                'Authorization': f'Bearer {auth}',
-                'Notion-Version': notion_version or DEFAULT_VERSION,
-                'Content-Type': 'application/json',
-            },
-        )
+        # Requests go through the event loop's shared session (core.http), so the client holds
+        # no connection state and works from any loop.
+        self.timeout = timeout
+        self._headers = {
+            'Authorization': f'Bearer {auth}',
+            'Notion-Version': notion_version or DEFAULT_VERSION,
+            'Content-Type': 'application/json',
+        }
         self.data_sources = _DataSources(self)
         self.databases = _Databases(self)
         self.pages = _Pages(self)
@@ -129,7 +125,7 @@ class Notion:
         self.users = _Users(self)
         self.comments = _Comments(self)
 
-    def request(
+    async def request(
         self,
         method: str,
         path: str,
@@ -139,11 +135,13 @@ class Notion:
         params = {k: v for k, v in (query or {}).items() if v is not None}
         for attempt in range(MAX_RETRIES + 1):
             try:
-                res = self._http.request(method, path, json=body if body is not None else None, params=params or None)
-            except httpx.TransportError:
+                res = await http.request(
+                    method, API + path, json=body, params=params or None, headers=self._headers, timeout=self.timeout
+                )
+            except (http.Timeout, http.ConnectError):
                 if attempt >= MAX_RETRIES:
                     raise
-                time.sleep(min(8.0, 0.5 * 2**attempt) + random.random() * 0.25)
+                await asyncio.sleep(min(8.0, 0.5 * 2**attempt) + random.random() * 0.25)
                 continue
             if res.status_code in (429, 500, 502, 503, 504) and attempt < MAX_RETRIES:
                 retry_after = res.headers.get('retry-after')
@@ -151,9 +149,9 @@ class Notion:
                     delay = float(retry_after) if retry_after else min(8.0, 0.5 * 2**attempt)
                 except ValueError:
                     delay = min(8.0, 0.5 * 2**attempt)
-                time.sleep(delay + random.random() * 0.25)
+                await asyncio.sleep(delay + random.random() * 0.25)
                 continue
-            if res.is_success:
+            if res.ok:
                 return res.json() if res.content else {}
             try:
                 data = res.json()
@@ -162,18 +160,18 @@ class Notion:
             raise NotionAPIError(res.status_code, data.get('code', ''), data.get('message', res.text[:300]), data)
         raise RuntimeError('unreachable')
 
-    def search(self, **body: Any) -> Any:
-        return self.request('POST', '/search', _clean(body))
+    async def search(self, **body: Any) -> Any:
+        return await self.request('POST', '/search', _clean(body))
 
-    def query_all(self, data_source_id: str, limit: int | None = None, **body: Any) -> list[Any]:
+    async def query_all(self, data_source_id: str, limit: int | None = None, **body: Any) -> list[Any]:
         """Every page of a data source query (the first `limit` when given)."""
-        return collect(self.data_sources.query, limit=limit, data_source_id=data_source_id, **body)
+        return await collect(self.data_sources.query, limit=limit, data_source_id=data_source_id, **body)
 
-    def list_users(self) -> list[NotionUser]:
+    async def list_users(self) -> list[NotionUser]:
         """Workspace people (bots left out). Needs only `users.list`, so `Notion.list_users(c)`
         works on any client shaped like this one."""
         users: list[NotionUser] = []
-        for user in collect(self.users.list, page_size=100):
+        for user in await collect(self.users.list, page_size=100):
             if user.get('type') == 'bot' or not user.get('id'):
                 continue
             name = user.get('name')
@@ -181,60 +179,57 @@ class Notion:
             users.append(NotionUser(user['id'], name if isinstance(name, str) else '', email if isinstance(email, str) else None))
         return users
 
-    def close(self) -> None:
-        self._http.close()
-
 
 class _DataSources:
     def __init__(self, c: Notion):
         self._c = c
 
-    def query(self, data_source_id: str, **body: Any) -> Any:
-        return self._c.request('POST', f'/data_sources/{data_source_id}/query', _clean(body))
+    async def query(self, data_source_id: str, **body: Any) -> Any:
+        return await self._c.request('POST', f'/data_sources/{data_source_id}/query', _clean(body))
 
-    def retrieve(self, data_source_id: str) -> Any:
-        return self._c.request('GET', f'/data_sources/{data_source_id}')
+    async def retrieve(self, data_source_id: str) -> Any:
+        return await self._c.request('GET', f'/data_sources/{data_source_id}')
 
-    def update(self, data_source_id: str, **body: Any) -> Any:
-        return self._c.request('PATCH', f'/data_sources/{data_source_id}', _clean(body))
+    async def update(self, data_source_id: str, **body: Any) -> Any:
+        return await self._c.request('PATCH', f'/data_sources/{data_source_id}', _clean(body))
 
 
 class _Databases:
     def __init__(self, c: Notion):
         self._c = c
 
-    def retrieve(self, database_id: str) -> Any:
-        return self._c.request('GET', f'/databases/{database_id}')
+    async def retrieve(self, database_id: str) -> Any:
+        return await self._c.request('GET', f'/databases/{database_id}')
 
 
 class _Pages:
     def __init__(self, c: Notion):
         self._c = c
 
-    def create(self, **body: Any) -> Any:
-        return self._c.request('POST', '/pages', _clean(body))
+    async def create(self, **body: Any) -> Any:
+        return await self._c.request('POST', '/pages', _clean(body))
 
-    def retrieve(self, page_id: str) -> Any:
-        return self._c.request('GET', f'/pages/{page_id}')
+    async def retrieve(self, page_id: str) -> Any:
+        return await self._c.request('GET', f'/pages/{page_id}')
 
-    def update(self, page_id: str, **body: Any) -> Any:
-        return self._c.request('PATCH', f'/pages/{page_id}', _clean(body))
+    async def update(self, page_id: str, **body: Any) -> Any:
+        return await self._c.request('PATCH', f'/pages/{page_id}', _clean(body))
 
-    def markdown(self, page_id: str) -> Any:
-        return self._c.request('GET', f'/pages/{page_id}/markdown')
+    async def markdown(self, page_id: str) -> Any:
+        return await self._c.request('GET', f'/pages/{page_id}/markdown')
 
 
 class _Children:
     def __init__(self, c: Notion):
         self._c = c
 
-    def list(self, block_id: str, start_cursor: str | None = None, page_size: int | None = None) -> Any:
-        return self._c.request(
+    async def list(self, block_id: str, start_cursor: str | None = None, page_size: int | None = None) -> Any:
+        return await self._c.request(
             'GET', f'/blocks/{block_id}/children', query={'start_cursor': start_cursor, 'page_size': page_size}
         )
 
-    def append(self, block_id: str, **body: Any) -> Any:
-        return self._c.request('PATCH', f'/blocks/{block_id}/children', _clean(body))
+    async def append(self, block_id: str, **body: Any) -> Any:
+        return await self._c.request('PATCH', f'/blocks/{block_id}/children', _clean(body))
 
 
 class _Blocks:
@@ -242,27 +237,27 @@ class _Blocks:
         self._c = c
         self.children = _Children(c)
 
-    def retrieve(self, block_id: str) -> Any:
-        return self._c.request('GET', f'/blocks/{block_id}')
+    async def retrieve(self, block_id: str) -> Any:
+        return await self._c.request('GET', f'/blocks/{block_id}')
 
-    def update(self, block_id: str, **body: Any) -> Any:
-        return self._c.request('PATCH', f'/blocks/{block_id}', _clean(body))
+    async def update(self, block_id: str, **body: Any) -> Any:
+        return await self._c.request('PATCH', f'/blocks/{block_id}', _clean(body))
 
-    def delete(self, block_id: str) -> Any:
-        return self._c.request('DELETE', f'/blocks/{block_id}')
+    async def delete(self, block_id: str) -> Any:
+        return await self._c.request('DELETE', f'/blocks/{block_id}')
 
 
 class _Users:
     def __init__(self, c: Notion):
         self._c = c
 
-    def list(self, start_cursor: str | None = None, page_size: int | None = None) -> Any:
-        return self._c.request('GET', '/users', query={'start_cursor': start_cursor, 'page_size': page_size})
+    async def list(self, start_cursor: str | None = None, page_size: int | None = None) -> Any:
+        return await self._c.request('GET', '/users', query={'start_cursor': start_cursor, 'page_size': page_size})
 
 
 class _Comments:
     def __init__(self, c: Notion):
         self._c = c
 
-    def create(self, **body: Any) -> Any:
-        return self._c.request('POST', '/comments', _clean(body))
+    async def create(self, **body: Any) -> Any:
+        return await self._c.request('POST', '/comments', _clean(body))

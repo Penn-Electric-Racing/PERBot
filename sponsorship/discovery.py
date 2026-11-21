@@ -13,17 +13,17 @@ Guardrails, same as enrichment:
 """
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import logging
 import math
 import re
 import socket
-import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from core import aio
 from core.config import config
 from core.llm import LLM
 from sponsorship.domain import extract_hostname
@@ -63,13 +63,13 @@ def _suggested_wait_s(err: Exception) -> float | None:
     return min(60.0, math.ceil(float(m.group(1)) * 1000 + 1000) / 1000) if m else None
 
 
-def chat_json(system: str, user: str) -> dict[str, Any]:
+async def chat_json(system: str, user: str) -> dict[str, Any]:
     """One forced-JSON Groq chat call, retrying rate limits on the free-tier TPM window."""
     groq = LLM.shared().groq
     attempt = 0
     while True:
         try:
-            response = groq.chat.completions.create(
+            response = await groq.chat.completions.create(
                 model=config.groq.model,
                 temperature=0,
                 reasoning_effort='low',
@@ -82,7 +82,7 @@ def chat_json(system: str, user: str) -> dict[str, Any]:
             if status in (429, 413) and attempt < RATE_LIMIT_RETRIES:
                 wait = _suggested_wait_s(err) or DEFAULT_WAIT_S
                 logger.warning(f'Groq rate-limited ({status}); retrying in {round(wait)}s')
-                time.sleep(wait)
+                await asyncio.sleep(wait)
                 attempt += 1
                 continue
             raise
@@ -147,7 +147,7 @@ def read_roster_numbers(value: Any, max_n: int, roster_size: int) -> list[int]:
     return list(seen)
 
 
-def find_matching_prospects(need: str, rows: list[BankLeadRow]) -> list[ProspectMatch]:
+async def find_matching_prospects(need: str, rows: list[BankLeadRow]) -> list[ProspectMatch]:
     """Match a free-text need against the unclaimed Bank, in TWO small Groq passes to fit the free
     tier's 8k TPM: (1) a cheap name+category shortlist over all rows (recall), then (2) rank the
     shortlist with full fit reasons (precision), best-first with a one-line why each."""
@@ -160,7 +160,7 @@ def find_matching_prospects(need: str, rows: list[BankLeadRow]) -> list[Prospect
     if len(roster) > SHORTLIST_BUDGET_CHARS:
         logger.warning(f'Shortlist roster over budget ({len(roster)} chars) — falling back to name-only lines.')
         roster = '\n'.join(f'{i + 1}. {r.company}' for i, r in enumerate(rows))
-    shortlist_raw = chat_json(SHORTLIST_SYSTEM_PROMPT, f'Team need: {need}\n\nRoster:\n{roster}')
+    shortlist_raw = await chat_json(SHORTLIST_SYSTEM_PROMPT, f'Team need: {need}\n\nRoster:\n{roster}')
     shortlist = read_roster_numbers(shortlist_raw.get('shortlist'), SHORTLIST_LIMIT, len(rows))
     if not shortlist:
         return []
@@ -172,7 +172,7 @@ def find_matching_prospects(need: str, rows: list[BankLeadRow]) -> list[Prospect
         + (f'; fit: {r.fit_reason[:FIND_REASON_CHARS]}' if r.fit_reason[:FIND_REASON_CHARS] else '')
         for i, r in enumerate(picked)
     )
-    ranked_raw = chat_json(RANK_SYSTEM_PROMPT, f'Team need: {need}\n\nProspect roster:\n{detail}')
+    ranked_raw = await chat_json(RANK_SYSTEM_PROMPT, f'Team need: {need}\n\nProspect roster:\n{detail}')
 
     items = ranked_raw.get('matches') if isinstance(ranked_raw.get('matches'), list) else []
     seen: set[int] = set()
@@ -237,12 +237,12 @@ Return ONLY a JSON object: {"verdicts": [{"n": <number>, "verdict": "confirmed" 
 - Judge ONLY from the provided homepage text; do not use outside knowledge to rescue a candidate."""
 
 
-def _generate_candidates(need: str, known_hostnames: set[str]) -> list[ScoutCandidate]:
+async def _generate_candidates(need: str, known_hostnames: set[str]) -> list[ScoutCandidate]:
     """Stage 1: ask the LLM for candidate companies, keeping only parseable, unknown domains."""
     # The prompt's skip-list is best-effort (capped for the token budget); the REAL dedupe is the
     # code check against the full set below, so a cap costs nothing but a wasted suggestion slot.
     known = ', '.join(sorted(known_hostnames)[:KNOWN_DOMAINS_IN_PROMPT]) or '(none yet)'
-    raw = chat_json(SCOUT_SYSTEM_PROMPT, f'Team need: {need}\n\nAlready-known domains (skip these):\n{known}')
+    raw = await chat_json(SCOUT_SYSTEM_PROMPT, f'Team need: {need}\n\nAlready-known domains (skip these):\n{known}')
     items = raw.get('candidates') if isinstance(raw.get('candidates'), list) else []
     seen: set[str] = set()
     out: list[ScoutCandidate] = []
@@ -259,14 +259,14 @@ def _generate_candidates(need: str, known_hostnames: set[str]) -> list[ScoutCand
     return out
 
 
-def _verify_candidates(need: str, candidates: list[ScoutCandidate], snippets: list[str]) -> dict[int, tuple[ScoutVerdict, str]]:
+async def _verify_candidates(need: str, candidates: list[ScoutCandidate], snippets: list[str]) -> dict[int, tuple[ScoutVerdict, str]]:
     """Stage 3: one Groq call judging every candidate against its fetched homepage text."""
     listing = '\n'.join(
         f"{i + 1}. {c.company} ({c.hostname}) — claimed fit: {c.why}\n   "
         + (f'homepage: {snippets[i]}' if snippets[i] else '(homepage unreachable)')
         for i, c in enumerate(candidates)
     )
-    raw = chat_json(VERIFY_SYSTEM_PROMPT, f'Team need: {need}\n\nCandidates:\n{listing}')
+    raw = await chat_json(VERIFY_SYSTEM_PROMPT, f'Team need: {need}\n\nCandidates:\n{listing}')
     items = raw.get('verdicts') if isinstance(raw.get('verdicts'), list) else []
     verdicts: dict[int, tuple[ScoutVerdict, str]] = {}
     for item in items:
@@ -287,27 +287,26 @@ def _resolves(hostname: str) -> bool:
         return False
 
 
-def scout_companies(need: str, known_hostnames: set[str]) -> ScoutResult:
+async def scout_companies(need: str, known_hostnames: set[str]) -> ScoutResult:
     """Full scout pipeline: generate candidates → fetch each homepage (the hallucination filter) →
     verify page-vs-claim → return confirmed first, then unverified; rejected candidates are dropped
     but counted. Read-only: no Notion writes, no Hunter credits."""
-    generated = _generate_candidates(need, known_hostnames)
+    generated = await _generate_candidates(need, known_hostnames)
     if not generated:
         return ScoutResult([], 0)
 
     # An empty homepage can mean bot-blocked (real company) OR nonexistent (invented company) — a
     # failed DNS lookup distinguishes them: no A record ⇒ hallucinated.
-    def ground(c: ScoutCandidate) -> tuple[str, bool]:
-        text = fetch_company_text(c.hostname)
+    async def ground(c: ScoutCandidate) -> tuple[str, bool]:
+        text = await fetch_company_text(c.hostname)
         if text:
             return text[:SNIPPET_CHARS], True
         return '', _resolves(c.hostname)
 
-    with ThreadPoolExecutor(max_workers=FETCH_CONCURRENCY) as pool:
-        grounded = list(pool.map(ground, generated))
+    grounded = await aio.map(ground, generated, limit=FETCH_CONCURRENCY)
     snippets = [g[0] for g in grounded]
 
-    verdicts = _verify_candidates(need, generated, snippets)
+    verdicts = await _verify_candidates(need, generated, snippets)
 
     candidates: list[ScoutCandidate] = []
     for i, c in enumerate(generated):

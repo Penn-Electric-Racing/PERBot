@@ -24,7 +24,7 @@ Free tiers are rate-limited per minute, so requests are paced (--rpm) and
 429s are retried. 30 pages at 15 rpm takes about 2 minutes.
 
 Usage:
-    pip install requests beautifulsoup4
+    pip install aiohttp beautifulsoup4
     export OPENAI_API_KEY=...
     python -m price_check.scrapers.llm_scraper "LM7805 voltage regulator"
     python -m price_check.scrapers.llm_scraper "LM7805" -q 50 --json
@@ -37,6 +37,7 @@ import sys
 
 from dotenv import load_dotenv
 
+from core import http
 from core.log import setup_logging
 from price_check.scrapers import llm_reader
 from price_check.scrapers.ranking import Scorer, Weights, pick_top
@@ -46,7 +47,7 @@ from price_check.scrapers.websearch import (
 
 
 # ---------------------------------------------------------------- main
-def main():
+async def main():
     """Command-line entry point: search, LLM-extract, score and print or dump JSON."""
     p = argparse.ArgumentParser(
         prog="python -m price_check.scrapers.llm_scraper",
@@ -98,7 +99,7 @@ def main():
         p.error(f"--weights: {e}")
     base = " ".join(a.query)
     try:
-        query, source, results = llm_reader.find(base, a.qty, llm, scorer, pool=a.pool, api_n=a.api,
+        query, source, results = await llm_reader.find(base, a.qty, llm, scorer, pool=a.pool, api_n=a.api,
                                       batch=a.batch, exact=a.exact, no_fetch=a.no_fetch,
                                       verbose=a.verbose)
     except RuntimeError as e:
@@ -164,4 +165,4 @@ def main():
 
 if __name__ == "__main__":
     setup_logging()
-    main()
+    http.run(main())

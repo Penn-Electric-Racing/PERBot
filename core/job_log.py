@@ -16,7 +16,6 @@ Records are written BEFORE the caller sends, so a crash mid-send counts as sent 
 from __future__ import annotations
 
 import logging
-import threading
 from typing import Any, ClassVar
 
 from core import utils
@@ -29,40 +28,38 @@ __all__ = ['JobLog']
 
 class JobLog:
     _shared: ClassVar['JobLog | None'] = None
-    _lock: ClassVar[threading.Lock] = threading.Lock()
 
     @classmethod
     def shared(cls) -> 'JobLog':
-        with cls._lock:
-            if cls._shared is None:
-                from core.config import config
+        if cls._shared is None:
+            from core.config import config
 
-                cls._shared = cls(Notion.shared(), config.notion.job_log_data_source_id)
-            return cls._shared
+            cls._shared = cls(Notion.shared(), config.notion.job_log_data_source_id)
+        return cls._shared
 
     def __init__(self, notion: Notion, data_source_id: str):
         self.notion, self.data_source_id = notion, data_source_id
 
-    def find(self, key: str) -> Any | None:
+    async def find(self, key: str) -> Any | None:
         """The record for `key`, or None."""
-        res = self.notion.data_sources.query(
+        res = await self.notion.data_sources.query(
             data_source_id=self.data_source_id, filter={'property': 'Run key', 'title': {'equals': key}}, page_size=1
         )
         return (res.get('results') or [None])[0]
 
-    def claim_once(self, key: str, job: str, dry_run: bool = False) -> bool:
+    async def claim_once(self, key: str, job: str, dry_run: bool = False) -> bool:
         """Claim `key` once and for all. True if this process is the first to claim it (go ahead),
         False if a record already exists (skip). `dry_run` checks without writing. Without a Job
         Log data source, returns True with a warning (no dedup)."""
         if not self.data_source_id:
             logger.warning(f'Job log: NOTION_JOB_LOG_DS_ID not set — cannot dedupe "{key}".')
             return True
-        if self.find(key):
+        if await self.find(key):
             logger.info(f'Job log: "{key}" already claimed — skipping.')
             return False
         if dry_run:
             return True
-        self.notion.pages.create(
+        await self.notion.pages.create(
             parent={'type': 'data_source_id', 'data_source_id': self.data_source_id},
             properties={
                 'Run key': {'title': [{'text': {'content': key}}]},
@@ -73,14 +70,14 @@ class JobLog:
         logger.info(f'Job log: claimed "{key}".')
         return True
 
-    def claim_run(self, job: str, date_iso: str | None = None) -> bool:
+    async def claim_run(self, job: str, date_iso: str | None = None) -> bool:
         """Claim this job's run for today (ET). True if this process is the first (send); False
         if another cron fire already did the work (skip)."""
-        return self.claim_once(f'{job} {date_iso or utils.now_et().date_iso}', job)
+        return await self.claim_once(f'{job} {date_iso or utils.now_et().date_iso}', job)
 
-    def entries(self, job: str, limit: int | None = None) -> list[Any]:
+    async def entries(self, job: str, limit: int | None = None) -> list[Any]:
         """Records whose Job is `job`, oldest first."""
-        return Notion.query_all(
+        return await Notion.query_all(
             self.notion,
             self.data_source_id,
             limit=limit,
@@ -89,6 +86,6 @@ class JobLog:
             page_size=min(limit or 100, 100),
         )
 
-    def set_job(self, record_id: str, job: str) -> None:
+    async def set_job(self, record_id: str, job: str) -> None:
         """Re-label a record (e.g. a queue entry once it's done); the record stays."""
-        self.notion.pages.update(record_id, properties={'Job': {'rich_text': [{'text': {'content': job}}]}})
+        await self.notion.pages.update(record_id, properties={'Job': {'rich_text': [{'text': {'content': job}}]}})

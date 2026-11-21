@@ -36,7 +36,7 @@ from tests.arrivals.helpers import BASE, line, pkg, row
 OCT10 = datetime(2026, 10, 10, 16, 0, tzinfo=timezone.utc)
 
 
-def no_pick(_p, _orders, _text):
+async def no_pick(_p, _orders, _text):
     return []
 
 
@@ -52,7 +52,7 @@ def block(blocks, block_id):
     return next(b for b in blocks if b.get('block_id') == block_id)
 
 
-def test_eligible_rows_ordered_not_arrived_requested_before_the_photo():
+async def test_eligible_rows_ordered_not_arrived_requested_before_the_photo():
     ok = row('A')
     draft = row('B', exported=False)
     arrived = row('C', arrived='Yes')
@@ -60,7 +60,7 @@ def test_eligible_rows_ordered_not_arrived_requested_before_the_photo():
     assert [r.part_number for r in eligible_rows([ok, draft, arrived, later], OCT10)] == ['A']
 
 
-def test_group_orders_by_run_id_else_vendor_and_request_day():
+async def test_group_orders_by_run_id_else_vendor_and_request_day():
     orders = group_orders([
         row('A', run_id='BENBUYS-1'),
         row('B', run_id='BENBUYS-1'),
@@ -72,7 +72,7 @@ def test_group_orders_by_run_id_else_vendor_and_request_day():
     assert orders[0].run_id == 'BENBUYS-1'
 
 
-def test_orders_for_vendor_addressee_matches_rank_orders():
+async def test_orders_for_vendor_addressee_matches_rank_orders():
     orders = group_orders([
         row('A', run_id='R-OLD', ordered_at='2026-08-01'),
         row('B', run_id='R-NEAR', ordered_at='2026-09-25'),
@@ -92,7 +92,7 @@ def test_orders_for_vendor_addressee_matches_rank_orders():
     assert [o.run_id for o in rank_orders(dk, pkg([]), OCT10)] == ['R-AFTER', 'R-NEAR', 'R-OLD', 'R-KATH']
 
 
-def test_pick_prompt_uses_handles_only_answers_are_validated_against_what_was_offered():
+async def test_pick_prompt_uses_handles_only_answers_are_validated_against_what_was_offered():
     orders = group_orders([
         row('TUBE-1', name='Clear PVC tubing 3/8"', run_id='R1', vendor='McMaster-Carr'),
         row('BRKT', name='Bracket stock', run_id='R2', vendor='McMaster-Carr'),
@@ -121,37 +121,37 @@ def test_pick_prompt_uses_handles_only_answers_are_validated_against_what_was_of
     assert parse_picks({'picks': 'nope'}, built) == []
 
 
-def test_resolve_package_slip_match_wins_hints_go_to_the_picker_vendor_alone_pick_list_nothing_none():
+async def test_resolve_package_slip_match_wins_hints_go_to_the_picker_vendor_alone_pick_list_nothing_none():
     rows = [row('A-ND', run_id='BENBUYS-1'), row('TUBE', name='PVC tubing', run_id='MC-1', vendor='McMaster-Carr', link='')]
-    strong = resolve_package(pkg([line('A-ND')]), rows, OCT10, '', no_pick)[0]
+    strong = (await resolve_package(pkg([line('A-ND')]), rows, OCT10, '', no_pick))[0]
     assert strong.kind == 'match'
 
     offered = {'n': 0}
 
-    def picker(_p, orders, _text):
+    async def picker(_p, orders, _text):
         offered['n'] = len(orders)
         return [Pick(order=orders[0], rows=orders[0].rows, confidence='high', evidence='tube')]
 
-    hinted = resolve_package(pkg([], vendor='McMaster-Carr', item_hints=['cooling tube']), rows, OCT10, 'cooling tube is here', picker)[0]
+    hinted = (await resolve_package(pkg([], vendor='McMaster-Carr', item_hints=['cooling tube']), rows, OCT10, 'cooling tube is here', picker))[0]
     assert offered['n'] == 1  # only McMaster orders offered
     assert hinted.kind == 'match' and hinted.evidence == 'tube'
 
     # A vendor with no open orders (a misread) still lets specific evidence search every order.
-    resolve_package(pkg([], vendor='DHL', item_hints=['cooling tube']), rows, OCT10, '', picker)
+    await resolve_package(pkg([], vendor='DHL', item_hints=['cooling tube']), rows, OCT10, '', picker)
     assert offered['n'] == 2
 
-    label_only = resolve_package(pkg([], vendor='DigiKey'), rows, OCT10, 'Digikey here', no_pick)[0]
+    label_only = (await resolve_package(pkg([], vendor='DigiKey'), rows, OCT10, 'Digikey here', no_pick))[0]
     assert label_only.kind == 'choose' and label_only.orders[0].key == 'BENBUYS-1|digikey'
 
-    assert resolve_package(pkg([], vendor=None), rows, OCT10, '', no_pick)[0].kind == 'none'
-    assert resolve_package(pkg([], vendor='Oshcut'), rows, OCT10, '', no_pick)[0].kind == 'none'
+    assert (await resolve_package(pkg([], vendor=None), rows, OCT10, '', no_pick))[0].kind == 'none'
+    assert (await resolve_package(pkg([], vendor='Oshcut'), rows, OCT10, '', no_pick))[0].kind == 'none'
 
 
 def scan(scene, packages=None, legible=True):
     return Scan(scene=scene, legible=legible, packages=packages if packages is not None else [pkg([], vendor='DigiKey')])
 
 
-def test_build_reply_policy_silent_for_non_deliveries_and_unresolved_thread_photos_one_nudge_for_a_top_level_label():
+async def test_build_reply_policy_silent_for_non_deliveries_and_unresolved_thread_photos_one_nudge_for_a_top_level_label():
     rows = [row('A-ND', run_id='BENBUYS-1', point_of_contact=['Mike Song'])]
     top = ctx(in_thread=False)
     thread = ctx(in_thread=True)
@@ -160,7 +160,7 @@ def test_build_reply_policy_silent_for_non_deliveries_and_unresolved_thread_phot
 
     # Vendor-only label: pick-list at top level, silence in a thread.
     label = scan('shipping_label')
-    res = resolve_scan(label, rows, OCT10, 'Digikey here', no_pick)
+    res = await resolve_scan(label, rows, OCT10, 'Digikey here', no_pick)
     choose = build_reply(label, res, top)
     assert re.search(r'one open DigiKey order \(\*Mike\*’s\) from \*Sep 28\*', dumps(choose.blocks))
     assert block(choose.blocks, 'arrival_actions:0')['elements'][0]['action_id'] == 'arrival_mark'
@@ -168,16 +168,16 @@ def test_build_reply_policy_silent_for_non_deliveries_and_unresolved_thread_phot
 
     # Contents photo with nothing to go on: silent even at top level.
     contents = scan('contents', [pkg([], vendor=None)])
-    assert build_reply(contents, resolve_scan(contents, rows, OCT10, '', no_pick), top) is None
+    assert build_reply(contents, await resolve_scan(contents, rows, OCT10, '', no_pick), top) is None
 
     # Unreadable label at top level → one nudge; in a thread → silent.
     blurry = scan('shipping_label', [pkg([], vendor=None)], False)
-    blurry_res = resolve_scan(blurry, rows, OCT10, '', no_pick)
+    blurry_res = await resolve_scan(blurry, rows, OCT10, '', no_pick)
     assert re.search('couldn’t read the label.*packing slip', dumps(build_reply(blurry, blurry_res, top).blocks))
     assert build_reply(blurry, blurry_res, thread) is None
 
 
-def test_build_reply_specific_matches_reply_even_in_threads_a_pile_photo_gets_matches_but_no_pick_lists():
+async def test_build_reply_specific_matches_reply_even_in_threads_a_pile_photo_gets_matches_but_no_pick_lists():
     rows = [
         row('A-ND', run_id='BENBUYS-1', point_of_contact=['Sofia Ramirez'], unit_cost=123.45, name='Hall sensor'),
         row('B-ND', run_id='BENBUYS-1', point_of_contact=['Sofia Ramirez'], unit_cost=9.99),
@@ -185,7 +185,7 @@ def test_build_reply_specific_matches_reply_even_in_threads_a_pile_photo_gets_ma
         row('NUT', name='Hex nuts', run_id='MC-2', vendor='McMaster-Carr', link=''),
     ]
 
-    def tube_picker(_p, orders, _text):
+    async def tube_picker(_p, orders, _text):
         o = next((x for x in orders if x.run_id == 'MC-1'), None)
         return [Pick(order=o, rows=o.rows, confidence='high', evidence='message says cooling tube')] if o else []
 
@@ -193,7 +193,7 @@ def test_build_reply_specific_matches_reply_even_in_threads_a_pile_photo_gets_ma
         'several_packages',
         [pkg([line('A-ND')]), pkg([], vendor='McMaster-Carr', item_hints=['cooling tube']), pkg([], vendor='McMaster-Carr')],
     )
-    res = resolve_scan(pile, rows, OCT10, 'cooling tube is here', tube_picker)
+    res = await resolve_scan(pile, rows, OCT10, 'cooling tube is here', tube_picker)
     assert [(r.pkg, r.kind) for r in res] == [(0, 'match'), (1, 'match'), (2, 'choose')]
 
     reply = build_reply(pile, res, ctx(in_thread=False))
@@ -217,13 +217,13 @@ def test_build_reply_specific_matches_reply_even_in_threads_a_pile_photo_gets_ma
     assert len([b for b in in_thread.blocks if (b.get('block_id') or '').startswith('arrival_actions:')]) == 2
 
 
-def test_build_reply_one_order_pick_list_reads_naturally_mixed_vendor_pefs_runs_never_go_by_run_id():
+async def test_build_reply_one_order_pick_list_reads_naturally_mixed_vendor_pefs_runs_never_go_by_run_id():
     rows = [
         row('TUBE', name='Firewall tube', run_id='PERPO-1', vendor='mcmaster', link='', point_of_contact=[]),
         row('SWAB', name='Cotton swabs', run_id='PERPO-1', vendor='Amazon', link=''),
     ]
     label = scan('shipping_label', [pkg([], vendor='McMASTER-CARR')])
-    res = resolve_scan(label, rows, OCT10, '', no_pick)
+    res = await resolve_scan(label, rows, OCT10, '', no_pick)
     reply = build_reply(label, res, ctx(in_thread=False))
     j = dumps(reply.blocks)
     assert re.search(r'A \*McMaster-Carr\* package\. There’s one open McMaster-Carr order from \*Sep 28\*\. Is it this one\?', j)
@@ -236,7 +236,7 @@ def _pick(o):
     return Pick(order=o, rows=o.rows, confidence='high', evidence='')
 
 
-def test_ground_picks_a_picked_row_must_share_a_word_stem_with_the_package_evidence():
+async def test_ground_picks_a_picked_row_must_share_a_word_stem_with_the_package_evidence():
     swabs, tubing = group_orders([
         row('B07', name='1200pcs Precision Tip Cotton Swabs', run_id='A1', vendor='Amazon'),
         row('TUBE', name='DERNORD 3/8" ID PVC Tubing for Cooling', run_id='A2', vendor='Amazon'),
@@ -251,10 +251,10 @@ def test_ground_picks_a_picked_row_must_share_a_word_stem_with_the_package_evide
     assert ground_picks([_pick(jlc)], pkg([], vendor='JLCPCB', item_hints=['PCBs (JLCPCB)'])) == []
 
 
-def test_pile_photos_a_pick_list_only_when_the_message_names_the_vendor_once_per_vendor():
+async def test_pile_photos_a_pick_list_only_when_the_message_names_the_vendor_once_per_vendor():
     rows = [row('PCB', name='Minion Test Board', run_id='J1', vendor='JLCPCB', link='')]
     pile = scan('several_packages', [pkg([], vendor='JLCPCB'), pkg([], vendor='JLCPCB')])
-    res = resolve_scan(pile, rows, OCT10, 'Jlc picked up', no_pick)
+    res = await resolve_scan(pile, rows, OCT10, 'Jlc picked up', no_pick)
     assert text_names_vendor('Jlc picked up', 'JLCPCB')
     assert not text_names_vendor('picked up', 'JLCPCB')
     named = build_reply(pile, res, ctx(in_thread=False, text='Jlc picked up'))
@@ -262,7 +262,7 @@ def test_pile_photos_a_pick_list_only_when_the_message_names_the_vendor_once_per
     assert build_reply(pile, res, ctx(in_thread=False, text='')) is None
 
 
-def test_guess_card_top_order_with_requesters_named_nothing_pre_ticked_the_rest_in_a_select_settle_and_swap():
+async def test_guess_card_top_order_with_requesters_named_nothing_pre_ticked_the_rest_in_a_select_settle_and_swap():
     rows = [
         row('SN74LVC245APWR', name='Bus Transceivers Single 8-bit', run_id='M1', vendor='Mouser',
             point_of_contact=['Mike Song', 'Ana Li'], url='https://notion.so/r1', quantity=2),
@@ -272,7 +272,7 @@ def test_guess_card_top_order_with_requesters_named_nothing_pre_ticked_the_rest_
     ]
     people = {'Mike Song': 'U_MIKE'}
     label = scan('shipping_label', [pkg([], vendor='Mouser Electronics')])
-    reply = build_reply(label, resolve_scan(label, rows, OCT10, 'mouser here', no_pick), ctx(in_thread=False, people=people))
+    reply = build_reply(label, await resolve_scan(label, rows, OCT10, 'mouser here', no_pick), ctx(in_thread=False, people=people))
 
     head = block(reply.blocks, 'arrival_head:0')['text']['text']
     assert head == ':package: A *Mouser* package. Best guess: *Mike* and *Ana*’s order from *Sep 28* — tick what’s actually in the box.'
@@ -322,7 +322,7 @@ def test_guess_card_top_order_with_requesters_named_nothing_pre_ticked_the_rest_
     assert [b.get('block_id') or b['type'] for b in swapped] == ['divider', 'arrival_head:0']
 
 
-def test_who_and_dms_mentions_where_known_first_names_otherwise_dm_lists_the_requesters_items_and_lead_time():
+async def test_who_and_dms_mentions_where_known_first_names_otherwise_dm_lists_the_requesters_items_and_lead_time():
     people = {'Mike Song': 'U_MIKE'}
     assert who(['Mike Song', 'Ana Li', 'Bo Chen'], people) == '<@U_MIKE>, *Ana* and *Bo*'
     assert who(['Mike Song', 'Ana Li', 'Bo Chen'], None) == '*Mike*, *Ana* and *Bo*'
@@ -336,25 +336,25 @@ def test_who_and_dms_mentions_where_known_first_names_otherwise_dm_lists_the_req
     assert '<https://slack/p|See the photo in #packages>' in dm
 
 
-def test_pile_photos_the_messages_items_reach_every_package():
+async def test_pile_photos_the_messages_items_reach_every_package():
     rows = [
         row('LDO-1', name='LDO regulator', run_id='M1', vendor='Mouser'),
         row('B0FIT', name='Push-to-connect cooling fittings 3/8"', run_id='A1', vendor='Amazon', link=''),
     ]
     seen_hints = []
 
-    def picker(p, orders, _text):
+    async def picker(p, orders, _text):
         seen_hints.append(p.item_hints)
         o = next((x for x in orders if x.run_id == 'A1'), None)
         return [Pick(order=o, rows=o.rows, confidence='high', evidence='cooling fittings')] if o else []
 
     pile = scan('several_packages', [pkg([], vendor='Mouser', item_hints=['cooling fittings']), pkg([], vendor='Amazon')])
-    res = resolve_scan(pile, rows, OCT10, 'mouser parts and cooling fittings', picker)
+    res = await resolve_scan(pile, rows, OCT10, 'mouser parts and cooling fittings', picker)
     assert seen_hints == [['cooling fittings'], ['cooling fittings']]
     assert [(r.pkg, r.kind) for r in res] == [(0, 'choose'), (1, 'match')]
 
 
-def test_ground_picks_a_hint_grounds_on_its_head_noun_not_on_an_adjective_it_shares():
+async def test_ground_picks_a_hint_grounds_on_its_head_noun_not_on_an_adjective_it_shares():
     fitting, tubing = group_orders([
         row('B0T', name='Cooling T-Fitting for Temp Sensor', run_id='A1', vendor='Amazon'),
         row('B0P', name='DERNORD 3/8" ID PVC Tubing for Cooling', run_id='A2', vendor='Amazon'),
@@ -363,7 +363,7 @@ def test_ground_picks_a_hint_grounds_on_its_head_noun_not_on_an_adjective_it_sha
     assert [p.order.key for p in ground_picks([_pick(fitting), _pick(tubing)], hints)] == [fitting.key]
 
 
-def test_ground_picks_once_an_order_is_grounded_a_shared_modifier_brings_its_sibling_rows_along():
+async def test_ground_picks_once_an_order_is_grounded_a_shared_modifier_brings_its_sibling_rows_along():
     (mc,) = group_orders([
         row('flange 8 feet', name='primary flange', run_id='MC', vendor='mcmaster', link=''),
         row('4130 tube', name='welded insert stock', run_id='MC', vendor='mcmaster', link=''),
@@ -373,7 +373,7 @@ def test_ground_picks_once_an_order_is_grounded_a_shared_modifier_brings_its_sib
     assert sorted(r.name for r in p.rows) == ['primary flange', 'welded insert stock']
 
 
-def test_ground_picks_a_word_the_picked_row_already_explains_does_not_drag_in_siblings():
+async def test_ground_picks_a_word_the_picked_row_already_explains_does_not_drag_in_siblings():
     (amz,) = group_orders([
         row('B0T', name='Cooling T-Fitting for Temp Sensor', run_id='A1', vendor='Amazon'),
         row('B0F', name='12V Cooling Fans', run_id='A1', vendor='Amazon'),
@@ -387,25 +387,25 @@ def test_ground_picks_a_word_the_picked_row_already_explains_does_not_drag_in_si
 OCT19 = datetime(2026, 10, 19, 16, 45, tzinfo=timezone.utc)
 
 
-def test_stale_orders_never_guessed_on_vendor_alone_ranked_after_fresh_ones_gone_past_90_days():
+async def test_stale_orders_never_guessed_on_vendor_alone_ranked_after_fresh_ones_gone_past_90_days():
     rows = [
         row('OLD1', name='Zip ties', vendor='Amazon', link='', submitted_at='2026-08-28', ordered_at='2026-08-29'),
         row('OLD2', name='Hose clamps', vendor='Amazon', link='', submitted_at='2026-09-02', ordered_at='2026-09-03', point_of_contact=['Elijah Jeoung']),
         row('ANCIENT', name='Gloves', vendor='Amazon', link='', submitted_at='2026-06-01', ordered_at='2026-06-02'),
     ]
     label = scan('shipping_label', [pkg([], vendor='Amazon')])
-    assert [r.kind for r in resolve_scan(label, rows, OCT19, 'this has been here for a week', no_pick)] == ['none']
+    assert [r.kind for r in await resolve_scan(label, rows, OCT19, 'this has been here for a week', no_pick)] == ['none']
     assert [r.part_number for r in eligible_rows(rows, OCT19)] == ['OLD1', 'OLD2']
     # A fresh order is guessed first; stale ones stay reachable as alternatives, last.
     fresh = row('NEW', name='Paint brushes', vendor='Amazon', link='', submitted_at='2026-10-13', ordered_at='2026-10-14')
-    res = resolve_scan(label, [*rows, fresh], OCT19, '', no_pick)
+    res = await resolve_scan(label, [*rows, fresh], OCT19, '', no_pick)
     assert res[0].kind == 'choose'
     assert [o.rows[0].part_number for o in res[0].orders] == ['NEW']
     ranked = rank_orders(group_orders(eligible_rows([*rows, fresh], OCT19)), pkg([], vendor='Amazon'), OCT19)
     assert [o.rows[0].part_number for o in ranked] == ['NEW', 'OLD2', 'OLD1']
 
 
-def test_generic_rows_do_not_ground_and_the_guess_shows_whats_inside_and_ticks_nothing():
+async def test_generic_rows_do_not_ground_and_the_guess_shows_whats_inside_and_ticks_nothing():
     boards = row('JLCPCB', name='JLCPCB Boards', run_id='PERPO-9', vendor='JLCPCB', link='https://cart.jlcpcb.com/shopcart/cart',
                  sanitized_description='Order everything in the shared cart $412.20', ordered_at='2026-10-01')
     pdu = row('REV12PDUFixedY475', name='REV12PDUFixedY475', run_id='PERPO-10', vendor='JLCPCB', link='', ordered_at='2026-10-07')
@@ -426,14 +426,14 @@ def test_generic_rows_do_not_ground_and_the_guess_shows_whats_inside_and_ticks_n
     assert 'These items don’t say what’s inside' in dumps(one.blocks)
 
 
-def test_wrong_order_the_button_carries_the_cards_order_and_every_rejection():
+async def test_wrong_order_the_button_carries_the_cards_order_and_every_rejection():
     rows = [
         row('P1', name='Gasket', run_id='MC-1', vendor='McMaster-Carr', link='', ordered_at='2026-10-15'),
         row('P2', name='Weld nut', run_id='MC-2', vendor='McMaster-Carr', link='', ordered_at='2026-10-14'),
         row('P3', name='Rod stock', run_id='MC-3', vendor='McMaster-Carr', link='', ordered_at='2026-10-10'),
     ]
     label = scan('shipping_label', [pkg([], vendor='McMaster-Carr')])
-    res = resolve_scan(label, rows, OCT19, '', no_pick, {'MC-1|mcmaster'})
+    res = await resolve_scan(label, rows, OCT19, '', no_pick, {'MC-1|mcmaster'})
     assert [o.key for o in res[0].orders] == ['MC-2|mcmaster', 'MC-3|mcmaster']
 
     reply = build_reply(label, res, ctx(in_thread=False, rejected=['MC-1|mcmaster']))
@@ -449,10 +449,10 @@ def test_wrong_order_the_button_carries_the_cards_order_and_every_rejection():
     assert re.match(r'^✗ <@U_T>: not that one — nothing was written\.\n:package: A \*McMaster-Carr\* package\.', swapped[0]['text']['text'])
 
 
-def test_thread_orders_what_perbots_cards_in_a_thread_already_cover():
+async def test_thread_orders_what_perbots_cards_in_a_thread_already_cover():
     rows = [row('BRKT', name='primary brackets', run_id='X-1', vendor='Xometry', link='')]
     label = scan('contents', [pkg([], vendor='Xometry')])
-    card = build_reply(label, resolve_scan(label, rows, OCT10, '', no_pick), ctx(in_thread=False, rejected=['X-0|xometry']))
+    card = build_reply(label, await resolve_scan(label, rows, OCT10, '', no_pick), ctx(in_thread=False, rejected=['X-0|xometry']))
     thread = [
         {'ts': '1', 'user': 'U_T', 'text': 'brackets'},
         {'ts': '2', 'bot_id': 'B_PER', 'blocks': card.blocks},
@@ -464,10 +464,10 @@ def test_thread_orders_what_perbots_cards_in_a_thread_already_cover():
     assert len(thread_orders(thread, None)[0]) == 0
 
 
-def test_corrections_may_get_a_vendor_guess_even_in_a_thread_and_a_clear_no_match_line():
+async def test_corrections_may_get_a_vendor_guess_even_in_a_thread_and_a_clear_no_match_line():
     rows = [row('FIT', name='Barb fittings', run_id='A-1', vendor='Amazon', link='', ordered_at='2026-10-12', point_of_contact=['Elijah Jeoung'])]
     photo = scan('shipping_label', [pkg([], vendor='Amazon', item_hints=['cooling fittings'])])
-    res = resolve_scan(photo, rows, OCT19, 'no, elijah cooling fittings are in this picture', no_pick)
+    res = await resolve_scan(photo, rows, OCT19, 'no, elijah cooling fittings are in this picture', no_pick)
     assert build_reply(photo, res, ctx(in_thread=True)) is None
     assert any(b.get('block_id') == 'arrival_actions:0' for b in build_reply(photo, res, ctx(in_thread=True, correction=True)).blocks)
 
@@ -478,6 +478,6 @@ def test_corrections_may_get_a_vendor_guess_even_in_a_thread_and_a_clear_no_matc
     assert re.search(r'with “gasket” in it — it may not be in Purchasing yet\..*@PERBot', top.blocks[0]['text']['text'])
 
 
-def test_row_detail_the_vendor_facing_description_never_a_price_nothing_when_it_just_repeats_the_name():
+async def test_row_detail_the_vendor_facing_description_never_a_price_nothing_when_it_just_repeats_the_name():
     assert row_detail(row('X', name='Boards', sanitized_description='Boards')) is None
     assert row_detail(row('X', name='Boards', sanitized_description='BMS and Dash $ 1,204.50 total')) == 'BMS and Dash total'

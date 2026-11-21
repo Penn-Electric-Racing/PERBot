@@ -11,8 +11,8 @@ every package they bring in (10/19), which buries the @s that matter.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
-import threading
 from dataclasses import dataclass
 from typing import Any
 
@@ -46,13 +46,13 @@ class ArrivalsNotion:
         self.data_source_id = data_source_id or config.benbuys.purchasing_data_source_id
         # Column name → Notion property type.
         self._columns: dict[str, str] | None = None
-        self._columns_lock = threading.Lock()
+        self._columns_lock = asyncio.Lock()
 
-    def _query_all(self, filter: Any) -> list[PurchasingRow]:
+    async def _query_all(self, filter: Any) -> list[PurchasingRow]:
         rows: list[PurchasingRow] = []
         cursor: str | None = None
         while True:
-            response = self.client.data_sources.query(
+            response = await self.client.data_sources.query(
                 data_source_id=self.data_source_id, filter=filter, page_size=100, start_cursor=cursor
             )
             rows.extend(PurchasingRow.from_page(page) for page in response.get('results') or [])
@@ -60,9 +60,9 @@ class ArrivalsNotion:
             if not cursor:
                 return rows
 
-    def open_rows(self) -> list[PurchasingRow]:
+    async def open_rows(self) -> list[PurchasingRow]:
         """This season's rows that haven't arrived — the candidates a slip can match."""
-        return self._query_all(
+        return await self._query_all(
             {
                 'and': [
                     {'property': 'Season', 'select': {'equals': config.benbuys.season}},
@@ -71,18 +71,18 @@ class ArrivalsNotion:
             }
         )
 
-    def rows_for_run(self, run_id: str) -> list[PurchasingRow]:
+    async def rows_for_run(self, run_id: str) -> list[PurchasingRow]:
         """Every row of one order (any arrival state), for "all arrived" at click time."""
-        return self._query_all({'property': 'Run ID', 'rich_text': {'equals': run_id}})
+        return await self._query_all({'property': 'Run ID', 'rich_text': {'equals': run_id}})
 
-    def fetch_row(self, page_id: str) -> PurchasingRow:
-        return PurchasingRow.from_page(self.client.pages.retrieve(page_id))
+    async def fetch_row(self, page_id: str) -> PurchasingRow:
+        return PurchasingRow.from_page(await self.client.pages.retrieve(page_id))
 
-    def _existing_columns(self) -> dict[str, str]:
-        with self._columns_lock:
+    async def _existing_columns(self) -> dict[str, str]:
+        async with self._columns_lock:
             if self._columns is None:
                 # A failure raises and leaves the cache empty, so the next write retries.
-                ds = self.client.data_sources.retrieve(self.data_source_id)
+                ds = await self.client.data_sources.retrieve(self.data_source_id)
                 names = {k: str((v or {}).get('type') or '') for k, v in (ds.get('properties') or {}).items()}
                 missing = [c for c in OPTIONAL_COLUMNS if c not in names]
                 if missing:
@@ -90,8 +90,8 @@ class ArrivalsNotion:
                 self._columns = names
             return self._columns
 
-    def mark_arrived(self, page_id: str, write: ArrivalWrite) -> None:
-        columns = self._existing_columns()
+    async def mark_arrived(self, page_id: str, write: ArrivalWrite) -> None:
+        columns = await self._existing_columns()
         properties: dict[str, Any] = {'Arrived?': {'status': {'name': ARRIVED_YES}}}
         if 'Arrived at' in columns:
             properties['Arrived at'] = {'date': {'start': write.arrived_at}}
@@ -101,11 +101,11 @@ class ArrivalsNotion:
             properties['Received by'] = {'people': [{'id': write.received_by_notion_id}]}
         if 'Arrival photo' in columns and write.photo_url:
             properties['Arrival photo'] = {'url': write.photo_url}
-        self.client.pages.update(page_id, properties=properties)
+        await self.client.pages.update(page_id, properties=properties)
 
-    def unmark_arrived(self, page_id: str, previous_status: str) -> None:
+    async def unmark_arrived(self, page_id: str, previous_status: str) -> None:
         """Undo `mark_arrived`: the status goes back to what it was and the arrival columns are cleared."""
-        columns = self._existing_columns()
+        columns = await self._existing_columns()
         properties: dict[str, Any] = {'Arrived?': {'status': {'name': previous_status or 'No'}}}
         if 'Arrived at' in columns:
             properties['Arrived at'] = {'date': None}
@@ -115,8 +115,8 @@ class ArrivalsNotion:
             properties['Received by'] = {'people': []}
         if 'Arrival photo' in columns:
             properties['Arrival photo'] = {'url': None}
-        self.client.pages.update(page_id, properties=properties)
+        await self.client.pages.update(page_id, properties=properties)
 
-    def list_users(self) -> list[NotionUser]:
+    async def list_users(self) -> list[NotionUser]:
         """Workspace people (for Slack poster → Notion `Received by`)."""
-        return Notion.list_users(self.client)
+        return await Notion.list_users(self.client)

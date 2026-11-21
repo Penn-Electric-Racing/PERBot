@@ -7,16 +7,16 @@ Search sources (first that works wins; no google.com scraping, so no CAPTCHAs):
   3. Google Programmable Search JSON API (100/day free)    env: GOOGLE_API_KEY, GOOGLE_CSE_ID
   4. DuckDuckGo HTML endpoint (no key; paginated politely)
 """
+import asyncio
 import json
 import os
 import random
 import sys
-import time
 from urllib.parse import parse_qs, unquote, urlparse
 
-import requests
 from bs4 import BeautifulSoup
 
+from core import http
 from core.errors import ScraperError
 
 __all__ = [
@@ -35,7 +35,7 @@ class BackendError(ScraperError):
 
 # ---------------------------------------------------------------- backends
 # Each backend pages through results until it has `n` (or runs out).
-def brave(query, n):
+async def brave(query, n):
     """Up to `n` results from the Brave Search API (needs BRAVE_API_KEY).
 
     Returns [{"title", "url", "snippet"}, ...]; raises BackendError if the first page fails.
@@ -45,7 +45,7 @@ def brave(query, n):
         raise BackendError("BRAVE_API_KEY not set")
     out = []
     for page in range(10):  # Brave: count <= 20, offset is a page index (max 9)
-        r = requests.get(
+        r = await http.get(
             "https://api.search.brave.com/res/v1/web/search",
             params={"q": query, "count": 20, "offset": page},
             headers={"X-Subscription-Token": key, "Accept": "application/json"},
@@ -64,14 +64,14 @@ def brave(query, n):
     return out[:n]
 
 
-def serper(query, n):
+async def serper(query, n):
     """Up to `n` Google results via Serper.dev (needs SERPER_API_KEY), 10 per request."""
     key = os.getenv("SERPER_API_KEY")
     if not key:
         raise BackendError("SERPER_API_KEY not set")
     out = []
     for page in range(1, min(-(-n // 10), 10) + 1):  # 10 per call = 1 credit each
-        r = requests.post(
+        r = await http.post(
             "https://google.serper.dev/search",
             json={"q": query, "num": 10, "page": page},
             headers={"X-API-KEY": key, "Content-Type": "application/json"},
@@ -89,7 +89,7 @@ def serper(query, n):
     return out[:n]
 
 
-def google_cse(query, n):
+async def google_cse(query, n):
     """Up to `n` (max 100) results from Google Programmable Search
     (needs GOOGLE_API_KEY and GOOGLE_CSE_ID), 10 per request.
     """
@@ -98,7 +98,7 @@ def google_cse(query, n):
         raise BackendError("GOOGLE_API_KEY / GOOGLE_CSE_ID not set")
     out = []
     for start in range(1, min(n, 100) + 1, 10):  # CSE: 10 per call, max 100 total
-        r = requests.get(
+        r = await http.get(
             "https://www.googleapis.com/customsearch/v1",
             params={"key": key, "cx": cx, "q": query, "num": 10, "start": start},
             timeout=TIMEOUT,
@@ -125,21 +125,21 @@ def _clean_ddg_url(href):
     return href
 
 
-def _ddg_page(form, retries=2):
+async def _ddg_page(form, retries=2):
     """POST one DDG HTML results page; return (results, next-page form data or None)."""
     last = None
     for attempt in range(retries + 1):
         if attempt:
             # polite backoff; HTTP 202 is DDG's "slow down", so wait longer for it
-            time.sleep(2 ** attempt * (3 if last == "HTTP 202" else 1) + random.random())
+            await asyncio.sleep(2 ** attempt * (3 if last == "HTTP 202" else 1) + random.random())
         try:
-            r = requests.post(
+            r = await http.post(
                 "https://html.duckduckgo.com/html/",
                 data=form,
                 headers={"User-Agent": UA, "Referer": "https://html.duckduckgo.com/"},
                 timeout=TIMEOUT,
             )
-        except requests.RequestException as e:
+        except http.RequestError as e:
             last = str(e)
             continue
         if r.status_code != 200:
@@ -174,16 +174,16 @@ def _ddg_page(form, retries=2):
     raise BackendError(last or "unknown error")
 
 
-def duckduckgo(query, n):
+async def duckduckgo(query, n):
     """Up to `n` results from DuckDuckGo's HTML page (no key), following its
     "Next" form with a pause between pages. Keeps partial results if a later page fails.
     """
     out, form = [], {"q": query}
     while form and len(out) < n:
         if out:
-            time.sleep(1 + random.random())  # be gentle between pages
+            await asyncio.sleep(1 + random.random())  # be gentle between pages
         try:
-            page, form = _ddg_page(form)
+            page, form = await _ddg_page(form)
         except BackendError:
             if out:
                 break  # keep what we have
@@ -198,29 +198,24 @@ BACKENDS = [("brave", brave), ("serper", serper), ("google_cse", google_cse), ("
 MAX_PAGE_BYTES = 5_000_000
 
 
-def _fetch_html(url):
+async def _fetch_html(url):
     """GET a page as text; refuse non-HTML (datasheet PDFs are common part-number hits)
     and stop reading after MAX_PAGE_BYTES."""
-    with requests.get(url, headers={"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"},
-                      timeout=TIMEOUT, stream=True) as r:
-        if r.status_code != 200:
-            raise BackendError(f"HTTP {r.status_code}")
-        ctype = r.headers.get("Content-Type", "").split(";")[0].strip().lower()
-        if ctype and "html" not in ctype and "xml" not in ctype:
-            raise BackendError(f"not a web page ({ctype})")
-        body = bytearray()
-        for chunk in r.iter_content(64 * 1024):
-            body += chunk
-            if len(body) >= MAX_PAGE_BYTES:
-                break
-        try:  # same decoding as r.text
-            return body.decode(r.encoding or "utf-8", errors="replace")
-        except LookupError:  # unknown charset name in the headers
-            return body.decode("utf-8", errors="replace")
+    r = await http.get(url, headers={"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"},
+                       timeout=TIMEOUT, max_bytes=MAX_PAGE_BYTES)
+    if r.status_code != 200:
+        raise BackendError(f"HTTP {r.status_code}")
+    ctype = r.headers.get("Content-Type", "").split(";")[0].strip().lower()
+    if ctype and "html" not in ctype and "xml" not in ctype:
+        raise BackendError(f"not a web page ({ctype})")
+    try:  # same decoding as r.text
+        return r.content.decode(r.encoding or "utf-8", errors="replace")
+    except LookupError:  # unknown charset name in the headers
+        return r.content.decode("utf-8", errors="replace")
 
 
 # ---------------------------------------------------------------- search
-def search(query, n=5, verbose=False, variants=()):
+async def search(query, n=5, verbose=False, variants=()):
     """Top `n` unique URLs from the first working backend, topping up with `variants`."""
     errors = {}
     for name, fn in BACKENDS:
@@ -230,7 +225,7 @@ def search(query, n=5, verbose=False, variants=()):
                 if len(res) >= n:
                     break
                 try:
-                    batch = fn(q, n)
+                    batch = await fn(q, n)
                 except BackendError:
                     if res:
                         continue  # extra variants are best-effort
@@ -244,7 +239,7 @@ def search(query, n=5, verbose=False, variants=()):
                     r["search_rank"] = i
                 return name, res[:n]
             errors[name] = "empty result"
-        except (BackendError, requests.RequestException, ValueError) as e:
+        except (BackendError, http.RequestError, ValueError) as e:
             errors[name] = str(e)
         if verbose:
             print(f"[{name}] skipped: {errors[name]}", file=sys.stderr)

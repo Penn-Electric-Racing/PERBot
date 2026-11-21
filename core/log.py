@@ -18,7 +18,7 @@ FORMAT = '[%(asctime)s.%(msecs)03dZ] %(levelname)-7s %(name)s: %(message)s'
 DATEFMT = '%Y-%m-%dT%H:%M:%S'
 
 # Libraries that log every request at INFO.
-QUIET = ('httpx', 'httpcore', 'urllib3', 'openai')
+QUIET = ('httpx', 'httpcore', 'aiohttp.access', 'openai')
 
 
 def setup_logging(level: int | str = logging.INFO) -> None:

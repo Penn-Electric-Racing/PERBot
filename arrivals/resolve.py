@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 from datetime import datetime
-from typing import AbstractSet, Callable
+from typing import AbstractSet, Awaitable, Callable
 
 from arrivals.match import match_slip
 from arrivals.models import Extraction, OpenOrder, Resolution, Scan, SlipMatch
@@ -32,7 +32,7 @@ from core.purchasing import PurchasingRow
 
 __all__ = ['Picker', 'resolve_package', 'resolve_scan']
 
-Picker = Callable[[Extraction, list[OpenOrder], str], list[Pick]]
+Picker = Callable[[Extraction, list[OpenOrder], str], Awaitable[list[Pick]]]
 
 
 def _pick_to_match(pick: Pick) -> SlipMatch:
@@ -45,7 +45,7 @@ def _pick_to_match(pick: Pick) -> SlipMatch:
     )
 
 
-def resolve_package(
+async def resolve_package(
     pkg: Extraction,
     rows: list[PurchasingRow],
     as_of: datetime,
@@ -81,7 +81,7 @@ def resolve_package(
     # A vendor with no open orders is often a misread (the carrier, a fulfiller): let the evidence decide.
     pool = vendor_orders or orders
     if has_evidence and pool:
-        picks = picker(pkg, rank_orders(pool, pkg, as_of), message_text)
+        picks = await picker(pkg, rank_orders(pool, pkg, as_of), message_text)
         if picks:
             return [matched(_pick_to_match(p), p.evidence) for p in picks]
 
@@ -93,7 +93,7 @@ def resolve_package(
     return [Resolution(kind='none')]
 
 
-def resolve_scan(
+async def resolve_scan(
     scan: Scan,
     open_rows: list[PurchasingRow],
     as_of: datetime,
@@ -118,7 +118,7 @@ def resolve_scan(
     rows = [r for r in eligible_rows(open_rows, as_of) if order_key(r) not in exclude]
     out: list[Resolution] = []
     for i, pkg in enumerate(packages):
-        for res in resolve_package(pkg, rows, as_of, message_text, picker or pick_orders):
+        for res in await resolve_package(pkg, rows, as_of, message_text, picker or pick_orders):
             res.pkg = i
             out.append(res)
             if res.kind == 'match' and res.match:

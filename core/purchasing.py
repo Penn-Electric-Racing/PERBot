@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import dataclasses
 import re
-import threading
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
@@ -154,16 +153,14 @@ class Purchasing(Database[PurchasingRow]):
 
     model = PurchasingRow
     _shared: ClassVar['Purchasing | None'] = None
-    _lock: ClassVar[threading.Lock] = threading.Lock()
 
     @classmethod
     def shared(cls) -> 'Purchasing':
-        with cls._lock:
-            if cls._shared is None:
-                from core.config import config
+        if cls._shared is None:
+            from core.config import config
 
-                cls._shared = cls(Notion.shared(), config.benbuys.purchasing_data_source_id, config.benbuys.season)
-            return cls._shared
+            cls._shared = cls(Notion.shared(), config.benbuys.purchasing_data_source_id, config.benbuys.season)
+        return cls._shared
 
     def __init__(self, notion: Notion, data_source_id: str, season: str):
         super().__init__(notion, data_source_id)
@@ -173,11 +170,11 @@ class Purchasing(Database[PurchasingRow]):
     def notion(self) -> Notion:
         return self.client
 
-    def rows(self, filter: Any = None, sorts: list[Any] | None = None, limit: int | None = None) -> list[PurchasingRow]:
-        return self.query(filter, sorts, limit)
+    async def rows(self, filter: Any = None, sorts: list[Any] | None = None, limit: int | None = None) -> list[PurchasingRow]:
+        return await self.query(filter, sorts, limit)
 
-    def row(self, page_id: str) -> PurchasingRow:
-        return self.get(page_id)
+    async def row(self, page_id: str) -> PurchasingRow:
+        return await self.get(page_id)
 
     def season_filter(self) -> dict[str, Any]:
         return {'property': Col.SEASON, 'select': {'equals': self.season}}

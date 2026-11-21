@@ -12,6 +12,7 @@ import re
 import sys
 from pathlib import Path
 
+from core import http
 from core.config import config
 from core.log import setup_logging
 from search.engine import parse_query, rank_pages, search_index
@@ -21,7 +22,7 @@ from search.llm import embed_query
 JUNK = re.compile(r'X-Amz|<empty-block|\{color=|<columns>|prod-files-secure')
 
 
-def main(argv: list[str] | None = None) -> None:
+async def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument('--rerank', action='store_true')
     # `--source notion` scores the Notion golden set with Drive pages excluded (isolates ranking
@@ -47,12 +48,12 @@ def main(argv: list[str] | None = None) -> None:
 
     for g in golden:
         if args.rerank:
-            res = search_index(loaded, with_source(g['query']), rerank=True, top_k=10)
+            res = await search_index(loaded, with_source(g['query']), rerank=True, top_k=10)
             titles = [r['page']['title'] for r in res['results']]
             texts = [r['chunk']['text'] for r in res['results']]
         else:
             parsed = parse_query(with_source(g['query']))
-            ranked = rank_pages(loaded, parsed, embed_query(parsed['cleaned'] or parsed['raw']))[:10]
+            ranked = rank_pages(loaded, parsed, await embed_query(parsed['cleaned'] or parsed['raw']))[:10]
             titles = [r.page['title'] for r in ranked]
             texts = [r.chunk['text'] for r in ranked]
         junk_top3 += sum(1 for t in texts[:3] if JUNK.search(t))
@@ -85,7 +86,7 @@ def main(argv: list[str] | None = None) -> None:
 if __name__ == '__main__':
     setup_logging()
     try:
-        main()
+        http.run(main())
     except Exception as err:
         print(err, file=sys.stderr)
         sys.exit(1)

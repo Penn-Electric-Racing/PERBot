@@ -24,7 +24,7 @@ def test_vendor_key_spellings_collapse_unaliased_vendors_key_on_their_first_word
     assert vendor_key(None) == ''
 
 
-def test_match_slip_part_numbers_pick_the_order_whole_order_on_the_slip():
+async def test_match_slip_part_numbers_pick_the_order_whole_order_on_the_slip():
     a = row('A-ND', run_id='BENBUYS-4334609')
     b = row(' b-nd ', run_id='BENBUYS-4334609')
     other = row('C-ND', run_id='PERPO-1')
@@ -35,7 +35,7 @@ def test_match_slip_part_numbers_pick_the_order_whole_order_on_the_slip():
     assert [r.id for r in m.order_rows] == [a.id, b.id]
 
 
-def test_match_slip_requisition_number_on_the_slip_is_an_exact_match_even_if_parts_differ():
+async def test_match_slip_requisition_number_on_the_slip_is_an_exact_match_even_if_parts_differ():
     a = row('X-ND', run_id='BENBUYS-4334609')
     m = match_slip(pkg([line('ZZZ')], order_numbers=[OrderNumber('purchase_order', 'PO 4334609')]), [a])
     assert m.confidence == 'exact'
@@ -43,7 +43,7 @@ def test_match_slip_requisition_number_on_the_slip_is_an_exact_match_even_if_par
     assert len(m.order_rows) == 1
 
 
-def test_match_slip_never_crosses_vendors_manufacturer_number_and_customer_reference_also_match():
+async def test_match_slip_never_crosses_vendors_manufacturer_number_and_customer_reference_also_match():
     mc = row('91251A540', vendor='McMaster-Carr')
     dk = row('LM358DR', vendor='digikey')
     ref = row('Q-ND', vendor='Digi-Key', sanitized_description='HALL SENSOR BOARD CONNECTOR 4 PIN')
@@ -58,7 +58,7 @@ def test_match_slip_never_crosses_vendors_manufacturer_number_and_customer_refer
     assert [l.row.id if l.row else None for l in m.lines] == [None, dk.id, ref.id]
 
 
-def test_match_slip_free_text_rows_match_on_a_shared_model_code():
+async def test_match_slip_free_text_rows_match_on_a_shared_model_code():
     coroflex = row('5 meters of FHLR2GCB2G (3x2.5mm²)', vendor='Eurotech Direct', link='')
     plain = row('5 meters of 2x 6mm^2', vendor='eurotech direct', link='')
     digikey = row('FHLR2GCB2G', vendor='DigiKey')
@@ -76,7 +76,7 @@ def test_match_slip_free_text_rows_match_on_a_shared_model_code():
     assert list(part_codes('3x2.5mm² 5888694 FHLR2GCB2G LM358DR')) == ['FHLR2GCB2G', 'LM358DR']
 
 
-def test_match_slip_same_part_on_two_orders_dominant_order_then_quantity_then_oldest():
+async def test_match_slip_same_part_on_two_orders_dominant_order_then_quantity_then_oldest():
     old = row('R-ND', run_id='BENBUYS-1111111', ordered_at='2026-09-01', quantity=5)
     newer = row('R-ND', run_id='BENBUYS-2222222', ordered_at='2026-09-20', quantity=10)
     sibling = row('S-ND', run_id='BENBUYS-2222222')
@@ -85,7 +85,7 @@ def test_match_slip_same_part_on_two_orders_dominant_order_then_quantity_then_ol
     assert match_slip(pkg([line('R-ND', None)]), [old, newer]).lines[0].row.id == old.id
 
 
-def test_match_slip_backordered_lines_are_not_in_the_box_one_row_per_line_under_half_is_weak():
+async def test_match_slip_backordered_lines_are_not_in_the_box_one_row_per_line_under_half_is_weak():
     a = row('A-ND')
     m = match_slip(pkg([line('A-ND', 0), line('A-ND', 2), line('A-ND', 2)]), [a])
     assert len(m.lines) == 2
@@ -127,7 +127,7 @@ def test_parse_scan_tolerates_junk_not_a_delivery_drops_packages_bad_dates_and_e
     assert parse_scan(None).scene == 'not_a_delivery'
 
 
-def test_these_value_picks_the_shorter_encoding_target_ids_resolves_both_the_same_way():
+async def test_these_value_picks_the_shorter_encoding_target_ids_resolves_both_the_same_way():
     order = [row(f'P{i}-ND', run_id='BENBUYS-4334609', id=f'0000000{i}-aaaa-bbbb-cccc-dddddddddddd') for i in range(60)]
     m = match_slip(pkg([line(r.part_number) for r in order[:58]]), order)
     v = these_value(m, BASE)
@@ -142,7 +142,7 @@ def test_these_value_picks_the_shorter_encoding_target_ids_resolves_both_the_sam
     assert target_ids(sv, []) == [order[0].id.replace('-', '')]
 
 
-def test_lead_time_line_settle_blocks_one_package_only_package_key():
+async def test_lead_time_line_settle_blocks_one_package_only_package_key():
     r = row('A-ND', submitted_at='2026-09-20', ordered_at='2026-09-28T15:00:00.000Z')
     assert lead_time_line([r], '2026-10-10T16:00:00.000Z') == (
         'Ordered Sep 28 → here Oct 10 (*12 days*) · requested Sep 20 (*20 days* end to end)'

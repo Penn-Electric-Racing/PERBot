@@ -9,14 +9,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import AbstractSet, Any
 
-import httpx
-from slack_sdk import WebClient
+from slack_sdk.web.async_client import AsyncWebClient
 
 from arrivals.blocks import Reply, ReplyContext, build_reply
 from arrivals.extract import ScanContext, SlipImage, scan_photos
 from arrivals.models import Resolution, Scan
 from arrivals.people import People
 from arrivals.resolve import Picker, resolve_scan
+from core import http
 from core.config import config
 from core.purchasing import PurchasingRow
 
@@ -57,11 +57,11 @@ class DeliveryResult:
     reply: Reply | None
 
 
-def process_delivery(msg: DeliveryMessage, open_rows: list[PurchasingRow], picker: Picker | None = None) -> DeliveryResult:
-    scan = scan_photos(msg.images, ScanContext(text=msg.text, parent_text=msg.parent_text))
+async def process_delivery(msg: DeliveryMessage, open_rows: list[PurchasingRow], picker: Picker | None = None) -> DeliveryResult:
+    scan = await scan_photos(msg.images, ScanContext(text=msg.text, parent_text=msg.parent_text))
     as_of = datetime.fromtimestamp(float(msg.ts), tz=timezone.utc)
     message_text = '\n'.join(x for x in (msg.parent_text, msg.text) if x)
-    every = resolve_scan(scan, open_rows, as_of, message_text, picker, msg.rejected)
+    every = await resolve_scan(scan, open_rows, as_of, message_text, picker, msg.rejected)
     resolutions = [r for r in every if (resolution_key(r) or '') not in msg.carded]
     # Everything this photo found already has a card in the thread: stay quiet rather than repeat it (10/13).
     if every and not resolutions:
@@ -98,28 +98,28 @@ def is_image(file: Any) -> bool:
     return str((file or {}).get('mimetype') or '').startswith('image/')
 
 
-def _download(url: str) -> bytes:
-    res = httpx.get(url, headers={'Authorization': f'Bearer {config.slack.bot_token}'}, timeout=60, follow_redirects=True)
+async def _download(url: str) -> bytes:
+    res = await http.get(url, headers={'Authorization': f'Bearer {config.slack.bot_token}'}, timeout=60)
     kind = res.headers.get('content-type') or ''
     # Without files:read Slack answers with its HTML sign-in page, not an error status.
-    if not res.is_success or not kind.startswith('image/'):
+    if not res.ok or not kind.startswith('image/'):
         raise RuntimeError(
             f"Could not download the photo (HTTP {res.status_code}, {kind or 'no type'}); does the bot have files:read?"
         )
     return res.content
 
 
-def load_images(client: WebClient, files: list[Any]) -> list[SlipImage]:
+async def load_images(client: AsyncWebClient, files: list[Any]) -> list[SlipImage]:
     images: list[SlipImage] = []
     for file in [f for f in files or [] if is_image(f)][:MAX_IMAGES]:
         if not file.get('url_private'):
-            file = client.files_info(file=file['id']).get('file') or file
+            file = (await client.files_info(file=file['id'])).get('file') or file
         if file.get('mimetype') in DIRECT_TYPES and file.get('url_private_download'):
-            images.append(SlipImage(_download(file['url_private_download']), file['mimetype']))
+            images.append(SlipImage(await _download(file['url_private_download']), file['mimetype']))
         else:
             thumb = file.get('thumb_1024') or file.get('thumb_960') or file.get('thumb_720')
             if thumb:
-                images.append(SlipImage(_download(thumb), 'image/jpeg'))
+                images.append(SlipImage(await _download(thumb), 'image/jpeg'))
     return images
 
 
@@ -127,31 +127,31 @@ _names: dict[str, str] = {}
 _MENTION = re.compile(r'<@([A-Z0-9]+)(?:\|[^>]*)?>')
 
 
-def slack_name(client: WebClient, id_: str) -> str:
+async def slack_name(client: AsyncWebClient, id_: str) -> str:
     """A Slack user's real name (cached), or their id when Slack won't say."""
     if id_ not in _names:
-        with_names(client, f'<@{id_}>')
+        await with_names(client, f'<@{id_}>')
     return _names.get(id_, id_)
 
 
-def with_names(client: WebClient, text: str) -> str:
+async def with_names(client: AsyncWebClient, text: str) -> str:
     """"<@U07M54CLKNY> cooling tube is here" → "@Elijah Jeoung cooling tube is here" — owners are evidence."""
     for id_ in dict.fromkeys(m.group(1) for m in _MENTION.finditer(text)):
         if id_ in _names:
             continue
         try:
-            user = client.users_info(user=id_).get('user') or {}
+            user = (await client.users_info(user=id_)).get('user') or {}
             _names[id_] = user.get('real_name') or (user.get('profile') or {}).get('real_name') or user.get('name') or id_
         except Exception:
             _names[id_] = id_
     return _MENTION.sub(lambda m: f'@{_names.get(m.group(1), m.group(1))}', text)
 
 
-def parent_text(client: WebClient, channel: str, thread_ts: str) -> str | None:
+async def parent_text(client: AsyncWebClient, channel: str, thread_ts: str) -> str | None:
     """The thread's first message text (names resolved), or None."""
     try:
-        messages = client.conversations_replies(channel=channel, ts=thread_ts, limit=1).get('messages') or []
+        messages = (await client.conversations_replies(channel=channel, ts=thread_ts, limit=1)).get('messages') or []
         text = messages[0].get('text') if messages else None
-        return with_names(client, text) if text else None
+        return await with_names(client, text) if text else None
     except Exception:
         return None

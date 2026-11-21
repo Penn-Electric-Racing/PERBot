@@ -187,18 +187,18 @@ Return ONLY JSON: {"labels":[{"snippet":<excerpt number>,"kind":"person"|"compan
 Copy "quote" and "person" character-for-character from the excerpt. Never guess a name that isn't written in the excerpt."""
 
 
-def _label_snippets(company: str, snippets: list[Snippet]) -> list[dict[str, Any]]:
+async def _label_snippets(company: str, snippets: list[Snippet]) -> list[dict[str, Any]]:
     body = '\n\n'.join(f'[{i}] {s.text}' for i, s in enumerate(snippets))
-    parsed = chat_json(LABEL_PROMPT, f'Company: {company}\n\nExcerpts:\n{body}')
+    parsed = await chat_json(LABEL_PROMPT, f'Company: {company}\n\nExcerpts:\n{body}')
     labels = parsed.get('labels')
     return labels if isinstance(labels, list) else []
 
 
-def scan_fsae_ties(company: str, hostname: str) -> FsaeScan:
+async def scan_fsae_ties(company: str, hostname: str) -> FsaeScan:
     """Scan `hostname`'s homepage + team pages for FSAE history. Raises only if the Groq labelling
     call fails (so a batch run can retry that company); fetch failures just mean fewer pages scanned."""
     base = f'https://{hostname}'
-    home_html = fetch_html(base)
+    home_html = await fetch_html(base)
     # Dead DNS / bot wall on the homepage almost always means the same on every subpage.
     if not home_html:
         return FsaeScan(ties=False)
@@ -207,7 +207,7 @@ def scan_fsae_ties(company: str, hostname: str) -> FsaeScan:
 
     pages: list[tuple[str, str]] = [(base, strip_html(home_html))]
     for url in candidates:
-        html = fetch_html(url)
+        html = await fetch_html(url)
         if html:
             pages.append((url, strip_html(html)))
 
@@ -216,7 +216,7 @@ def scan_fsae_ties(company: str, hostname: str) -> FsaeScan:
     if not snippets:
         return FsaeScan(ties=False, pages_scanned=pages_scanned)
 
-    people, company_mentions = verify_labels(snippets, _label_snippets(company, snippets))
+    people, company_mentions = verify_labels(snippets, await _label_snippets(company, snippets))
     return FsaeScan(ties=bool(people), people=people, company_mentions=company_mentions, pages_scanned=pages_scanned)
 
 

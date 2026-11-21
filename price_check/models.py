@@ -412,10 +412,10 @@ class PriceRow(NotionModel):
     def replace(self, **changes: Any) -> 'PriceRow':
         return dataclasses.replace(self, **changes)
 
-    def apply(self, patch: RowPatch) -> None:
+    async def apply(self, patch: RowPatch) -> None:
         """Write `patch` to this row in Notion."""
         db: PurchasingPrices = self.db  # type: ignore[assignment]
-        db.write_price(self.id, patch)
+        await db.write_price(self.id, patch)
 
     def plan_swap(self, kind: ClickKind, v: SwapValue) -> SwapPlan:
         """Whether clicking `kind` (use / undo) should write, and what. `v.new` must be set."""

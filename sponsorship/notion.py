@@ -6,9 +6,9 @@ Notion payloads are typed loosely; values are validated before they reach here.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
-import threading
 from dataclasses import dataclass
 from typing import Any
 
@@ -245,26 +245,26 @@ class SponsorNotion:
     def __init__(self, token: str | None = None, client: Any = None):
         self.client = client or (Notion(token, config.notion.api_version) if token else Notion.shared())
         self._loss_columns_ready: list[str] | None = None
-        self._loss_columns_lock = threading.Lock()
+        self._loss_columns_lock = asyncio.Lock()
 
-    def _query_all(self, data_source_id: str, filter: Any = None) -> list[Any]:
+    async def _query_all(self, data_source_id: str, filter: Any = None) -> list[Any]:
         pages: list[Any] = []
         cursor: str | None = None
         while True:
             kwargs: dict[str, Any] = {'data_source_id': data_source_id, 'start_cursor': cursor, 'page_size': 100}
             if filter:
                 kwargs['filter'] = filter
-            response = self.client.data_sources.query(**kwargs)
+            response = await self.client.data_sources.query(**kwargs)
             pages.extend(response.get('results') or [])
             cursor = response.get('next_cursor') if response.get('has_more') else None
             if not cursor:
                 return pages
 
-    def find_bank_row_by_domain(self, canonical_domain: str) -> BankLeadRow | None:
+    async def find_bank_row_by_domain(self, canonical_domain: str) -> BankLeadRow | None:
         """Dedupe key: look up an existing Bank row by its canonical Domain URL. Returns the parsed
         lead (so a directed add can graduate it) if one exists, else None. The caller passes an
         already-normalized `https://<domain>` string so this is an exact match."""
-        response = self.client.data_sources.query(
+        response = await self.client.data_sources.query(
             data_source_id=config.sponsorship.bank_data_source_id,
             filter={'property': 'Domain', 'url': {'equals': canonical_domain}},
             page_size=1,
@@ -272,7 +272,7 @@ class SponsorNotion:
         hits = response.get('results') or []
         return parse_bank_row(hits[0]) if hits else None
 
-    def create_bank_row(self, row: BankRowInput) -> BankPageRef:
+    async def create_bank_row(self, row: BankRowInput) -> BankPageRef:
         """Create a Prospect Bank row from an enrichment result. Enrichment ALWAYS writes
         Status = Available and Relationship = New (guardrail: Relationship is never LLM-guessed).
         Contact fields are written only when Hunter returned a contact."""
@@ -306,18 +306,18 @@ class SponsorNotion:
         if row.fsae:
             properties.update(_fsae_properties(row.fsae, utils.today_iso()))
 
-        result = self.client.pages.create(
+        result = await self.client.pages.create(
             parent={'type': 'data_source_id', 'data_source_id': config.sponsorship.bank_data_source_id},
             properties=properties,
         )
         logger.info(f"Created Bank row for {row.company} ({row.domain}): {result.get('url')}")
         return BankPageRef(result['id'], result.get('url') or '')
 
-    def find_bank_rows_by_hostname(self, hostname: str) -> list[BankLeadRow]:
+    async def find_bank_rows_by_hostname(self, hostname: str) -> list[BankLeadRow]:
         """Bank leads on `hostname` however the Domain was typed (http://, www., trailing path) —
         the forgiving lookup behind `/sponsor claim keye.co`. Enrichment's dedupe keeps the exact
         `find_bank_row_by_domain`."""
-        response = self.client.data_sources.query(
+        response = await self.client.data_sources.query(
             data_source_id=config.sponsorship.bank_data_source_id,
             filter={'property': 'Domain', 'url': {'contains': hostname}},
             page_size=25,
@@ -325,16 +325,16 @@ class SponsorNotion:
         rows = [parse_bank_row(p) for p in response.get('results') or []]
         return [r for r in rows if extract_hostname(r.domain) == hostname]
 
-    def find_bank_rows_by_company(self, name: str) -> list[BankLeadRow]:
+    async def find_bank_rows_by_company(self, name: str) -> list[BankLeadRow]:
         """Find Bank leads whose Company title contains `name` (for `/sponsor claim`)."""
-        response = self.client.data_sources.query(
+        response = await self.client.data_sources.query(
             data_source_id=config.sponsorship.bank_data_source_id,
             filter={'property': 'Company', 'title': {'contains': name}},
             page_size=25,
         )
         return [parse_bank_row(p) for p in response.get('results') or []]
 
-    def query_rankable_prospects(self, category: Category | None = None) -> list[BankLeadRow]:
+    async def query_rankable_prospects(self, category: Category | None = None) -> list[BankLeadRow]:
         """Rankable prospects for `/sponsor rank`: every live Bank lead (excludes Dead and
         already-Graduated rows), optionally filtered to one Category. Returns them parsed with
         their sub-scores; the caller computes Priority + sorts (the Priority formula isn't
@@ -345,38 +345,38 @@ class SponsorNotion:
         ]
         if category:
             conditions.append({'property': 'Category', 'multi_select': {'contains': category}})
-        return [parse_bank_row(p) for p in self._query_all(config.sponsorship.bank_data_source_id, {'and': conditions})]
+        return [parse_bank_row(p) for p in await self._query_all(config.sponsorship.bank_data_source_id, {'and': conditions})]
 
-    def query_all_bank_domains(self) -> set[str]:
+    async def query_all_bank_domains(self) -> set[str]:
         """Every hostname already in the Bank (ALL statuses, including Dead/Graduated) — the
         skip-list for `/sponsor scout`, so it never re-suggests a company the team already
         researched, claimed, or wrote off. Bare lowercase hostnames."""
         hostnames: set[str] = set()
-        for page in self._query_all(config.sponsorship.bank_data_source_id):
+        for page in await self._query_all(config.sponsorship.bank_data_source_id):
             domain = _read_url(((page or {}).get('properties') or {}).get('Domain'))
             host = extract_hostname(domain) if domain else None
             if host:
                 hostnames.add(host)
         return hostnames
 
-    def write_fsae_scan(self, page_id: str, scan: FsaeScan, date_iso: str) -> None:
+    async def write_fsae_scan(self, page_id: str, scan: FsaeScan, date_iso: str) -> None:
         """Write an FSAE-ties scan result onto an existing Bank row."""
-        self.client.pages.update(page_id, properties=_fsae_properties(scan, date_iso))
+        await self.client.pages.update(page_id, properties=_fsae_properties(scan, date_iso))
 
-    def ensure_fsae_columns(self) -> list[str]:
+    async def ensure_fsae_columns(self) -> list[str]:
         """Add the three FSAE columns to the Bank if they're missing. Idempotent; existing columns
         (and anything a human renamed around them) are left alone."""
-        ds = self.client.data_sources.retrieve(config.sponsorship.bank_data_source_id)
+        ds = await self.client.data_sources.retrieve(config.sponsorship.bank_data_source_id)
         have = set((ds.get('properties') or {}).keys())
         wanted = {FSAE_TIES_PROP: {'checkbox': {}}, FSAE_EVIDENCE_PROP: {'rich_text': {}}, FSAE_SCANNED_PROP: {'date': {}}}
         missing = [k for k in wanted if k not in have]
         if missing:
-            self.client.data_sources.update(
+            await self.client.data_sources.update(
                 config.sponsorship.bank_data_source_id, properties={k: wanted[k] for k in missing}
             )
         return missing
 
-    def update_bank_scores(self, page_id: str, scores: dict[str, float]) -> None:
+    async def update_bank_scores(self, page_id: str, scores: dict[str, float]) -> None:
         """Set one or more priority sub-scores on a Bank row (powers `/sponsor score`). Only the
         provided sub-scores (SponsorScores field names) are written; the rest are left untouched.
         The Fit/Impact/Priority/Quadrant/Tier formulas recompute automatically in Notion."""
@@ -394,12 +394,12 @@ class SponsorNotion:
         }
         if not properties:
             return
-        self.client.pages.update(page_id, properties=properties)
+        await self.client.pages.update(page_id, properties=properties)
         logger.info(f"Updated scores on Bank row {page_id}: {', '.join(properties)}.")
 
-    def mark_bank_claimed(self, page_id: str, notion_ids: list[str], status: BankStatus) -> None:
+    async def mark_bank_claimed(self, page_id: str, notion_ids: list[str], status: BankStatus) -> None:
         """Mark a Bank lead claimed/graduated and set its owner(s)."""
-        self.client.pages.update(
+        await self.client.pages.update(
             page_id,
             properties={'Status': {'select': {'name': status}}, 'Claimed by': {'people': [{'id': i} for i in notion_ids]}},
         )
@@ -407,7 +407,7 @@ class SponsorNotion:
 
     # --- Pipeline ---------------------------------------------------------------
 
-    def create_pipeline_deal(self, deal: PipelineDealInput) -> BankPageRef:
+    async def create_pipeline_deal(self, deal: PipelineDealInput) -> BankPageRef:
         """Open a Pipeline deal at Stage = Prospect, owned by the given DRI(s), linked to its Bank row
         via the (dual) Bank source relation. Carries Type/Category/contact across from enrichment.
         Source defaults to Cold; a next action + due date seed the nudge."""
@@ -427,64 +427,64 @@ class SponsorNotion:
             if deal.contact.name:
                 properties['Contact name'] = _rt(deal.contact.name)
             properties['Contact email'] = {'email': deal.contact.email}
-        result = self.client.pages.create(
+        result = await self.client.pages.create(
             parent={'type': 'data_source_id', 'data_source_id': config.sponsorship.pipeline_data_source_id},
             properties=properties,
         )
         logger.info(f"Opened Pipeline deal for {deal.company} (DRI {', '.join(deal.dri_notion_ids)}): {result.get('url')}")
         return BankPageRef(result['id'], result.get('url') or '')
 
-    def _query_pipeline(self, filter: Any = None) -> list[PipelineRow]:
+    async def _query_pipeline(self, filter: Any = None) -> list[PipelineRow]:
         """Query the Pipeline data source with an optional filter, following pagination."""
-        return [parse_pipeline_row(p) for p in self._query_all(config.sponsorship.pipeline_data_source_id, filter)]
+        return [parse_pipeline_row(p) for p in await self._query_all(config.sponsorship.pipeline_data_source_id, filter)]
 
-    def fetch_deal(self, page_id: str) -> PipelineRow:
+    async def fetch_deal(self, page_id: str) -> PipelineRow:
         """Re-read one deal by page id (button handlers do this first — the DM may be days old)."""
-        return parse_pipeline_row(self.client.pages.retrieve(page_id))
+        return parse_pipeline_row(await self.client.pages.retrieve(page_id))
 
-    def query_won_deals(self) -> list[PipelineRow]:
+    async def query_won_deals(self) -> list[PipelineRow]:
         """All Won deals — feeds the win post + running total."""
-        return self._query_pipeline({'property': 'Stage', 'select': {'equals': 'Won'}})
+        return await self._query_pipeline({'property': 'Stage', 'select': {'equals': 'Won'}})
 
-    def query_all_deals(self) -> list[PipelineRow]:
+    async def query_all_deals(self) -> list[PipelineRow]:
         """Every Pipeline deal, all stages — feeds the leaderboard."""
-        return self._query_pipeline()
+        return await self._query_pipeline()
 
-    def query_active_deals_for_user(self, notion_user_id: str) -> list[PipelineRow]:
+    async def query_active_deals_for_user(self, notion_user_id: str) -> list[PipelineRow]:
         """Active deals owned by a given Notion user — powers `/sponsor me`."""
-        return self._query_pipeline({'and': [ACTIVE_STAGE_FILTER, {'property': 'DRI', 'people': {'contains': notion_user_id}}]})
+        return await self._query_pipeline({'and': [ACTIVE_STAGE_FILTER, {'property': 'DRI', 'people': {'contains': notion_user_id}}]})
 
-    def query_stale_deals(self, today_iso: str) -> list[PipelineRow]:
+    async def query_stale_deals(self, today_iso: str) -> list[PipelineRow]:
         """Active deals whose Next action date is before `today_iso` — the Wednesday DM."""
-        return self._query_pipeline({'and': [ACTIVE_STAGE_FILTER, {'property': 'Next action date', 'date': {'before': today_iso}}]})
+        return await self._query_pipeline({'and': [ACTIVE_STAGE_FILTER, {'property': 'Next action date', 'date': {'before': today_iso}}]})
 
-    def find_deals_by_company(self, name: str) -> list[PipelineRow]:
+    async def find_deals_by_company(self, name: str) -> list[PipelineRow]:
         """Find Pipeline deals whose Company title contains `name` (for `/sponsor log`)."""
-        return self._query_pipeline({'property': 'Company', 'title': {'contains': name}})
+        return await self._query_pipeline({'property': 'Company', 'title': {'contains': name}})
 
-    def find_deals_for_bank_row(self, bank_page_id: str) -> list[PipelineRow]:
+    async def find_deals_for_bank_row(self, bank_page_id: str) -> list[PipelineRow]:
         """Deals graduated from one Bank lead (via the Bank source relation) — title-independent."""
-        return self._query_pipeline({'property': 'Bank source', 'relation': {'contains': bank_page_id}})
+        return await self._query_pipeline({'property': 'Bank source', 'relation': {'contains': bank_page_id}})
 
-    def query_deals_edited_since(self, since_iso: str) -> list[PipelineRow]:
+    async def query_deals_edited_since(self, since_iso: str) -> list[PipelineRow]:
         """Deals edited (which includes created, and re-assigned — the DRI sync stamps the page)
         at/after `since_iso` — a superset of every deal that can carry an assignment inside the quota
         window, so the audit doesn't have to scan the whole Pipeline."""
-        return self._query_pipeline({'timestamp': 'last_edited_time', 'last_edited_time': {'on_or_after': since_iso}})
+        return await self._query_pipeline({'timestamp': 'last_edited_time', 'last_edited_time': {'on_or_after': since_iso}})
 
-    def query_contacted_deals(self) -> list[PipelineRow]:
+    async def query_contacted_deals(self) -> list[PipelineRow]:
         """Every deal still at Contacted (no reply yet) — feeds the quota post's follow-up gap."""
-        return self._query_pipeline({'property': 'Stage', 'select': {'equals': 'Contacted'}})
+        return await self._query_pipeline({'property': 'Stage', 'select': {'equals': 'Contacted'}})
 
     # --- Loss reasons + "gone cold" check ------------------------------------------
 
-    def ensure_loss_columns(self, create: bool = True) -> list[str]:
+    async def ensure_loss_columns(self, create: bool = True) -> list[str]:
         """Add `Loss reason` (select), `Cold asked` and `Release asked` (dates) to the Pipeline and
         `Apply via` (url) to the Bank if they're missing. Idempotent, and memoized per process so
         every write below can call it without a schema round-trip each time (a failure isn't
         memoized, so the next write retries). With `create=False` it only reports what's missing
         (dry runs make no writes, schema included)."""
-        with self._loss_columns_lock:
+        async with self._loss_columns_lock:
             if create and self._loss_columns_ready is not None:
                 return self._loss_columns_ready
             missing: list[str] = []
@@ -500,18 +500,18 @@ class SponsorNotion:
                 (config.sponsorship.bank_data_source_id, {APPLY_VIA_PROP: {'url': {}}}),
             ]
             for ds_id, wanted in targets:
-                ds = self.client.data_sources.retrieve(ds_id)
+                ds = await self.client.data_sources.retrieve(ds_id)
                 have = set((ds.get('properties') or {}).keys())
                 absent = [k for k in wanted if k not in have]
                 missing.extend(absent)
                 if create and absent:
-                    self.client.data_sources.update(ds_id, properties={k: wanted[k] for k in absent})
+                    await self.client.data_sources.update(ds_id, properties={k: wanted[k] for k in absent})
                     logger.info(f"Added {', '.join(absent)} to data source {ds_id}.")
             if create:
                 self._loss_columns_ready = missing
             return missing
 
-    def query_cold_deals(self, before_iso: str, cold_asked_column: bool = True) -> list[PipelineRow]:
+    async def query_cold_deals(self, before_iso: str, cold_asked_column: bool = True) -> list[PipelineRow]:
         """Deals still at Contacted whose `Contacted at` is before `before_iso` and that the
         Wednesday DM hasn't asked about yet. `cold_asked_column=False` (a dry run before the column
         exists) drops that condition instead of failing the query."""
@@ -521,15 +521,15 @@ class SponsorNotion:
         ]
         if cold_asked_column:
             conditions.append({'property': COLD_ASKED_PROP, 'date': {'is_empty': True}})
-        return self._query_pipeline({'and': conditions})
+        return await self._query_pipeline({'and': conditions})
 
-    def apply_next_action(self, page_id: str, change: NextActionChange) -> None:
+    async def apply_next_action(self, page_id: str, change: NextActionChange) -> None:
         """Set (or clear) Next action + date in one write. Used by the one-time cleanup."""
-        self.client.pages.update(page_id, properties=next_action_properties(change))
+        await self.client.pages.update(page_id, properties=next_action_properties(change))
 
-    def query_stale_claims(self, before_iso: str) -> list[PipelineRow]:
+    async def query_stale_claims(self, before_iso: str) -> list[PipelineRow]:
         """Deals still at Prospect (claimed, never contacted) created before `before_iso`."""
-        return self._query_pipeline(
+        return await self._query_pipeline(
             {
                 'and': [
                     {'property': 'Stage', 'select': {'equals': 'Prospect'}},
@@ -538,17 +538,17 @@ class SponsorNotion:
             }
         )
 
-    def stamp_release_asked(self, page_id: str, date_iso: str) -> None:
+    async def stamp_release_asked(self, page_id: str, date_iso: str) -> None:
         """Record that the Wednesday DM asked "sent it, or release it?" about this claim."""
-        self.ensure_loss_columns()
-        self.client.pages.update(page_id, properties={RELEASE_ASKED_PROP: _date(date_iso)})
+        await self.ensure_loss_columns()
+        await self.client.pages.update(page_id, properties={RELEASE_ASKED_PROP: _date(date_iso)})
 
-    def release_claim(self, row: PipelineRow) -> None:
+    async def release_claim(self, row: PipelineRow) -> None:
         """Give a claim back: the Bank lead returns to Available with no claimer, so anyone can
         `/sponsor claim` it, and the Prospect deal goes to Notion's trash (restorable for 30 days).
         It isn't marked Lost, because nobody ever asked the company, so it shouldn't count as a loss."""
         if row.bank_source_id:
-            self.client.pages.update(
+            await self.client.pages.update(
                 row.bank_source_id,
                 # Unlink the deal too: `/sponsor claim` refuses a lead whose Pipeline deal relation is
                 # non-empty, and a trashed page can linger there. (Restoring the deal from trash won't relink it.)
@@ -558,53 +558,53 @@ class SponsorNotion:
                     'Pipeline deal': {'relation': []},
                 },
             )
-        self.client.pages.update(row.id, in_trash=True)
+        await self.client.pages.update(row.id, in_trash=True)
         logger.info(
             f"Released claim on {row.company or 'Untitled'} ({row.id}){', Bank lead → Available' if row.bank_source_id else ''}."
         )
 
-    def stamp_cold_asked(self, page_id: str, date_iso: str) -> None:
+    async def stamp_cold_asked(self, page_id: str, date_iso: str) -> None:
         """Record that the Wednesday DM asked about this deal, so it's asked once, not weekly."""
-        self.ensure_loss_columns()
-        self.client.pages.update(page_id, properties={COLD_ASKED_PROP: _date(date_iso)})
+        await self.ensure_loss_columns()
+        await self.client.pages.update(page_id, properties={COLD_ASKED_PROP: _date(date_iso)})
 
-    def write_loss_reason(self, row: PipelineRow, reason: LossReason, date_iso: str) -> None:
+    async def write_loss_reason(self, row: PipelineRow, reason: LossReason, date_iso: str) -> None:
         """Set `Loss reason` and prepend a dated note. Doesn't touch Stage or Last contact."""
-        self.ensure_loss_columns()
+        await self.ensure_loss_columns()
         dated = f'{date_iso}: Loss reason: {reason} (via Slack)'
         notes = f'{dated}\n{row.notes}' if row.notes else dated
-        self.client.pages.update(
+        await self.client.pages.update(
             row.id, properties={LOSS_REASON_PROP: {'select': {'name': reason}}, 'Notes': _rt(notes[:1900])}
         )
         logger.info(f'Loss reason on {row.company} ({row.id}): {reason}.')
 
-    def set_next_action(self, page_id: str, action: str, date_iso: str) -> None:
+    async def set_next_action(self, page_id: str, action: str, date_iso: str) -> None:
         """Set Next action + its date without logging a touch ("Still waiting" on a cold deal)."""
-        self.client.pages.update(page_id, properties={'Next action': _rt(action), 'Next action date': _date(date_iso)})
+        await self.client.pages.update(page_id, properties={'Next action': _rt(action), 'Next action date': _date(date_iso)})
 
-    def mark_bank_dead(self, page_id: str) -> None:
+    async def mark_bank_dead(self, page_id: str) -> None:
         """Mark a Bank lead Dead, so ranking and claiming skip it next season."""
-        self.client.pages.update(page_id, properties={'Status': {'select': {'name': 'Dead'}}})
+        await self.client.pages.update(page_id, properties={'Status': {'select': {'name': 'Dead'}}})
         logger.info(f'Bank lead {page_id} → Dead.')
 
-    def write_bank_apply_via(self, page_id: str, url: str) -> None:
+    async def write_bank_apply_via(self, page_id: str, url: str) -> None:
         """Save the form / application a company routes sponsorship through on its Bank row."""
-        self.ensure_loss_columns()
-        self.client.pages.update(page_id, properties={APPLY_VIA_PROP: {'url': url}})
+        await self.ensure_loss_columns()
+        await self.client.pages.update(page_id, properties={APPLY_VIA_PROP: {'url': url}})
 
-    def write_contacted_at(self, page_id: str, iso: str) -> None:
+    async def write_contacted_at(self, page_id: str, iso: str) -> None:
         """Stamp `Contacted at` (first move out of Prospect) — quota credit; see jobs/quota_audit.py."""
-        self.client.pages.update(page_id, properties={CONTACTED_AT_PROP: _date(iso)})
+        await self.client.pages.update(page_id, properties={CONTACTED_AT_PROP: _date(iso)})
 
-    def query_reply_pending(self) -> list[PipelineRow]:
+    async def query_reply_pending(self) -> list[PipelineRow]:
         """Deals flagged Reply pending by the Phase-3 flow — awaiting a DRI DM."""
-        return self._query_pipeline({'property': 'Reply pending', 'checkbox': {'equals': True}})
+        return await self._query_pipeline({'property': 'Reply pending', 'checkbox': {'equals': True}})
 
-    def clear_reply_pending(self, page_id: str) -> None:
+    async def clear_reply_pending(self, page_id: str) -> None:
         """Clear the Reply pending flag once the DRI has been DM'd."""
-        self.client.pages.update(page_id, properties={'Reply pending': {'checkbox': False}})
+        await self.client.pages.update(page_id, properties={'Reply pending': {'checkbox': False}})
 
-    def log_touch(self, row: PipelineRow, note: str, date_iso: str) -> None:
+    async def log_touch(self, row: PipelineRow, note: str, date_iso: str) -> None:
         """Log a manual touch: stamp Last contact = `date_iso` and prepend a dated note. Notes is
         capped so it can't grow unbounded across many touches."""
         dated = f'{date_iso}: {note}'
@@ -613,10 +613,10 @@ class SponsorNotion:
         properties: dict[str, Any] = {'Last contact': _date(date_iso), 'Notes': _rt(merged[:1900])}
         if follow_up:
             properties.update(next_action_properties(follow_up))
-        self.client.pages.update(row.id, properties=properties)
+        await self.client.pages.update(row.id, properties=properties)
         logger.info(f'Logged touch on {row.company} ({row.id}).')
 
-    def mark_won(self, row: PipelineRow, amount_usd: float, note: str, date_iso: str, kind: WonKind | None = None) -> None:
+    async def mark_won(self, row: PipelineRow, amount_usd: float, note: str, date_iso: str, kind: WonKind | None = None) -> None:
         """Mark a deal Won: Stage=Won, Received ($)=amount (the live counter), and Deal value if it
         was blank. Stamps Last contact and prepends a dated WON note. The #operations win post is
         triggered separately (by the command or the hourly job)."""
@@ -638,17 +638,17 @@ class SponsorNotion:
         if note:
             merged = f'{date_iso}: WON — {note}' + (f'\n{row.notes}' if row.notes else '')
             properties['Notes'] = _rt(merged[:1900])
-        self.client.pages.update(row.id, properties=properties)
+        await self.client.pages.update(row.id, properties=properties)
         logger.info(f'Marked WON: {row.company} (${_n(amount_usd)}).')
 
-    def set_stage(self, row: PipelineRow, stage: Stage, date_iso: str, note: str | None = None, loss_reason: LossReason | None = None) -> None:
+    async def set_stage(self, row: PipelineRow, stage: Stage, date_iso: str, note: str | None = None, loss_reason: LossReason | None = None) -> None:
         """Move a deal to any Stage and stamp Last contact. The first move out of Prospect into
         Contacted / In talks / Won also stamps `Contacted at` (the quota audit's signal) — once per
         deal, so bouncing a deal back and forth never earns a second credit."""
         properties: dict[str, Any] = {'Stage': {'select': {'name': stage}}, 'Last contact': _date(date_iso)}
         if loss_reason:
             # Same write as the stage move, so Notes isn't rewritten twice from a stale copy.
-            self.ensure_loss_columns()
+            await self.ensure_loss_columns()
             properties[LOSS_REASON_PROP] = {'select': {'name': loss_reason}}
         if stage in CONTACTED_STAGES and not row.contacted_at:
             properties[CONTACTED_AT_PROP] = _date(utils.iso_now())
@@ -660,16 +660,16 @@ class SponsorNotion:
             # Same dated-line convention as log_touch, so Slack-driven moves show in the audit trail.
             merged = f'{date_iso}: {note}' + (f'\n{row.notes}' if row.notes else '')
             properties['Notes'] = _rt(merged[:1900])
-        self.client.pages.update(row.id, properties=properties)
+        await self.client.pages.update(row.id, properties=properties)
         logger.info(f'Set stage {stage}: {row.company} ({row.id}).')
 
     # --- Weekly quota audit -------------------------------------------------------
 
-    def query_quota_roster(self) -> list[QuotaRosterMember]:
+    async def query_quota_roster(self) -> list[QuotaRosterMember]:
         """Active members of the 👥 Ops Quota Roster. Rows without a Member person are skipped with a
         warning (nothing to match a DRI against). Ops leads edit this list in Notion."""
         members: list[QuotaRosterMember] = []
-        for page in self._query_all(
+        for page in await self._query_all(
             config.sponsorship.quota_roster_data_source_id, {'property': 'Active', 'checkbox': {'equals': True}}
         ):
             p = (page or {}).get('properties') or {}
@@ -681,12 +681,12 @@ class SponsorNotion:
             members.append(QuotaRosterMember(name=name or ids[0], notion_user_id=ids[0]))
         return members
 
-    def upsert_quota_audit_row(self, result: QuotaAuditResult) -> BankPageRef:
+    async def upsert_quota_audit_row(self, result: QuotaAuditResult) -> BankPageRef:
         """Write one member's weekly result to 📋 Weekly Quota Audit — creating the row for (member,
         week end) or updating it if a previous run already wrote one (re-runs and forced runs are
         safe; the row always reflects the latest check)."""
         member = result.member
-        existing = self.client.data_sources.query(
+        existing = await self.client.data_sources.query(
             data_source_id=config.sponsorship.quota_audit_data_source_id,
             filter={
                 'and': [
@@ -709,9 +709,9 @@ class SponsorNotion:
         }
         hits = existing.get('results') or []
         if hits:
-            updated = self.client.pages.update(hits[0]['id'], properties=properties)
+            updated = await self.client.pages.update(hits[0]['id'], properties=properties)
             return BankPageRef(updated['id'], updated.get('url') or '')
-        created = self.client.pages.create(
+        created = await self.client.pages.create(
             parent={'type': 'data_source_id', 'data_source_id': config.sponsorship.quota_audit_data_source_id},
             properties=properties,
         )
@@ -719,70 +719,70 @@ class SponsorNotion:
 
     # --- Page content (email template + drafts) ----------------------------------
 
-    def _children(self, block_id: str) -> list[Any]:
+    async def _children(self, block_id: str) -> list[Any]:
         blocks: list[Any] = []
         cursor: str | None = None
         while True:
-            response = self.client.blocks.children.list(block_id, start_cursor=cursor, page_size=100)
+            response = await self.client.blocks.children.list(block_id, start_cursor=cursor, page_size=100)
             blocks.extend(response.get('results') or [])
             cursor = response.get('next_cursor') if response.get('has_more') else None
             if not cursor:
                 return blocks
 
-    def fetch_page_paragraphs(self, page_id: str) -> list[str]:
+    async def fetch_page_paragraphs(self, page_id: str) -> list[str]:
         """Plain-text paragraphs of a page's body — used to read the team's outreach email template
         live, so ops can edit the template in Notion without a redeploy. Every block with rich text
         (paragraph, heading, quote…) becomes one paragraph string; formatting is intentionally
         dropped (the draft is a plain-text email)."""
         out: list[str] = []
-        for block in self._children(page_id):
+        for block in await self._children(page_id):
             text = _block_text(block)
             if text and text.strip():
                 out.append(text.strip())
         return out
 
-    def _read_block_lines(self, block_id: str, depth: int) -> list[str]:
+    async def _read_block_lines(self, block_id: str, depth: int) -> list[str]:
         """Recursively read a block's children as indented plain-text bullet lines (depth-capped).
         Notion returns only one level per children.list call, so nested bullets — sub-specs like a
         gear's bore diameter — require recursion or they'd be silently dropped."""
         if depth > 3:
             return []
         lines: list[str] = []
-        for block in self._children(block_id):
+        for block in await self._children(block_id):
             text = _block_text(block)
             if text is not None and text.strip():
                 lines.append(f"{'  ' * depth}- {text.strip()}")
             if block.get('has_children'):
-                lines.extend(self._read_block_lines(block['id'], depth + 1))
+                lines.extend(await self._read_block_lines(block['id'], depth + 1))
         return lines
 
-    def fetch_ask_section(self, page_id: str) -> str:
+    async def fetch_ask_section(self, page_id: str) -> str:
         """Read the `🎯 Specific ask` toggle from a Bank row's page, if present, as verbatim
         bullet-line text ('' when there is no ask). Humans paste detailed multi-line specs under the
         toggle in Notion; `/sponsor ask` creates/replaces it from Slack."""
-        for block in self._children(page_id):
+        for block in await self._children(page_id):
             text = _block_text(block)
             if text is not None and text.startswith(SPECIFIC_ASK_MARKER) and block.get('has_children'):
-                return '\n'.join(self._read_block_lines(block['id'], 0))
+                return '\n'.join(await self._read_block_lines(block['id'], 0))
         return ''
 
-    def _delete_toggles(self, page_id: str, marker: str) -> None:
+    async def _delete_toggles(self, page_id: str, marker: str) -> None:
         stale = []
-        for block in self._children(page_id):
+        for block in await self._children(page_id):
             rich = ((block or {}).get('toggle') or {}).get('rich_text')
             if isinstance(rich, list) and ''.join((t or {}).get('plain_text') or '' for t in rich).startswith(marker):
                 stale.append(block['id'])
         for id_ in stale:
-            self.client.blocks.delete(id_)
+            await self.client.blocks.delete(id_)
 
-    def write_ask_section(self, page_id: str, ask: str) -> str:
+    async def write_ask_section(self, page_id: str, ask: str) -> str:
         """Create/replace the `🎯 Specific ask` toggle on a Bank row (powers `/sponsor ask`). Each
         input line becomes one bullet under the toggle; people then refine the details in Notion.
         Same replace-the-marker-toggle pattern as write_draft_email. Returns the toggle's block id."""
 
-        self._delete_toggles(page_id, SPECIFIC_ASK_MARKER)
+        await self._delete_toggles(page_id, SPECIFIC_ASK_MARKER)
         lines = [l for l in (re.sub(r'^\s*[-•]\s*', '', x).strip() for x in ask.split('\n')) if l]
-        result = self.client.blocks.children.append(
+        result = await self.client.blocks.children.append(
             page_id,
             children=[
                 {
@@ -801,15 +801,15 @@ class SponsorNotion:
         logger.info(f'Wrote specific-ask toggle on {page_id} ({len(lines)} lines).')
         return block_id
 
-    def write_draft_email(self, page_id: str, title: str, paragraphs: list[str]) -> str:
+    async def write_draft_email(self, page_id: str, title: str, paragraphs: list[str]) -> str:
         """Write the draft email onto a Bank row's page body as a single toggle block
         (`📧 Draft email — …`) holding one paragraph block per email paragraph. Regenerating replaces
         the previous draft: any existing toggle starting with the marker is deleted first (a toggle
         groups the draft atomically, so deletion can't take out unrelated notes someone added to the
         page). Returns the toggle's block id so callers can deep-link to it (page URL +
         `#<id without dashes>`)."""
-        self._delete_toggles(page_id, DRAFT_EMAIL_MARKER)
-        result = self.client.blocks.children.append(
+        await self._delete_toggles(page_id, DRAFT_EMAIL_MARKER)
+        result = await self.client.blocks.children.append(
             page_id,
             children=[
                 {
@@ -828,8 +828,8 @@ class SponsorNotion:
         logger.info(f'Wrote draft email toggle on {page_id} ({len(paragraphs)} paragraphs).')
         return block_id
 
-    def list_notion_users(self) -> list[NotionUser]:
+    async def list_notion_users(self) -> list[NotionUser]:
         """Workspace users (id + display name + email) for bridging Notion DRI persons to Slack
         identities. Email may be None if the integration lacks the "read user emails" capability —
         the identity resolver falls back to name matching then."""
-        return Notion.list_users(self.client)
+        return await Notion.list_users(self.client)

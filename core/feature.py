@@ -8,10 +8,10 @@ Slack listeners with decorators, owns its Views and background tasks, and app.py
             self.views = [PriceAlertView()]
 
         @command('/pricecheck')
-        def stats(self, ack, command, respond): ...
+        async def stats(self, ack, command, respond): ...
 
         @task
-        def sweep(self): ...          # runs on a daemon thread once the bot is connected
+        async def sweep(self): ...    # runs as an asyncio task once the bot is connected
 
     bot.add_feature(PriceCheck())
 
@@ -20,11 +20,11 @@ Command and event methods take Bolt's listener arguments by name (`ack`, `comman
 """
 from __future__ import annotations
 
+import asyncio
 import logging
-import threading
 from typing import Any, Callable, ClassVar
 
-from slack_bolt import App
+from slack_bolt.async_app import AsyncApp
 
 from core.bolt import listener
 from core.ui import View
@@ -69,8 +69,8 @@ def shortcut(matcher: str | dict[str, str]) -> Callable[[Callable[..., Any]], Ca
 
 
 def task(fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Mark a Feature method to run on its own daemon thread when the bot starts. A task that has
-    nothing to do (its feature is switched off) just returns."""
+    """Mark a Feature method (`async def`) to run as an asyncio task when the bot starts. A task
+    that has nothing to do (its feature is switched off) just returns."""
     setattr(fn, _TASK_ATTR, True)
     return fn
 
@@ -82,7 +82,7 @@ class Feature:
     __listeners__: ClassVar[list[tuple[str, Any, str]]] = []
     __tasks__: ClassVar[list[str]] = []
     views: list[View]
-    client: Any = None  # the app's WebClient, set by register()
+    client: Any = None  # the app's AsyncWebClient, set by register()
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -97,7 +97,7 @@ class Feature:
         cls.__listeners__ = [(kind, name, attr) for attr, (kind, name) in listeners.items()]
         cls.__tasks__ = list(tasks)
 
-    def register(self, app: App) -> None:
+    def register(self, app: AsyncApp) -> None:
         """Attach this feature's listeners and views to the app."""
         self.client = app.client  # for tasks, which run outside any request
         for kind, name, attr in self.__listeners__:
@@ -105,17 +105,15 @@ class Feature:
         for view in getattr(self, 'views', []):
             view.register(app)
 
-    def start(self) -> list[threading.Thread]:
-        """Start this feature's background tasks (once the bot is connected)."""
-        threads = []
-        for attr in self.__tasks__:
-            thread = threading.Thread(target=self._run_task, args=(attr,), name=f'{self.name}-{attr}', daemon=True)
-            thread.start()
-            threads.append(thread)
-        return threads
+    def start(self) -> list['asyncio.Task[None]']:
+        """Start this feature's background tasks (once the bot is connected). Call from the
+        running loop and keep the returned tasks: asyncio holds tasks only weakly."""
+        return [asyncio.create_task(self._run_task(attr), name=f'{self.name}-{attr}') for attr in self.__tasks__]
 
-    def _run_task(self, attr: str) -> None:
+    async def _run_task(self, attr: str) -> None:
         try:
-            getattr(self, attr)()
+            await getattr(self, attr)()
+        except asyncio.CancelledError:
+            raise
         except Exception as err:  # a crashed task must never take the bot down
             logger.error(f'{self.name}: task {attr} stopped', exc_info=err)

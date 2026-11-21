@@ -1,16 +1,16 @@
 # Runtime dependencies (same as pyproject.toml). Install with: pip install -r requirements.txt
 slack-bolt>=1.21
 slack-sdk>=3.33
-httpx>=0.27
-openai>=1.99
+aiohttp>=3.10
+openai[aiohttp]>=1.99
 numpy>=1.26
 python-dotenv>=1.0
 cryptography>=43
 pypdf>=5.0
 mammoth>=1.8
 # price_check/scrapers (part search for the price listener)
-requests>=2.31
 beautifulsoup4>=4.12
 
 # Tests
 pytest>=8
+pytest-asyncio>=1.0

@@ -22,6 +22,7 @@ from price_check.views import (
     SwapDeps,
     SwapHandler,
 )
+from tests.aio import awaitable
 
 ROW_ID = '39e560bc-c039-80aa-bbbb-0123456789ab'
 AT = datetime(2026, 10, 17, 19, 0, tzinfo=timezone.utc)
@@ -125,16 +126,16 @@ def test_periods_and_the_pricecheck_arguments():
     assert StatsQuery.parse('help').help is True
 
 
-def test_clicks_hand_the_handler_a_ledger_event():
+async def test_clicks_hand_the_handler_a_ledger_event():
     state = {'row': purchasing_row()}
 
     def write(_id, patch):
         state['row'] = dataclasses.replace(state['row'], unit_cost=patch.unit_cost)
 
     deps = SwapDeps(
-        fetch_row=lambda _id: dataclasses.replace(state['row']),
-        write_row=write,
-        display_name=lambda _u: 'Ada',
+        fetch_row=awaitable(lambda _id: dataclasses.replace(state['row'])),
+        write_row=awaitable(write),
+        display_name=awaitable(lambda _u: 'Ada'),
         now=lambda: AT,
     )
     existing = [
@@ -142,18 +143,18 @@ def test_clicks_hand_the_handler_a_ledger_event():
         {'type': 'actions', 'block_id': ACTIONS_BLOCK_ID, 'elements': []},
     ]
 
-    def click(action_id, v):
-        return SwapHandler(deps).handle(ClickInput(action_id, json.dumps(v), 'U1', existing))
+    async def click(action_id, v):
+        return await SwapHandler(deps).handle(ClickInput(action_id, json.dumps(v), 'U1', existing))
 
-    assert click('price_swap_keep', value(n=None)).ledger.kind == 'kept'
-    used = click('price_swap_use:0', value())
+    assert (await click('price_swap_keep', value(n=None))).ledger.kind == 'kept'
+    used = await click('price_swap_use:0', value())
     assert used.ledger.kind == 'used'
     assert used.ledger.value.new == 1.17
-    assert click('price_swap_use:0', value()).ledger.kind == 'used'  # already at the price
-    assert click('price_swap_undo', value(t=int(AT.timestamp()))).ledger.kind == 'undone'
+    assert (await click('price_swap_use:0', value())).ledger.kind == 'used'  # already at the price
+    assert (await click('price_swap_undo', value(t=int(AT.timestamp())))).ledger.kind == 'undone'
     state['row'] = dataclasses.replace(state['row'], unit_cost=3)
-    assert click('price_swap_use:0', value()).ledger.kind == 'refused'
-    assert click('price_swap_undo', value(t=int(AT.timestamp()))).ledger is None
+    assert (await click('price_swap_use:0', value())).ledger.kind == 'refused'
+    assert (await click('price_swap_undo', value(t=int(AT.timestamp())))).ledger is None
     assert SwapValue.from_json(json.dumps(value(x=1))).test is True
 
 
@@ -166,19 +167,19 @@ class _FakeNotion:
         fake = self
 
         class DataSources:
-            def query(self, data_source_id, filter=None, page_size=None, start_cursor=None):
+            async def query(self, data_source_id, filter=None, page_size=None, start_cursor=None):
                 fake.calls.append('query')
                 results = [p for p in fake.store if all(fake._match(p, f) for f in (filter or {}).get('and', []))]
                 return {'results': results, 'has_more': False, 'next_cursor': None}
 
         class Pages:
-            def create(self, parent, properties):
+            async def create(self, parent, properties):
                 fake.calls.append('create')
                 page = {'id': f'L{len(fake.store) + 1}', 'created_time': utils.to_iso(AT), 'properties': fake._stored(properties)}
                 fake.store.append(page)
                 return page
 
-            def update(self, page_id, properties):
+            async def update(self, page_id, properties):
                 fake.calls.append('update')
                 page = next(p for p in fake.store if p['id'] == page_id)
                 page['properties'].update(fake._stored(properties))
@@ -210,42 +211,42 @@ class _FakeNotion:
         return True
 
 
-def test_record_updates_the_listeners_row_creates_one_when_missing_skips_test_alerts():
+async def test_record_updates_the_listeners_row_creates_one_when_missing_skips_test_alerts():
     fake = _FakeNotion()
     ledger = SavingsLedger(fake, 'ds')
 
-    def fetch_row(_id):
+    async def fetch_row(_id):
         return purchasing_row()
 
-    assert ledger.record(ev('used', x=1), 'Ada', fetch_row) == 'test alert, not logged'
+    assert await ledger.record(ev('used', x=1), 'Ada', fetch_row) == 'test alert, not logged'
     assert fake.calls == []
 
     # No row yet (alert from before the ledger): created, then the click applied.
-    assert ledger.record(ev('used'), 'Ada', fetch_row) == 'new → used'
+    assert await ledger.record(ev('used'), 'Ada', fetch_row) == 'new → used'
     r = LedgerRow.from_page(fake.store[0])
     assert [r.outcome, r.saved, r.name] == ['Used', 38.3, '5V regulator ×10']
 
     # Same alert again: found, not duplicated. A late stale refusal leaves Used alone.
-    assert ledger.record(ev('refused'), 'Ada', fetch_row) == 'kept Used'
-    assert ledger.record(ev('undone'), 'Bo', fetch_row) == 'Used → undone'
+    assert await ledger.record(ev('refused'), 'Ada', fetch_row) == 'kept Used'
+    assert await ledger.record(ev('undone'), 'Bo', fetch_row) == 'Used → undone'
     assert len(fake.store) == 1
     assert LedgerRow.from_page(fake.store[0]).outcome == 'Undone'
-    assert SavingsLedger(fake, '').record(ev('used'), 'Ada', fetch_row) == 'ledger off'
+    assert await SavingsLedger(fake, '').record(ev('used'), 'Ada', fetch_row) == 'ledger off'
 
 
-def test_the_sweep_marks_a_used_row_realized_only_once_ordered_at_the_used_price():
+async def test_the_sweep_marks_a_used_row_realized_only_once_ordered_at_the_used_price():
     fake = _FakeNotion()
     ledger = SavingsLedger(fake, 'ds')
-    ledger.record(ev('used'), 'Ada', lambda _id: purchasing_row())
+    await ledger.record(ev('used'), 'Ada', awaitable(lambda _id: purchasing_row()))
     state = {'row': purchasing_row(unit_cost=1.17)}
 
-    def fetch_row(_id):
+    async def fetch_row(_id):
         return state['row']
 
-    assert ledger.sweep_realized(fetch_row, AT) == 0  # not ordered yet
+    assert await ledger.sweep_realized(fetch_row, AT) == 0  # not ordered yet
     state['row'] = purchasing_row(unit_cost=2, exported=True)
-    assert ledger.sweep_realized(fetch_row, AT) == 0  # ordered, but at another price
+    assert await ledger.sweep_realized(fetch_row, AT) == 0  # ordered, but at another price
     state['row'] = purchasing_row(unit_cost=1.17, exported=True)
-    assert ledger.sweep_realized(fetch_row, AT) == 1
+    assert await ledger.sweep_realized(fetch_row, AT) == 1
     assert LedgerRow.from_page(fake.store[0]).realized is True
-    assert ledger.sweep_realized(fetch_row, AT) == 0  # already marked
+    assert await ledger.sweep_realized(fetch_row, AT) == 0  # already marked

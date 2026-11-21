@@ -6,6 +6,7 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from core import http
 from core.log import setup_logging
 from meeting_notes.config import KICKOFF_MESSAGE, SUBSYSTEMS
 from meeting_notes.slack_helpers import (
@@ -15,7 +16,7 @@ from meeting_notes.slack_helpers import (
 from meeting_notes.time_check import assert_expected_et_hour_range
 
 
-def main() -> None:
+async def main() -> None:
     # Accept any Monday run between 8am-12pm ET. Cron may be delayed; the idempotency check below
     # ensures we don't post duplicate kickoffs.
     assert_expected_et_hour_range(8, 12)
@@ -30,12 +31,12 @@ def main() -> None:
     results: list[tuple[str, str, str]] = []
     for sub in SUBSYSTEMS:
         try:
-            existing = find_most_recent_bot_thread(sub.slack_channel, since_unix)
+            existing = await find_most_recent_bot_thread(sub.slack_channel, since_unix)
             if existing:
                 print(f'⊘ Kickoff already posted in #{sub.slack_channel} (ts={existing}), skipping')
                 results.append((sub.slack_channel, 'skipped', ''))
                 continue
-            ts = post_kickoff_message(sub.slack_channel, message)
+            ts = await post_kickoff_message(sub.slack_channel, message)
             print(f'✓ Posted in #{sub.slack_channel} (ts={ts})')
             results.append((sub.slack_channel, 'ok', ''))
         except Exception as err:
@@ -53,7 +54,7 @@ def main() -> None:
 if __name__ == '__main__':
     setup_logging()
     try:
-        main()
+        http.run(main())
     except Exception as err:
         print(f'Kickoff post job crashed: {err}', file=sys.stderr)
         sys.exit(1)

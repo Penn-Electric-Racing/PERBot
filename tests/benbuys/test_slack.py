@@ -13,6 +13,7 @@ from benbuys.slack import (
     parse_benbuys,
     parse_money,
 )
+from tests.aio import awaitable, returning
 from tests.benbuys.helpers import row, test_adapter
 
 
@@ -56,7 +57,7 @@ def test_chunk_fenced_splits_long_carts_on_line_boundaries_each_part_fenced():
     assert '\n'.join(c[4:-4] for c in chunks) == '\n'.join(lines)
 
 
-def test_prep_cache_keyed_by_user_and_vendor_expires_after_the_ttl():
+async def test_prep_cache_keyed_by_user_and_vendor_expires_after_the_ttl():
     clock = {'now': 1_000}
     cache = PrepCache(24 * 3600 * 1000, lambda: clock['now'])
     prep = build_prep(test_adapter, [row('A-ND')], [])
@@ -83,44 +84,44 @@ def fake_deps(run_id_exists=False, fail_ids=(), mailer='ok'):
         return 'm1'
 
     deps = BenbuysDeps(
-        notion=SimpleNamespace(run_id_exists=lambda _r: run_id_exists, mark_ordered=mark_ordered),
+        notion=SimpleNamespace(run_id_exists=returning(run_id_exists), mark_ordered=awaitable(mark_ordered)),
         cache=PrepCache(),
-        mailer=None if mailer is None else SimpleNamespace(name='fake', send=send),
+        mailer=None if mailer is None else SimpleNamespace(name='fake', send=awaitable(send)),
     )
     return deps, sent, written
 
 
 def replies():
     out: list[str] = []
-    return out, lambda **msg: out.append(msg['text'])
+    return out, awaitable(lambda **msg: out.append(msg['text']))
 
 
 DONE = ParsedBenbuys('done', 'digikey', '4321745', 402.02, False)
 
 
-def test_handle_done_refuses_non_operators_then_missing_prep_then_duplicate_run_id():
+async def test_handle_done_refuses_non_operators_then_missing_prep_then_duplicate_run_id():
     deps, sent, written = fake_deps(run_id_exists=True)
     out, respond = replies()
-    handle_done(deps, test_adapter, 'U_STRANGER', DONE, respond)
+    await handle_done(deps, test_adapter, 'U_STRANGER', DONE, respond)
     assert re.search('Only the DigiKey operator', out[0])
 
     out, respond = replies()
-    handle_done(deps, test_adapter, 'U_OPERATOR', DONE, respond)
+    await handle_done(deps, test_adapter, 'U_OPERATOR', DONE, respond)
     assert re.search('run prep first', out[0])
 
     deps.cache.set('U_OPERATOR', 'digikey', build_prep(test_adapter, [row('A-ND')], []))
     out, respond = replies()
-    handle_done(deps, test_adapter, 'U_OPERATOR', DONE, respond)
+    await handle_done(deps, test_adapter, 'U_OPERATOR', DONE, respond)
     assert re.search(r'already recorded in Notion \(Run ID `BENBUYS-4321745`\)', out[0])
     assert not sent
     assert not written
 
 
-def test_handle_done_no_send_previews_the_email_and_rows_writes_nothing_keeps_the_cache():
+async def test_handle_done_no_send_previews_the_email_and_rows_writes_nothing_keeps_the_cache():
     deps, sent, written = fake_deps(mailer=None)
     deps.cache.set('U_OPERATOR', 'digikey', build_prep(test_adapter, [row('A-ND', quantity=2, unit_cost=300)], []))
     out, respond = replies()
-    handle_done(deps, test_adapter, 'U_OPERATOR', ParsedBenbuys('done', 'digikey', '4321745', 600, True), respond)
+    await handle_done(deps, test_adapter, 'U_OPERATOR', ParsedBenbuys('done', 'digikey', '4321745', 600, True), respond)
     assert re.search(r'\*Dry run\*.*\$600\.00 · 1 lines · APPROVAL REQUIRED', out[0])
     assert re.search(r'Subject: \[APPROVAL REQUIRED\] PER Requisition 4321745', out[0])
     assert re.search(r'Would mark 1 rows ordered \(Run ID `BENBUYS-4321745`\)', out[0])
@@ -129,31 +130,31 @@ def test_handle_done_no_send_previews_the_email_and_rows_writes_nothing_keeps_th
     assert deps.cache.get('U_OPERATOR', 'digikey')
 
 
-def test_handle_done_no_mailer_configured_refuses_before_writing():
+async def test_handle_done_no_mailer_configured_refuses_before_writing():
     deps, _, written = fake_deps(mailer=None)
     deps.cache.set('U_OPERATOR', 'digikey', build_prep(test_adapter, [row('A-ND')], []))
     out, respond = replies()
-    handle_done(deps, test_adapter, 'U_OPERATOR', DONE, respond)
+    await handle_done(deps, test_adapter, 'U_OPERATOR', DONE, respond)
     assert 'isn’t configured' in out[0]
     assert not written
 
 
-def test_handle_done_email_failure_notion_untouched_cache_kept_for_a_retry():
+async def test_handle_done_email_failure_notion_untouched_cache_kept_for_a_retry():
     deps, _, written = fake_deps(mailer='fail')
     deps.cache.set('U_OPERATOR', 'digikey', build_prep(test_adapter, [row('A-ND')], []))
     out, respond = replies()
-    handle_done(deps, test_adapter, 'U_OPERATOR', DONE, respond)
+    await handle_done(deps, test_adapter, 'U_OPERATOR', DONE, respond)
     assert re.search(r'Couldn’t send the requisition email \(smtp down\)\. Notion was NOT updated', out[0])
     assert not written
     assert deps.cache.get('U_OPERATOR', 'digikey')
 
 
-def test_handle_done_happy_path_email_then_write_back_to_exactly_the_cached_rows_then_cache_cleared():
+async def test_handle_done_happy_path_email_then_write_back_to_exactly_the_cached_rows_then_cache_cleared():
     deps, sent, written = fake_deps()
     rows = [row('A-ND', id='p1'), row('a-nd', id='p2'), row('B-ND', id='p3')]
     deps.cache.set('U_OPERATOR', 'digikey', build_prep(test_adapter, rows, []))
     out, respond = replies()
-    handle_done(deps, test_adapter, 'U_OPERATOR', DONE, respond)
+    await handle_done(deps, test_adapter, 'U_OPERATOR', DONE, respond)
     assert len(sent) == 1
     assert sent[0].subject == '[NO APPROVAL REQUIRED] PER Requisition 4321745'
     assert '(2 line items)' in sent[0].body  # 3 rows → 2 aggregated lines, as BEN counts them
@@ -163,24 +164,24 @@ def test_handle_done_happy_path_email_then_write_back_to_exactly_the_cached_rows
     assert deps.cache.get('U_OPERATOR', 'digikey') is None
 
 
-def test_handle_done_partial_write_back_failure_is_reported_and_the_cache_is_kept():
+async def test_handle_done_partial_write_back_failure_is_reported_and_the_cache_is_kept():
     deps, _, written = fake_deps(fail_ids=('p2',))
     rows = [row('A-ND', id='p1'), row('B-ND', id='p2', name='Second part')]
     deps.cache.set('U_OPERATOR', 'digikey', build_prep(test_adapter, rows, []))
     out, respond = replies()
-    handle_done(deps, test_adapter, 'U_OPERATOR', DONE, respond)
+    await handle_done(deps, test_adapter, 'U_OPERATOR', DONE, respond)
     assert len(written) == 1
     assert 'Notion: 1 rows marked ordered' in out[0]
     assert re.search(r'⚠️ 1 rows failed to update.*\n• <https://notion\.so/page-\d+\|Second part> — boom', out[0])
     assert deps.cache.get('U_OPERATOR', 'digikey')
 
 
-def test_handle_prep_caches_the_result_and_warns_when_a_previous_prep_was_never_closed_with_done():
+async def test_handle_prep_caches_the_result_and_warns_when_a_previous_prep_was_never_closed_with_done():
     # 6-char descriptions ("PART n") carry too little signal, so the reference falls back to the part number.
     ready = [row('A-ND', quantity=2, unit_cost=1.5, sanitized_description='PART 1'), row('B-ND', sanitized_description='PART 2')]
-    deps = BenbuysDeps(notion=SimpleNamespace(select_rows=lambda _a: RowSelection(ready, [])), cache=PrepCache(), mailer=None)
+    deps = BenbuysDeps(notion=SimpleNamespace(select_rows=returning(RowSelection(ready, []))), cache=PrepCache(), mailer=None)
     out, respond = replies()
-    handle_prep(deps, test_adapter, 'U_OPERATOR', respond)
+    await handle_prep(deps, test_adapter, 'U_OPERATOR', respond)
     assert len(out) == 1
     assert 'never ran' not in out[0]
     assert '*DigiKey order prep*' in out[0]
@@ -189,12 +190,12 @@ def test_handle_prep_caches_the_result_and_warns_when_a_previous_prep_was_never_
 
     # Second prep without a done in between → double-order warning up top.
     out, respond = replies()
-    handle_prep(deps, test_adapter, 'U_OPERATOR', respond)
+    await handle_prep(deps, test_adapter, 'U_OPERATOR', respond)
     assert re.match(r'^⚠️ You prepped 2 DigiKey lines \dm ago and never ran `/benbuys done`', out[0])
 
     # Nothing to order → no cache entry, so a later prep won't warn.
-    deps.notion = SimpleNamespace(select_rows=lambda _a: RowSelection([], []))
+    deps.notion = SimpleNamespace(select_rows=returning(RowSelection([], [])))
     out, respond = replies()
-    handle_prep(deps, test_adapter, 'U_OPERATOR', respond)
+    await handle_prep(deps, test_adapter, 'U_OPERATOR', respond)
     assert 'nothing to order' in out[0]
     assert deps.cache.get('U_OPERATOR', 'digikey') is None

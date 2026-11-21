@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from slack_sdk import WebClient
+from slack_sdk.web.async_client import AsyncWebClient
 
 from core.config import config
 from core.feature import Feature, command
@@ -18,21 +18,21 @@ class Anon(Feature):
     name = 'anon'
 
     @command('/anon')
-    def anon(self, ack: Any, command: dict[str, Any], client: WebClient, respond: Any) -> None:
+    async def anon(self, ack: Any, command: dict[str, Any], client: AsyncWebClient, respond: Any) -> None:
         allowed_channels = config.slack.anon_allowed_channels
         if command.get('channel_name') not in allowed_channels:
-            ack(response_type='ephemeral', text=f"`/anon` can only be used in: {', '.join(f'#{name}' for name in allowed_channels)}")
+            await ack(response_type='ephemeral', text=f"`/anon` can only be used in: {', '.join(f'#{name}' for name in allowed_channels)}")
             return
         text = (command.get('text') or '').strip()
         if not text:
-            ack(
+            await ack(
                 response_type='ephemeral',
                 text='Usage: `/anon your message`\nPERBot will post your message in this channel without revealing who sent it.',
             )
             return
-        ack()
+        await ack()
         try:
-            client.chat_postMessage(
+            await client.chat_postMessage(
                 channel=command['channel_id'],
                 text=f':bust_in_silhouette: Anonymous: {text}',
                 blocks=[
@@ -42,12 +42,12 @@ class Anon(Feature):
                 unfurl_links=False,
                 unfurl_media=False,
             )
-            respond(response_type='ephemeral', text=':white_check_mark: Your anonymous message was posted.')
+            await respond(response_type='ephemeral', text=':white_check_mark: Your anonymous message was posted.')
         except Exception as error:
             # Log only the error itself, never the sender or message text, so anonymity holds even
             # in server logs.
             logger.error('Anonymous message post failed.', exc_info=error)
-            respond(
+            await respond(
                 response_type='ephemeral',
                 text=':x: PERBot could not post your anonymous message. If this is a private channel, invite @PERBot to it first and try again.',
             )

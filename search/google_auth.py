@@ -4,16 +4,18 @@ access token at the OAuth token endpoint, cache until shortly before expiry.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
-import threading
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
+
+from core import http
 
 __all__ = [
     'TOKEN_URI', 'ServiceAccountKey', 'parse_service_account_key', 'load_service_account_key',
@@ -75,33 +77,36 @@ def build_assertion(key: ServiceAccountKey, scopes: list[str], now_seconds: int 
 
 
 class ServiceAccountAuth:
-    def __init__(self, key: ServiceAccountKey, scopes: list[str], http: httpx.Client | None = None):
+    def __init__(self, key: ServiceAccountKey, scopes: list[str], request: Callable[..., Awaitable[http.Response]] = http.request):
         self._key = key
         self._scopes = scopes
-        self._http = http or httpx.Client(timeout=15)
+        self._request = request
         self._token: tuple[str, float] | None = None
-        self._lock = threading.Lock()
+        # One refresh at a time: concurrent Drive reads would otherwise each fetch a token.
+        self._lock = asyncio.Lock()
 
     @property
     def email(self) -> str:
         return self._key.client_email
 
-    def access_token(self) -> str:
-        with self._lock:
+    async def access_token(self) -> str:
+        async with self._lock:
             if self._token and self._token[1] - 60 > time.time():
                 return self._token[0]
-            res = self._http.post(
+            res = await self._request(
+                'POST',
                 self._key.token_uri or TOKEN_URI,
                 data={
                     'grant_type': 'urn:ietf:params:oauth:grant-type:jwt-bearer',
                     'assertion': build_assertion(self._key, self._scopes),
                 },
+                timeout=15,
             )
             try:
                 data: dict[str, Any] = res.json()
             except ValueError:
                 data = {}
-            if not res.is_success or not data.get('access_token'):
+            if not res.ok or not data.get('access_token'):
                 raise RuntimeError(
                     f"Google service-account token request failed: {res.status_code} {data.get('error', '')} {data.get('error_description', '')}".strip()
                 )

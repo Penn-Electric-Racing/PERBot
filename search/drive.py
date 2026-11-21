@@ -9,18 +9,16 @@ are skipped. Extracted text is cached by file id + modifiedTime in the build cac
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import random
 import re
-import threading
-import time
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
-import httpx
-
+from core import aio, http
 from core.config import config
 from search.google_auth import ServiceAccountAuth
 from search.models import BuildCache, CachedDriveFile
@@ -59,11 +57,11 @@ MAX_ATTEMPTS = 6
 REV_FOLDER = re.compile(r'^REV\s?-?(\d{1,2})\b', re.I)
 
 
-def _backoff(attempt: int) -> None:
-    time.sleep((min(60_000, 2_000 * 2**attempt) + random.random() * 1_000) / 1000)
+async def _backoff(attempt: int) -> None:
+    await asyncio.sleep((min(60_000, 2_000 * 2**attempt) + random.random() * 1_000) / 1000)
 
 
-def _is_rate_limit(res: httpx.Response) -> bool:
+def _is_rate_limit(res: http.Response) -> bool:
     try:
         return re.search(r'rateLimitExceeded|userRateLimitExceeded|quotaExceeded', res.text, re.I) is not None
     except Exception:
@@ -163,55 +161,55 @@ def docx_text(data: bytes) -> str:
 
 
 class DriveService:
-    def __init__(self, auth: ServiceAccountAuth, http: httpx.Client | None = None):
+    def __init__(self, auth: ServiceAccountAuth, request: Callable[..., Awaitable[http.Response]] = http.request):
         self._auth = auth
-        self._http = http or httpx.Client(timeout=120, follow_redirects=True)
+        self._request = request
 
-    def _get(self, path: str, params: dict[str, str], accept: str | None = None) -> httpx.Response:
+    async def _get(self, path: str, params: dict[str, str], accept: str | None = None) -> http.Response:
         """GET with backoff. Drive signals rate limiting as 403 `userRateLimitExceeded` /
         `rateLimitExceeded` as often as 429, so both are retried with exponential backoff + jitter."""
         attempt = 0
         while True:
-            headers = {'Authorization': f'Bearer {self._auth.access_token()}'}
+            headers = {'Authorization': f'Bearer {await self._auth.access_token()}'}
             if accept:
                 headers['Accept'] = accept
             try:
-                res = self._http.get(f'{API}{path}', params=params, headers=headers)
-            except httpx.TransportError:
+                res = await self._request('GET', f'{API}{path}', params=params, headers=headers, timeout=120)
+            except (http.Timeout, http.ConnectError):
                 if attempt >= MAX_ATTEMPTS:
                     raise
-                _backoff(attempt)
+                await _backoff(attempt)
                 attempt += 1
                 continue
-            if res.is_success:
+            if res.ok:
                 return res
             retryable = res.status_code == 429 or res.status_code >= 500 or (res.status_code == 403 and _is_rate_limit(res))
             if not retryable or attempt >= MAX_ATTEMPTS:
                 return res
-            _backoff(attempt)
+            await _backoff(attempt)
             attempt += 1
 
-    def _get_json(self, path: str, params: dict[str, str]) -> Any:
-        res = self._get(path, params)
-        if not res.is_success:
+    async def _get_json(self, path: str, params: dict[str, str]) -> Any:
+        res = await self._get(path, params)
+        if not res.ok:
             raise RuntimeError(f'Drive {path} failed: {res.status_code} {res.text[:300]}')
         return res.json()
 
-    def list_shared_drives(self) -> list[dict[str, str]]:
+    async def list_shared_drives(self) -> list[dict[str, str]]:
         drives: list[dict[str, str]] = []
         page_token: str | None = None
         while True:
-            data = self._get_json('/drives', {'pageSize': '100', **({'pageToken': page_token} if page_token else {})})
+            data = await self._get_json('/drives', {'pageSize': '100', **({'pageToken': page_token} if page_token else {})})
             drives.extend(data.get('drives') or [])
             page_token = data.get('nextPageToken')
             if not page_token:
                 return drives
 
-    def _list_files(self, params: dict[str, str]) -> list[DriveFile]:
+    async def _list_files(self, params: dict[str, str]) -> list[DriveFile]:
         files: list[DriveFile] = []
         page_token: str | None = None
         while True:
-            data = self._get_json(
+            data = await self._get_json(
                 '/files',
                 {
                     'pageSize': '1000',
@@ -227,14 +225,14 @@ class DriveService:
             if not page_token:
                 return files
 
-    def list_drive(self, drive_id: str) -> list[DriveFile]:
+    async def list_drive(self, drive_id: str) -> list[DriveFile]:
         """Every non-trashed file and folder in one Shared Drive."""
-        return self._list_files({'corpora': 'drive', 'driveId': drive_id, 'q': 'trashed = false'})
+        return await self._list_files({'corpora': 'drive', 'driveId': drive_id, 'q': 'trashed = false'})
 
-    def list_folder_tree(self, folder_id: str) -> tuple[DriveFile | None, list[DriveFile]]:
+    async def list_folder_tree(self, folder_id: str) -> tuple[DriveFile | None, list[DriveFile]]:
         """A folder subtree (any drive), breadth-first."""
         try:
-            root = self._get_json(
+            root = await self._get_json(
                 f'/files/{folder_id}',
                 {'supportsAllDrives': 'true', 'fields': 'id,name,mimeType,parents,modifiedTime,createdTime,driveId'},
             )
@@ -248,38 +246,38 @@ class DriveService:
             if id_ in seen:
                 continue
             seen.add(id_)
-            for child in self._list_files({'corpora': 'allDrives', 'q': f"'{id_}' in parents and trashed = false"}):
+            for child in await self._list_files({'corpora': 'allDrives', 'q': f"'{id_}' in parents and trashed = false"}):
                 files.append(child)
                 if child.get('mimeType') == FOLDER:
                     queue.append(child['id'])
         return root, files
 
-    def file_text(self, file: DriveFile, route: FileRoute) -> str | None:
+    async def file_text(self, file: DriveFile, route: FileRoute) -> str | None:
         if route.type == 'skip':
             return None
         if route.type == 'export':
-            res = self._get(f"/files/{file['id']}/export", {'mimeType': route.mime})
+            res = await self._get(f"/files/{file['id']}/export", {'mimeType': route.mime})
             if res.status_code == 403 and route.mime == 'text/markdown':
                 # Markdown export is capped at 10 MB and image-heavy Docs exceed it
                 # (exportSizeLimitExceeded); plain text of the same doc always exports.
-                res = self._get(f"/files/{file['id']}/export", {'mimeType': 'text/plain'})
-            if not res.is_success:
+                res = await self._get(f"/files/{file['id']}/export", {'mimeType': 'text/plain'})
+            if not res.ok:
                 m = re.search(r'"reason":\s*"([^"]+)"', res.text)
                 raise RuntimeError(f"export {res.status_code} {m.group(1) if m else ''}".strip())
             cap = MAX_SHEET_CHARS if route.mime == 'text/csv' else config.gdrive.max_doc_chars
             return _cap(res.text, cap)
-        res = self._get(f"/files/{file['id']}", {'alt': 'media', 'supportsAllDrives': 'true'})
-        if not res.is_success:
+        res = await self._get(f"/files/{file['id']}", {'alt': 'media', 'supportsAllDrives': 'true'})
+        if not res.ok:
             raise RuntimeError(f'download {res.status_code}')
         if route.parser == 'pdf':
-            text = pdf_text(res.content)
+            text = await asyncio.to_thread(pdf_text, res.content)  # CPU-bound: keep the loop free
         elif route.parser == 'docx':
-            text = docx_text(res.content)
+            text = await asyncio.to_thread(docx_text, res.content)
         else:
             text = res.content.decode('utf-8', errors='replace')
         return _cap(text, config.gdrive.max_doc_chars)
 
-    def build_documents(
+    async def build_documents(
         self,
         cache: BuildCache,
         on_progress: Callable[[dict[str, CachedDriveFile]], None] | None = None,
@@ -296,18 +294,18 @@ class DriveService:
         # Collect every file with the folder index that explains its breadcrumb.
         batches: list[tuple[list[DriveFile], FolderIndex]] = []
 
-        drives = self.list_shared_drives()
+        drives = await self.list_shared_drives()
         if g.drive_ids:
             drives = [d for d in drives if d['id'] in g.drive_ids]
         for drive in drives:
-            all_files = self.list_drive(drive['id'])
+            all_files = await self.list_drive(drive['id'])
             folders = [f for f in all_files if f.get('mimeType') == FOLDER]
             index = build_folder_index(folders, {drive['id']: drive['name']}, g.exclude_folder_names, g.min_rev)
             batches.append(([f for f in all_files if f.get('mimeType') != FOLDER], index))
             counts['drives'] += 1
             logger.info(f"Drive \"{drive['name']}\": {len(all_files) - len(folders)} files in {len(folders)} folders.")
         for folder_id in g.folder_ids:
-            root, files = self.list_folder_tree(folder_id)
+            root, files = await self.list_folder_tree(folder_id)
             folders = [f for f in files if f.get('mimeType') == FOLDER]
             root_name = (root or {}).get('name') or 'Drive folder'
             index = build_folder_index(folders, {folder_id: root_name}, g.exclude_folder_names, g.min_rev)
@@ -335,27 +333,22 @@ class DriveService:
             del work[g.max_files :]
 
         results: list[tuple[int, str] | None] = [None] * len(work)
-        lock = threading.Lock()
 
-        def read(i: int) -> None:
+        async def read(i: int) -> None:
             file, route, _ = work[i]
             hit = prev.get(file['id'])
             if hit and hit['modifiedTime'] == file.get('modifiedTime'):
                 results[i] = (i, hit['text'])
-                with lock:
-                    counts['cached'] += 1
+                counts['cached'] += 1
             else:
                 try:
-                    results[i] = (i, self.file_text(file, route) or '')
-                    with lock:
-                        counts['fetched'] += 1
+                    results[i] = (i, await self.file_text(file, route) or '')
+                    counts['fetched'] += 1
                 except Exception as err:
-                    with lock:
-                        counts['failed'] += 1
+                    counts['failed'] += 1
                     logger.warning(f"Drive: skipping \"{file.get('name')}\" ({file['id']}): {err}")
-            with lock:
-                done = counts['fetched'] + counts['cached'] + counts['failed']
-                report = done % 500 == 0
+            done = counts['fetched'] + counts['cached'] + counts['failed']
+            report = done % 500 == 0
             if report:
                 logger.info(
                     f"Drive: {done}/{len(work)} files read ({counts['fetched']} fetched, {counts['cached']} cached, {counts['failed']} failed)."
@@ -371,8 +364,7 @@ class DriveService:
                     except Exception as err:
                         logger.warning('Drive: partial cache save failed.', exc_info=err)
 
-        with ThreadPoolExecutor(max_workers=max(1, g.concurrency)) as pool:
-            list(pool.map(read, range(len(work))))
+        await aio.map(read, range(len(work)), limit=max(1, g.concurrency))
 
         for r in results:
             if not r:

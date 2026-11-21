@@ -5,20 +5,21 @@ Run: `python -m app`
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import sys
-import threading
 from typing import Any
 
-from slack_bolt import App
-from slack_bolt.adapter.socket_mode import SocketModeHandler
-from slack_sdk import WebClient
+from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+from slack_bolt.async_app import AsyncApp
+from slack_sdk.web.async_client import AsyncWebClient
 
 from anon.feature import Anon
 from arrivals.feature import Arrivals
 from arrivals.slack import handle_arrivals_mention
 from benbuys.feature import BenBuys
+from core import http
 from core.bolt import listener
 from core.config import config
 from core.feature import Feature
@@ -44,7 +45,7 @@ class PERBot:
     @PERBot mentions, which span features."""
 
     def __init__(self) -> None:
-        self.app = App(token=config.slack.bot_token)
+        self.app = AsyncApp(token=config.slack.bot_token)
         self.features: list[Feature] = []
         self.search = Search()
         for feature in (
@@ -64,7 +65,7 @@ class PERBot:
         feature.register(self.app)
         self.features.append(feature)
 
-    def on_mention(self, event: dict[str, Any], client: WebClient, context: Any) -> None:
+    async def on_mention(self, event: dict[str, Any], client: AsyncWebClient, context: Any) -> None:
         """@PERBot mentions: assign → arrivals → docs (thread summary / chat / docs question)."""
         raw_text = event.get('text') or ''
         thread_ts = event.get('thread_ts') or event.get('ts')
@@ -74,48 +75,55 @@ class PERBot:
         # can't run in threads). Strip only the bot's own mention so assignee mentions survive.
         without_bot = (re.sub(rf'<@{bot_user_id}(?:\|[^>]*)?>', ' ', raw_text) if bot_user_id else raw_text).strip()
         if re.match(r'^assign\b', without_bot, re.I):
-            assign_from_mention(client, without_bot, event.get('user'), event['channel'], thread_ts)
+            await assign_from_mention(client, without_bot, event.get('user'), event['channel'], thread_ts)
             return
 
         # In a #packages thread, "@PERBot <what's in the box>" corrects the package match.
         try:
-            if handle_arrivals_mention(client, event, bot_user_id):
+            if await handle_arrivals_mention(client, event, bot_user_id):
                 return
         except Exception as error:
             logger.error('Arrivals mention failed.', exc_info=error)
             return
 
-        def reply(text: str, blocks: list[dict[str, Any]] | None = None) -> None:
+        async def reply(text: str, blocks: list[dict[str, Any]] | None = None) -> None:
             kwargs: dict[str, Any] = {'blocks': blocks} if blocks else {}
-            client.chat_postMessage(channel=event['channel'], thread_ts=thread_ts, text=text, unfurl_links=False, unfurl_media=False, **kwargs)
+            await client.chat_postMessage(channel=event['channel'], thread_ts=thread_ts, text=text, unfurl_links=False, unfurl_media=False, **kwargs)
 
         query = clean_mention(raw_text)
         if not query:
-            reply('Ask me a PER docs question after mentioning me. Example: `@PERBot what changed in REV11 chassis?`')
+            await reply('Ask me a PER docs question after mentioning me. Example: `@PERBot what changed in REV11 chassis?`')
             return
-        self.search.docs.answer_mention(client, event, query, bot_user_id, reply)
+        await self.search.docs.answer_mention(client, event, query, bot_user_id, reply)
 
-    def run(self) -> None:
+    async def run(self) -> None:
         if not config.slack.app_token:
             raise RuntimeError('Missing required environment variable: SLACK_APP_TOKEN (needed for Socket Mode).')
         logger.info('[PERBot] Starting Slack Socket Mode...')
-        SocketModeHandler(self.app, config.slack.app_token).connect()
+        # The aiohttp Socket Mode client: events arrive over its websocket and each listener runs
+        # as a task on this loop.
+        handler = AsyncSocketModeHandler(self.app, config.slack.app_token)
+        await handler.connect_async()
         logger.info('⚡️ PERBot is running in Slack Socket Mode.')
         logger.info(f'Index path: {config.app.index_path}')
-        for feature in self.features:
-            feature.start()
-        # Block the main thread; the socket client and listeners run on their own threads.
-        threading.Event().wait()
+        tasks = [t for feature in self.features for t in feature.start()]
+        try:
+            await asyncio.Event().wait()  # until cancelled (Ctrl-C / SIGTERM ends asyncio.run)
+        finally:
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await handler.close_async()
 
 
-def main() -> None:
-    PERBot().run()
+async def main() -> None:
+    await PERBot().run()
 
 
 if __name__ == '__main__':
     setup_logging()
     try:
-        main()
+        http.run(main())
     except KeyboardInterrupt:
         pass
     except Exception as error:

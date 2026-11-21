@@ -120,12 +120,12 @@ class OpsTasksNotion:
     def __init__(self, token: str | None = None):
         self.client = Notion(token, config.notion.api_version) if token else Notion.shared()
 
-    def query_open_tasks(self) -> list[OpsTask]:
+    async def query_open_tasks(self) -> list[OpsTask]:
         """Every row whose Status is not Done (paginated)."""
         tasks: list[OpsTask] = []
         cursor: str | None = None
         while True:
-            response = self.client.data_sources.query(
+            response = await self.client.data_sources.query(
                 data_source_id=config.ops_tasks.data_source_id,
                 filter={'property': 'Status', 'status': {'does_not_equal': 'Done'}},
                 page_size=100,
@@ -136,12 +136,12 @@ class OpsTasksNotion:
             if not cursor:
                 return tasks
 
-    def list_meetings(self) -> list[OpsMeeting]:
+    async def list_meetings(self) -> list[OpsMeeting]:
         """Every Ops Meetings row with a Date, oldest first (a handful of rows — no need to filter server-side)."""
         meetings: list[OpsMeeting] = []
         cursor: str | None = None
         while True:
-            response = self.client.data_sources.query(
+            response = await self.client.data_sources.query(
                 data_source_id=config.ops_tasks.meetings_data_source_id,
                 filter={'property': 'Date', 'date': {'is_not_empty': True}},
                 sorts=[{'property': 'Date', 'direction': 'ascending'}],
@@ -156,11 +156,11 @@ class OpsTasksNotion:
             if not cursor:
                 return meetings
 
-    def meeting_for_date(self, anchor_iso: str) -> OpsMeeting | None:
+    async def meeting_for_date(self, anchor_iso: str) -> OpsMeeting | None:
         """The meeting page a task dated `anchor_iso` belongs to (see meetings.py), or None if that page doesn't exist yet."""
-        return pick_meeting(self.list_meetings(), anchor_iso)
+        return pick_meeting(await self.list_meetings(), anchor_iso)
 
-    def create_task(
+    async def create_task(
         self, title: str, owner_ids: list[str], due_iso: str | None, meeting_id: str | None = None
     ) -> OpsTask:
         """Create a task (powers `/assign`): Status = Not started, Owner(s), optional Due, and the
@@ -175,7 +175,7 @@ class OpsTasksNotion:
             properties['Due'] = {'date': {'start': due_iso}}
         if meeting_id:
             properties['Meeting'] = {'relation': [{'id': meeting_id}]}
-        page = self.client.pages.create(
+        page = await self.client.pages.create(
             parent={'type': 'data_source_id', 'data_source_id': config.ops_tasks.data_source_id},
             properties=properties,
         )
@@ -184,24 +184,24 @@ class OpsTasksNotion:
         )
         return parse_ops_task(page)
 
-    def fetch_task(self, page_id: str) -> OpsTask:
+    async def fetch_task(self, page_id: str) -> OpsTask:
         """Re-read one task (button handlers do this before writing, so a stale DM can't clobber a newer edit)."""
-        return parse_ops_task(self.client.pages.retrieve(page_id))
+        return parse_ops_task(await self.client.pages.retrieve(page_id))
 
-    def set_status(self, page_id: str, status: Literal['Not started', 'In progress', 'Done']) -> None:
+    async def set_status(self, page_id: str, status: Literal['Not started', 'In progress', 'Done']) -> None:
         """Set Status (a Notion status property — options: Not started / In progress / Done)."""
-        self.client.pages.update(page_id, properties={'Status': {'status': {'name': status}}})
+        await self.client.pages.update(page_id, properties={'Status': {'status': {'name': status}}})
         logger.info(f'Ops task {page_id} → Status {status}.')
 
-    def link_meeting(self, task: OpsTask, meeting_id: str) -> None:
+    async def link_meeting(self, task: OpsTask, meeting_id: str) -> None:
         """Add a meeting page to the task's Meeting relation (keeps existing links; no-op if already linked)."""
         if meeting_id in task.meeting_ids:
             return
         relation = [{'id': i} for i in [*task.meeting_ids, meeting_id]]
-        self.client.pages.update(task.id, properties={'Meeting': {'relation': relation}})
+        await self.client.pages.update(task.id, properties={'Meeting': {'relation': relation}})
         logger.info(f'Ops task {task.id} → linked to meeting {meeting_id}.')
 
-    def set_due(self, page_id: str, due_iso: str) -> None:
+    async def set_due(self, page_id: str, due_iso: str) -> None:
         """Set the Due date (YYYY-MM-DD)."""
-        self.client.pages.update(page_id, properties={'Due': {'date': {'start': due_iso}}})
+        await self.client.pages.update(page_id, properties={'Due': {'date': {'start': due_iso}}})
         logger.info(f'Ops task {page_id} → Due {due_iso}.')

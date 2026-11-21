@@ -1,17 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
 import re
-import time
 from dataclasses import dataclass
 from typing import Callable, Literal
 
-import httpx
 import numpy as np
 import openai
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from core.config import config
 from core.llm import LLM
@@ -29,7 +28,7 @@ __all__ = [
 EMBEDDING_BATCH_SIZE = 100
 MAX_EMBED_RETRIES = 8
 
-def get_openai_client() -> OpenAI:
+def get_openai_client() -> AsyncOpenAI:
     if not config.has_openai:
         raise RuntimeError('OPENAI_API_KEY is not configured. Embeddings are required for search to function.')
     return LLM.shared().openai
@@ -40,11 +39,11 @@ def _normalize(vec: np.ndarray) -> np.ndarray:
     return (vec / mag).astype(np.float32) if mag > 0 else vec
 
 
-def _create_embedding_with_retry(client: OpenAI, texts: list[str]):
+async def _create_embedding_with_retry(client: AsyncOpenAI, texts: list[str]):
     attempt = 0
     while True:
         try:
-            return client.embeddings.create(
+            return await client.embeddings.create(
                 model=config.openai.embedding_model,
                 input=texts,
                 encoding_format='float',
@@ -56,7 +55,6 @@ def _create_embedding_with_retry(client: OpenAI, texts: list[str]):
                 isinstance(err, (openai.RateLimitError, openai.APIConnectionError, openai.APITimeoutError))
                 or (status is not None and status >= 500)
                 or 'Rate limit' in str(err)
-                or isinstance(err, httpx.TransportError)
             )
             if not retryable or attempt >= MAX_EMBED_RETRIES:
                 raise
@@ -64,11 +62,11 @@ def _create_embedding_with_retry(client: OpenAI, texts: list[str]):
             logger.warning(
                 f"Embedding request failed ({status or type(err).__name__}). Retry {attempt + 1}/{MAX_EMBED_RETRIES} in {delay}ms"
             )
-            time.sleep(delay / 1000)
+            await asyncio.sleep(delay / 1000)
             attempt += 1
 
 
-def embed_texts(texts: list[str], on_batch: Callable[[int, int], None] | None = None) -> list[np.ndarray]:
+async def embed_texts(texts: list[str], on_batch: Callable[[int, int], None] | None = None) -> list[np.ndarray]:
     """Unit-normalized embeddings (float32), in input order."""
     if not texts:
         return []
@@ -77,7 +75,7 @@ def embed_texts(texts: list[str], on_batch: Callable[[int, int], None] | None = 
     total_batches = math.ceil(len(texts) / EMBEDDING_BATCH_SIZE)
     for i in range(0, len(texts), EMBEDDING_BATCH_SIZE):
         batch = texts[i : i + EMBEDDING_BATCH_SIZE]
-        response = _create_embedding_with_retry(client, batch)
+        response = await _create_embedding_with_retry(client, batch)
         for item in response.data:
             out.append(_normalize(np.asarray(item.embedding, dtype=np.float32)))
         if on_batch:
@@ -85,8 +83,8 @@ def embed_texts(texts: list[str], on_batch: Callable[[int, int], None] | None = 
     return out
 
 
-def embed_query(text: str) -> np.ndarray:
-    vectors = embed_texts([text])
+async def embed_query(text: str) -> np.ndarray:
+    vectors = await embed_texts([text])
     if not vectors:
         raise RuntimeError('Embedding returned empty result for query.')
     return vectors[0]
@@ -132,7 +130,7 @@ def _parse_index_list(raw: str, n: int) -> list[int] | None:
     return out or None
 
 
-def rerank_results(query: str, candidates: list[RerankCandidate]) -> list[str]:
+async def rerank_results(query: str, candidates: list[RerankCandidate]) -> list[str]:
     """Orders candidates by relevance. Falls back to the incoming order (already RRF-fused) when
     Groq is unavailable or returns something unparsable. Candidates carry the full best chunk
     (capped by the caller)."""
@@ -157,7 +155,7 @@ Candidates:
 Reply with ONLY a JSON array of objects like [{{"i": 2}}, {{"i": 0}}, ...] covering every index once."""
 
     try:
-        raw = LLM.shared().groq_chat(prompt, 1024)
+        raw = await LLM.shared().groq_chat(prompt, 1024)
         order = _parse_index_list(raw, len(candidates))
         if not order:
             logger.warning('Reranker returned an unparsable list; keeping fused order.')
@@ -191,7 +189,7 @@ NO_OPENAI_NOTE = (
 )
 
 
-def answer_from_sources(query: str, sources: list[AnswerSource], weak: bool) -> str:
+async def answer_from_sources(query: str, sources: list[AnswerSource], weak: bool) -> str:
     if not config.has_openai:
         return NO_OPENAI_NOTE
     if not sources:
@@ -226,7 +224,7 @@ Question: {query}
 Sources:
 {source_text}"""
 
-    return LLM.shared().respond(prompt) or 'I found relevant pages but could not write a summary.'
+    return await LLM.shared().respond(prompt) or 'I found relevant pages but could not write a summary.'
 
 
 # ---------------------------------------------------------------------------------------------
@@ -251,7 +249,7 @@ def heuristic_intent(text: str, in_thread: bool) -> MentionIntent:
     return 'chat'
 
 
-def classify_mention(text: str, in_thread: bool) -> MentionIntent:
+async def classify_mention(text: str, in_thread: bool) -> MentionIntent:
     """Decides what a `@PERBot …` mention is asking for. Heuristics catch the obvious cases; Groq
     settles the rest ("let her re-send it" is chatter, "how is the PCM box wired" is docs)."""
     guess = heuristic_intent(text, in_thread)
@@ -272,7 +270,7 @@ message: {json.dumps(text[:500], ensure_ascii=False)}
 Reply with ONLY JSON: {{"intent": "docs" | "thread" | "chat"}}"""
 
     try:
-        parsed = json.loads(LLM.shared().groq_chat(prompt, 200, json_mode=True))
+        parsed = json.loads(await LLM.shared().groq_chat(prompt, 200, json_mode=True))
         intent = parsed.get('intent') if isinstance(parsed, dict) else None
         if intent == 'thread' and not in_thread:
             return 'docs'
@@ -289,7 +287,7 @@ class ThreadMessage:
     text: str
 
 
-def summarize_thread(request: str, messages: list[ThreadMessage]) -> str:
+async def summarize_thread(request: str, messages: list[ThreadMessage]) -> str:
     """Answers a request about the thread ("summarize this", "what did we decide on X") from its messages."""
     if not config.has_openai:
         return 'I need `OPENAI_API_KEY` configured to summarize threads.'
@@ -303,4 +301,4 @@ Answer from the thread transcript only. For a summary: lead with the decisions o
 Thread transcript:
 {transcript}"""
 
-    return LLM.shared().respond(prompt) or 'I could not summarize that thread.'
+    return await LLM.shared().respond(prompt) or 'I could not summarize that thread.'

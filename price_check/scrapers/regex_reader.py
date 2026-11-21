@@ -3,12 +3,11 @@ and quantity breaks (`part_info`, `enrich`). The CLI around it is regex_scraper.
 """
 import json
 import re
-from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
-import requests
 from bs4 import BeautifulSoup
 
+from core import aio, http
 from price_check.scrapers import distributors
 from price_check.scrapers.ranking import Scorer, _alnum
 from price_check.scrapers.websearch import (
@@ -391,13 +390,13 @@ def _blank_info():
             "listing_page": False, "page_title": None, "fetch_error": None,
             "min_order": None, "order_mult": None}
 
-def part_info(result):
+async def part_info(result):
     """Fetch a result page and pull cost / supplier / shipping details."""
     domain = urlparse(result["url"]).netloc.lower().removeprefix("www.")
     info = _blank_info()
     listing = bool(LISTING_URL_RE.search(result["url"]))
     try:
-        soup = BeautifulSoup(_fetch_html(result["url"]), "html.parser")
+        soup = BeautifulSoup(await _fetch_html(result["url"]), "html.parser")
         h1 = soup.find("h1")
         title = " ".join(h1.get_text(" ").split()) if h1 else ""
         info["page_title"] = title or None
@@ -421,7 +420,7 @@ def part_info(result):
         _from_text(main, info, "page text", listing)
         if main is not text:
             _from_text(text, info, "page text", listing)  # banners: free shipping etc.
-    except (BackendError, requests.RequestException) as e:
+    except (BackendError, http.RequestError) as e:
         info["fetch_error"] = str(e)
     except Exception as e:  # one malformed page must not abort the whole thread pool
         info["fetch_error"] = f"parse error: {e!r}"
@@ -430,10 +429,9 @@ def part_info(result):
     info["supplier"] = info["supplier"] or domain
     return {**result, **info}
 
-def enrich(results):
+async def enrich(results):
     """Run part_info over all results in parallel (up to 10 pages at once)."""
-    with ThreadPoolExecutor(max_workers=min(10, len(results) or 1)) as pool:
-        return list(pool.map(part_info, results))
+    return list(await aio.map(part_info, results, limit=min(10, len(results) or 1)))
 
 # ---------------------------------------------------------------- ranking
 # Scoring lives in ranking.py (tune Weights there, or pass --weights file.json).

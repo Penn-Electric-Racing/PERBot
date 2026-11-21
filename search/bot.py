@@ -7,17 +7,17 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import random
-import subprocess
 import sys
-import threading
 from dataclasses import dataclass
 from typing import Any
 
-from slack_sdk import WebClient
+from slack_sdk.web.async_client import AsyncWebClient
 
+from core import aio
 from core.config import config
 from search.engine import context_for_result, search_index
 from search.index_downloader import download_index_from_release, fetch_index_stamp
@@ -97,33 +97,33 @@ class IndexManager:
     def __init__(self, post: Any = None):
         # post(channel, thread_ts, text): how reindex progress reaches Slack.
         self.post = post
-        self._reindex_lock = threading.Lock()
         self.reindex_in_progress = False
         # `updated_at` of the release asset the loaded index came from; drives the hourly refresh.
         self._loaded_stamp: str | None = None
         # One load at a time: concurrent /dt calls during startup or a hot swap all wait on this
         # lock and then find the index already loaded.
-        self._load_lock = threading.Lock()
+        self._load_lock = asyncio.Lock()
 
-    def ensure_loaded(self) -> LoadedIndex | None:
+    async def ensure_loaded(self) -> LoadedIndex | None:
         cached = get_loaded_index()
         if cached:
             return cached
-        with self._load_lock:
-            return get_loaded_index() or self._load_or_download()
+        async with self._load_lock:
+            return get_loaded_index() or await self._load_or_download()
 
-    def _load_or_download(self) -> LoadedIndex | None:
+    async def _load_or_download(self) -> LoadedIndex | None:
         if not index_exists():
-            dl = download_index_from_release()
+            dl = await download_index_from_release()
             if not dl:
                 return None
             self._loaded_stamp = dl.get('stamp')
         try:
-            loaded = load_index()
+            # Parsing the index and building BM25 takes seconds: off the loop, so Slack keeps flowing.
+            loaded = await asyncio.to_thread(load_index)
             idx = loaded.index
             logger.info(f"Index loaded: {len(idx['pages'])} pages, {len(idx['chunks'])} chunks (generated {idx.get('generatedAt')}).")
             if not self._loaded_stamp:
-                self._loaded_stamp = fetch_index_stamp()
+                self._loaded_stamp = await fetch_index_stamp()
             return loaded
         except Exception as err:
             # A half-replaced pair (download overlapping the nightly upload) would otherwise wedge
@@ -135,28 +135,28 @@ class IndexManager:
             self._loaded_stamp = None
             return None
 
-    def refresh_if_newer(self) -> None:
+    async def refresh_if_newer(self) -> None:
         if self.reindex_in_progress:
             return
-        stamp = fetch_index_stamp()
+        stamp = await fetch_index_stamp()
         if not stamp or stamp == self._loaded_stamp:
             return
         logger.info(f'Release index updated ({stamp}); downloading the new one.')
         nxt = {'index_path': f'{config.app.index_path}.next', 'embeddings_path': f'{config.app.embeddings_path}.next'}
-        dl = download_index_from_release(nxt)
+        dl = await download_index_from_release(nxt)
         if not dl:
             return
         try:
             # Parse the new files first (cheap to fail), then swap the files into place and rebuild
             # the in-memory index with the old one already released: holding both plus BM25 scratch
             # would roughly triple memory. Queries during the rebuild wait on the load lock.
-            index, embeddings = read_index_files(nxt['index_path'], nxt['embeddings_path'])
-            with self._load_lock:
+            index, embeddings = await asyncio.to_thread(read_index_files, nxt['index_path'], nxt['embeddings_path'])
+            async with self._load_lock:
                 os.replace(nxt['index_path'], config.app.index_path)
                 os.replace(nxt['embeddings_path'], config.app.embeddings_path)
                 self._loaded_stamp = dl.get('stamp')
                 set_loaded_index(None)
-                set_loaded_index(assemble_index(index, embeddings))
+                set_loaded_index(await asyncio.to_thread(assemble_index, index, embeddings))
             logger.info(f"Swapped in index generated {index.get('generatedAt')} ({len(index['pages'])} pages).")
         except Exception as err:
             logger.error('New index could not be loaded; keeping the current one.', exc_info=err)
@@ -164,61 +164,62 @@ class IndexManager:
             _unlink(nxt['embeddings_path'])
 
     def start_refresh_loop(self, every_s: float) -> None:
-        def loop() -> None:
-            stop = threading.Event()
-            while not stop.wait(every_s):
+        async def loop() -> None:
+            while True:
+                await asyncio.sleep(every_s)
                 try:
-                    self.refresh_if_newer()
+                    await self.refresh_if_newer()
                 except Exception as err:
                     logger.warning('Index refresh check failed.', exc_info=err)
 
-        threading.Thread(target=loop, name='index-refresh', daemon=True).start()
+        aio.background(loop, name='index-refresh')
 
     def start_reindex(self, channel_id: str | None = None, thread_ts: str | None = None, trigger_label: str = '') -> bool:
         """Runs the indexer in a child process (it holds far more memory than the bot) and reloads
         the index when it exits cleanly. False if a reindex is already running."""
-        with self._reindex_lock:
-            if self.reindex_in_progress:
-                return False
-            self.reindex_in_progress = True
+        # Check and set with no await between them: one task at a time runs here.
+        if self.reindex_in_progress:
+            return False
+        self.reindex_in_progress = True
         logger.info(f'[PERBot] Starting background reindex ({trigger_label})...')
 
-        def notify(text: str) -> None:
+        async def notify(text: str) -> None:
             if not channel_id or not self.post:
                 return
             try:
-                self.post(channel_id, thread_ts, text)
+                await self.post(channel_id, thread_ts, text)
             except Exception as post_error:
                 logger.error('Failed to post reindex message.', exc_info=post_error)
 
-        def run() -> None:
+        async def run() -> None:
             try:
-                code = subprocess.run([sys.executable, '-m', 'search.indexer'], env=os.environ.copy()).returncode
+                proc = await asyncio.create_subprocess_exec(sys.executable, '-m', 'search.indexer', env=os.environ.copy())
+                code = await proc.wait()
             except Exception as error:
                 self.reindex_in_progress = False
                 logger.error('Background reindex failed to start.', exc_info=error)
-                notify(f':x: PERBot failed to start the reindex job. {LOGS_HINT}.')
+                await notify(f':x: PERBot failed to start the reindex job. {LOGS_HINT}.')
                 return
             self.reindex_in_progress = False
             if code == 0:
                 logger.info('[PERBot] Background reindex finished successfully; reloading.')
                 try:
-                    with self._load_lock:
-                        load_index()
-                    notify(':white_check_mark: PERBot finished reindexing and is using the new index.')
+                    async with self._load_lock:
+                        await asyncio.to_thread(load_index)
+                    await notify(':white_check_mark: PERBot finished reindexing and is using the new index.')
                 except Exception as err:
                     logger.error('Reindex finished but the new index failed to load.', exc_info=err)
-                    notify(f':x: Reindex finished but the new index could not be loaded. {LOGS_HINT}.')
+                    await notify(f':x: Reindex finished but the new index could not be loaded. {LOGS_HINT}.')
             else:
                 logger.error(f'[PERBot] Background reindex exited with code={code}')
-                notify(':x: PERBot reindexing failed. Run `/indexstatus` and check the server logs (`journalctl -u perbot`) for details.')
+                await notify(':x: PERBot reindexing failed. Run `/indexstatus` and check the server logs (`journalctl -u perbot`) for details.')
 
-        threading.Thread(target=run, name='reindex', daemon=True).start()
+        aio.background(run, name='reindex')
         return True
 
-    def start(self) -> None:
+    async def start(self) -> None:
         """At bot start: load (or bootstrap) the index and start the hourly refresh."""
-        loaded = self.ensure_loaded()
+        loaded = await self.ensure_loaded()
         if not loaded and config.app.auto_bootstrap_on_missing_index:
             status = load_status()
             if not status or status.get('state') != 'indexing':
@@ -246,8 +247,8 @@ class DocSearch:
 
     # --- answering --------------------------------------------------------------------------------
 
-    def answer(self, query: str) -> Answer:
-        loaded = self.index.ensure_loaded()
+    async def answer(self, query: str) -> Answer:
+        loaded = await self.index.ensure_loaded()
         if not loaded:
             status = load_status()
             summary = (
@@ -256,7 +257,7 @@ class DocSearch:
                 else 'I do not have a search index loaded yet. Run `/reindex`, or check that the nightly index build succeeded.'
             )
             return Answer(summary, [], ResultMeta())
-        response = search_index(loaded, query)
+        response = await search_index(loaded, query)
         results, weak = response['results'], response['weak']
         sources = [
             AnswerSource(
@@ -270,62 +271,62 @@ class DocSearch:
             )
             for i, r in enumerate(results[: config.app.max_results_to_summarize])
         ]
-        summary = answer_from_sources(query, sources, weak)
+        summary = await answer_from_sources(query, sources, weak)
         meta = ResultMeta(weak=weak, indexed_pages=len(loaded.index['pages']), generated_at=loaded.index.get('generatedAt') or '')
         return Answer(summary, results, meta)
 
-    def _display_name(self, client: WebClient, user_id: str) -> str:
+    async def _display_name(self, client: AsyncWebClient, user_id: str) -> str:
         cached = self._user_names.get(user_id)
         if cached:
             return cached
         name = user_id
         try:
-            user = client.users_info(user=user_id).get('user') or {}
+            user = (await client.users_info(user=user_id)).get('user') or {}
             name = user.get('real_name') or (user.get('profile') or {}).get('display_name') or user.get('name') or user_id
         except Exception:
             pass  # fall back to the id
         self._user_names[user_id] = name
         return name
 
-    def _fetch_thread(self, client: WebClient, channel: str, thread_ts: str, bot_user_id: str | None) -> list[ThreadMessage]:
-        res: Any = client.conversations_replies(channel=channel, ts=thread_ts, limit=200)
+    async def _fetch_thread(self, client: AsyncWebClient, channel: str, thread_ts: str, bot_user_id: str | None) -> list[ThreadMessage]:
+        res: Any = await client.conversations_replies(channel=channel, ts=thread_ts, limit=200)
         messages: list[ThreadMessage] = []
         for m in res.get('messages') or []:
             if not m.get('text') or (bot_user_id and m.get('user') == bot_user_id):
                 continue
-            name = self._display_name(client, m['user']) if m.get('user') else m.get('username') or 'someone'
+            name = await self._display_name(client, m['user']) if m.get('user') else m.get('username') or 'someone'
             messages.append(ThreadMessage(name=name, text=m['text']))
         return messages
 
-    def answer_mention(self, client: WebClient, event: dict[str, Any], query: str, bot_user_id: str | None, reply: Any) -> None:
+    async def answer_mention(self, client: AsyncWebClient, event: dict[str, Any], query: str, bot_user_id: str | None, reply: Any) -> None:
         """A docs question, a thread summary, or small talk (classified by the model)."""
         in_thread = bool(event.get('thread_ts'))
         try:
-            intent = classify_mention(query, in_thread)
+            intent = await classify_mention(query, in_thread)
             logger.info(f'Mention intent={intent} inThread={in_thread} text="{query[:80]}"')
             if intent == 'chat':
-                reply(random.choice(self.CHAT_REPLIES))
+                await reply(random.choice(self.CHAT_REPLIES))
                 return
             if intent == 'thread':
-                messages = self._fetch_thread(client, event['channel'], event['thread_ts'], bot_user_id)
+                messages = await self._fetch_thread(client, event['channel'], event['thread_ts'], bot_user_id)
                 if not messages:
-                    reply("I couldn't read this thread (I may not have history access in this channel).")
+                    await reply("I couldn't read this thread (I may not have history access in this channel).")
                     return
-                summary = summarize_thread(query, messages)
-                reply(summary, [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': summary[:2900]}}])
+                summary = await summarize_thread(query, messages)
+                await reply(summary, [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': summary[:2900]}}])
                 return
-            answer = self.answer(query)
-            reply(f'PERBot results for: {query}', build_result_blocks(query, answer.summary, answer.results, answer.meta))
+            answer = await self.answer(query)
+            await reply(f'PERBot results for: {query}', build_result_blocks(query, answer.summary, answer.results, answer.meta))
         except Exception as error:
             logger.error('Mention handler failed.', exc_info=error)
-            reply(f'PERBot hit an error while answering. {LOGS_HINT} and try `/indexstatus`.')
+            await reply(f'PERBot hit an error while answering. {LOGS_HINT} and try `/indexstatus`.')
 
     # --- commands ---------------------------------------------------------------------------------
 
-    def dt(self, ack: Any, command: dict[str, Any], client: WebClient) -> None:
+    async def dt(self, ack: Any, command: dict[str, Any], client: AsyncWebClient) -> None:
         query = (command.get('text') or '').strip()
         if not query:
-            ack(
+            await ack(
                 response_type='ephemeral',
                 text=(
                     'Usage: `/dt your question here`\nExamples: `/dt how does the PCM box connect to the PDU` · '
@@ -333,15 +334,15 @@ class DocSearch:
                 ),
             )
             return
-        ack(response_type='ephemeral', text=f'PERBot is searching the docs for: {query}')
+        await ack(response_type='ephemeral', text=f'PERBot is searching the docs for: {query}')
         try:
-            parent = client.chat_postMessage(
+            parent = await client.chat_postMessage(
                 channel=command['channel_id'],
                 text=f'PERBot search: {query}',
                 blocks=[{'type': 'section', 'text': {'type': 'mrkdwn', 'text': f':mag: *PERBot search started*\n*Query:* `{query}`'}}],
             )
-            answer = self.answer(query)
-            client.chat_postMessage(
+            answer = await self.answer(query)
+            await client.chat_postMessage(
                 channel=command['channel_id'],
                 thread_ts=parent['ts'],
                 text=f'PERBot results for: {query}',
@@ -351,15 +352,15 @@ class DocSearch:
             )
         except Exception as error:
             logger.error('Slash command failed.', exc_info=error)
-            client.chat_postMessage(channel=command['channel_id'], text=f'PERBot hit an error while searching for: {query}')
+            await client.chat_postMessage(channel=command['channel_id'], text=f'PERBot hit an error while searching for: {query}')
 
-    def reindex(self, ack: Any, command: dict[str, Any], client: WebClient) -> None:
-        ack(response_type='ephemeral', text='PERBot received your reindex request.')
+    async def reindex(self, ack: Any, command: dict[str, Any], client: AsyncWebClient) -> None:
+        await ack(response_type='ephemeral', text='PERBot received your reindex request.')
         if not user_can_reindex(command.get('user_id')):
-            client.chat_postEphemeral(channel=command['channel_id'], user=command['user_id'], text='You are not allowed to run `/reindex` for PERBot.')
+            await client.chat_postEphemeral(channel=command['channel_id'], user=command['user_id'], text='You are not allowed to run `/reindex` for PERBot.')
             return
         try:
-            parent = client.chat_postMessage(
+            parent = await client.chat_postMessage(
                 channel=command['channel_id'],
                 text='PERBot reindex request',
                 blocks=[
@@ -373,7 +374,7 @@ class DocSearch:
                 ],
             )
             started = self.index.start_reindex(channel_id=command['channel_id'], thread_ts=parent['ts'], trigger_label='/reindex')
-            client.chat_postMessage(
+            await client.chat_postMessage(
                 channel=command['channel_id'],
                 thread_ts=parent['ts'],
                 text=':hourglass_flowing_sand: Reindex started. PERBot will post here when it finishes.'
@@ -382,9 +383,9 @@ class DocSearch:
             )
         except Exception as error:
             logger.error('Reindex command failed.', exc_info=error)
-            client.chat_postMessage(channel=command['channel_id'], text=':x: PERBot could not start the reindex job.')
+            await client.chat_postMessage(channel=command['channel_id'], text=':x: PERBot could not start the reindex job.')
 
-    def index_status(self, ack: Any, command: dict[str, Any], client: WebClient) -> None:
-        ack()
-        client.chat_postEphemeral(channel=command['channel_id'], user=command['user_id'], text=format_status(load_status()))
+    async def index_status(self, ack: Any, command: dict[str, Any], client: AsyncWebClient) -> None:
+        await ack()
+        await client.chat_postEphemeral(channel=command['channel_id'], user=command['user_id'], text=format_status(load_status()))
 

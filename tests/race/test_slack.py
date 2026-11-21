@@ -1,11 +1,9 @@
-import json
 import re
 from datetime import datetime, timezone
 
-import httpx
-
 from race.board import fetch_board, format_lap
 from race.slack import ParsedRace, board_message, board_text, parse_race
+from tests.aio import FakeHTTP, response
 
 rows = [
     {'rank': 1, 'name': 'Ben Ito', 'slack_id': 'UBEN', 'time_ms': 41234, 'cones': 0, 'laps': 6, 'set_at': '2026-10-09T00:00:00Z'},
@@ -52,18 +50,12 @@ def test_empty_board_invites_a_first_lap_share_posts_in_channel():
     assert board_message(rows, 'week', share=False)['response_type'] == 'ephemeral'
 
 
-def test_fetch_board_calls_the_bot_rpc_with_the_service_key_and_a_7_day_window():
-    seen: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append(request)
-        return httpx.Response(200, json=rows)
-
-    http = httpx.Client(transport=httpx.MockTransport(handler), base_url='http://x')
+async def test_fetch_board_calls_the_bot_rpc_with_the_service_key_and_a_7_day_window():
+    fake = FakeHTTP(lambda call: response(200, rows))
     now = datetime(2026, 10, 10, tzinfo=timezone.utc).timestamp() * 1000
-    out = fetch_board('week', 10, now, http)
+    out = await fetch_board('week', 10, now, fake)
     assert len(out) == 3
-    assert re.search(r'/rest/v1/rpc/bot_leaderboard$', str(seen[-1].url))
-    assert json.loads(seen[-1].content) == {'since': '2026-10-03T00:00:00.000Z', 'lim': 10}
-    fetch_board('all', 10, now, http)
-    assert json.loads(seen[-1].content) == {'since': None, 'lim': 10}
+    assert re.search(r'/rest/v1/rpc/bot_leaderboard$', fake.calls[-1].url)
+    assert fake.calls[-1].json == {'since': '2026-10-03T00:00:00.000Z', 'lim': 10}
+    await fetch_board('all', 10, now, fake)
+    assert fake.calls[-1].json == {'since': None, 'lim': 10}

@@ -16,7 +16,7 @@ import os
 import re
 from dataclasses import dataclass, field, fields
 
-import httpx
+from core import http
 
 __all__ = [
     'GROQ_API_URL', 'GROQ_MODEL', 'SECTION_KEYS', 'ParsedUpdate', 'EMPTY_UPDATE',
@@ -146,7 +146,7 @@ def _parse_single_message(text: str) -> _SingleMessageResult:
     return r
 
 
-def _llm_bucketize(subsystem_name: str, freeform_text: str) -> dict[str, str]:
+async def _llm_bucketize(subsystem_name: str, freeform_text: str) -> dict[str, str]:
     """Send accumulated freeform content to Groq and return bucketed result. Returns an empty dict
     if no API key or the call fails (graceful degradation)."""
     if not freeform_text.strip():
@@ -194,7 +194,7 @@ MESSAGES:
 {freeform_text}"""
 
     try:
-        response = httpx.post(
+        response = await http.post(
             GROQ_API_URL,
             headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'},
             json={
@@ -207,7 +207,7 @@ MESSAGES:
             },
             timeout=120,
         )
-        if not response.is_success:
+        if not response.ok:
             print(f'Groq API error {response.status_code} for {subsystem_name}: {response.text}')
             return {}
         data = response.json()
@@ -219,7 +219,7 @@ MESSAGES:
         return {}
 
 
-def parse_subsystem_updates(subsystem_name: str, messages: list[ProcessedMessage]) -> ParsedUpdate:
+async def parse_subsystem_updates(subsystem_name: str, messages: list[ProcessedMessage]) -> ParsedUpdate:
     accumulators: dict[str, list[str]] = {k: [] for k in SECTION_KEYS}
     freeform_chunks: list[str] = []
 
@@ -248,7 +248,7 @@ def parse_subsystem_updates(subsystem_name: str, messages: list[ProcessedMessage
     # Single batched LLM call for all freeform content from this subsystem
     if freeform_chunks:
         print(f'[{subsystem_name}] Sending {len(freeform_chunks)} freeform chunk(s) to Groq...')
-        llm_result = _llm_bucketize(subsystem_name, '\n\n'.join(freeform_chunks))
+        llm_result = await _llm_bucketize(subsystem_name, '\n\n'.join(freeform_chunks))
         for key, value in llm_result.items():
             if key in accumulators and isinstance(value, str) and value.strip():
                 # Split LLM output into individual items, strip leading bullet markers

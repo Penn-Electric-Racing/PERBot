@@ -16,13 +16,15 @@
   ui.py           View, @button, @modal, Interaction
   bolt.py         listener(): calling methods from Bolt
   blocks.py       Block Kit builders (Section, Actions, Button, ...)
+  http.py         HTTP over aiohttp: get / post / request / download, run(main()) for entrypoints
+  aio.py          asyncio helpers: spawn, map, background
 
 The clients are shared: `Notion.shared()`, `Slack.shared()`, `LLM.shared()`, `JobLog.shared()`,
-`Purchasing.shared()`. Pass one in explicitly where a test needs a fake. `utils` is imported as a
-module (`from core import utils`); types/ holds the raw payload TypedDicts.
+`Purchasing.shared()`. Pass one in explicitly where a test needs a fake. `utils`, `http` and `aio` are
+imported as modules (`from core import http`); types/ holds the raw payload TypedDicts.
 """
 
-from . import utils
+from . import aio, http, utils
 from .abc import *
 from .blocks import *
 from .bolt import *
@@ -55,5 +57,5 @@ __all__ = (
     'name_tokens', 'index_entry', 'index_notion_users', 'match_by_name', 'MessageMarker',
     'ResolvedPeople', 'MENTION_RE', 'EMAIL_RE', 'PLAIN_HANDLE_RE', 'CHANNEL_ID_RE',
     'unwrap_links', 'extract_plain_handles', 'Slack', 'Interaction', 'View', 'button', 'modal',
-    'utils',
+    'utils', 'http', 'aio',
 )

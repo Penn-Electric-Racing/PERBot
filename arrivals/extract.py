@@ -15,7 +15,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from arrivals.models import Extraction, OrderNumber, Scan, SlipLine
 from core.config import config
@@ -124,7 +124,7 @@ If the Slack message names items that can't be tied to a specific package in the
 
 Do not transcribe prices, totals, or account numbers."""
 
-def _openai() -> OpenAI:
+def _openai() -> AsyncOpenAI:
     if not config.has_openai:
         raise RuntimeError('OPENAI_API_KEY is not configured; package arrivals need it to read photos.')
     return LLM.shared().openai
@@ -201,7 +201,7 @@ def parse_scan(raw: Any) -> Scan:
     return Scan(scene=scene, legible=o.get('legible') is True, packages=packages)
 
 
-def scan_photos(images: list[SlipImage], context: ScanContext) -> Scan:
+async def scan_photos(images: list[SlipImage], context: ScanContext) -> Scan:
     said = '\n'.join(
         x
         for x in [
@@ -219,7 +219,7 @@ def scan_photos(images: list[SlipImage], context: ScanContext) -> Scan:
                 'detail': 'high',
             }
         )
-    response = _openai().responses.create(
+    response = await _openai().responses.create(
         model=config.arrivals.vision_model,
         reasoning={'effort': 'low'},
         input=[{'role': 'user', 'content': content}],

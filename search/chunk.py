@@ -9,8 +9,8 @@ match a query about the PCM.
 """
 from __future__ import annotations
 
+import asyncio
 import re
-import time
 from dataclasses import dataclass
 
 __all__ = ['TextChunk', 'ChunkOptions', 'HEADING_RE', 'chunk_markdown', 'build_embed_text', 'sleep']
@@ -121,5 +121,5 @@ def build_embed_text(title: str, ancestors: list[str], heading: str | None, text
     return f'{title}{crumbs}{head}\n\n{text}'
 
 
-def sleep(ms: float) -> None:
-    time.sleep(ms / 1000)
+async def sleep(ms: float) -> None:
+    await asyncio.sleep(ms / 1000)

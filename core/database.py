@@ -122,26 +122,26 @@ class Database(Generic[M]):
         """A page of this database as a bound row."""
         return self.model.from_page(page, db=self)
 
-    def pages(self, filter: Any = None, sorts: list[Any] | None = None, limit: int | None = None, page_size: int | None = None) -> list['Page']:
+    async def pages(self, filter: Any = None, sorts: list[Any] | None = None, limit: int | None = None, page_size: int | None = None) -> list['Page']:
         """Raw pages matching `filter` (all of them, or the first `limit`)."""
         args: dict[str, Any] = {'data_source_id': self.data_source_id, 'page_size': page_size or min(limit or 100, 100)}
         if filter is not None:
             args['filter'] = filter
         if sorts is not None:
             args['sorts'] = sorts
-        return collect(self.client.data_sources.query, limit=limit, **args)
+        return await collect(self.client.data_sources.query, limit=limit, **args)
 
-    def query(self, filter: Any = None, sorts: list[Any] | None = None, limit: int | None = None) -> list[M]:
-        return [self.wrap(p) for p in self.pages(filter, sorts, limit)]
+    async def query(self, filter: Any = None, sorts: list[Any] | None = None, limit: int | None = None) -> list[M]:
+        return [self.wrap(p) for p in await self.pages(filter, sorts, limit)]
 
-    def get(self, page_id: str) -> M:
-        return self.wrap(self.client.pages.retrieve(page_id))
+    async def get(self, page_id: str) -> M:
+        return self.wrap(await self.client.pages.retrieve(page_id))
 
-    def create(self, properties: dict[str, Any]) -> 'Page':
-        return self.client.pages.create(parent={'type': 'data_source_id', 'data_source_id': self.data_source_id}, properties=properties)
+    async def create(self, properties: dict[str, Any]) -> 'Page':
+        return await self.client.pages.create(parent={'type': 'data_source_id', 'data_source_id': self.data_source_id}, properties=properties)
 
-    def update(self, page_id: str, properties: dict[str, Any]) -> None:
-        self.client.pages.update(page_id=page_id, properties=properties)
+    async def update(self, page_id: str, properties: dict[str, Any]) -> None:
+        await self.client.pages.update(page_id=page_id, properties=properties)
 
     def owns(self, page: 'Page') -> bool:
         """False only when the page is known to live in another data source."""

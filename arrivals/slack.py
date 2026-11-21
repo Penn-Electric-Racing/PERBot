@@ -18,19 +18,18 @@ channel is private), then reinstall.
 """
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 import re
-import threading
 import time
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
-from slack_sdk import WebClient
+from slack_sdk.web.async_client import AsyncWebClient
 
 from arrivals.blocks import (
     ARRIVAL_ACTION_IDS,
@@ -62,7 +61,7 @@ from arrivals.pipeline import (
     slack_name,
     with_names,
 )
-from core import utils
+from core import aio, utils
 from core.config import config
 from core.purchasing import PurchasingRow
 from core.slack import Indexed, Slack, index_notion_users
@@ -83,15 +82,15 @@ def _notion() -> ArrivalsNotion:
 
 
 _channel_id: str | None = None
-_channel_lock = threading.Lock()
+_channel_lock = asyncio.Lock()
 
 
-def _arrivals_channel_id(client: WebClient) -> str | None:
+async def _arrivals_channel_id(client: AsyncWebClient) -> str | None:
     """Resolved once; a lookup error raises and is retried on the next message."""
     global _channel_id
-    with _channel_lock:
+    async with _channel_lock:
         if _channel_id is None:
-            found = Slack.wrap(client).resolve_channel_id(config.arrivals.channel)
+            found = await Slack.wrap(client).resolve_channel_id(config.arrivals.channel)
             if not found:
                 logger.warning(f'Arrivals: channel "{config.arrivals.channel}" not found; the listener is idle.')
             _channel_id = found or ''
@@ -110,7 +109,6 @@ class _Capped(OrderedDict):
         self[key] = True
 
 
-_state_lock = threading.RLock()
 # Slack redelivers events it thinks we missed; one message is processed once per process.
 _seen = _Capped()
 # Package key (vendor + tracking) → permalink of the reply that already covers that box.
@@ -126,18 +124,16 @@ AWAIT_S = 30 * 60
 
 def _claim(id_: str) -> bool:
     """Marks a message seen; False when it already was."""
-    with _state_lock:
-        if id_ in _seen:
-            return False
-        _seen.add(id_)
-        return True
+    if id_ in _seen:
+        return False
+    _seen.add(id_)
+    return True
 
 
 def _reject(thread_ts: str, keys: list[str]) -> None:
-    with _state_lock:
-        current = set(_rejected_in.get(thread_ts) or set())
-        current.update(keys)
-        _rejected_in[thread_ts] = current
+    current = set(_rejected_in.get(thread_ts) or set())
+    current.update(keys)
+    _rejected_in[thread_ts] = current
 
 
 def thread_orders(messages: list[Any], bot: str | None, remembered: Iterable[str] = ()) -> tuple[set[str], set[str]]:
@@ -162,16 +158,16 @@ def thread_orders(messages: list[Any], bot: str | None, remembered: Iterable[str
     return set(carded), set(rejected)
 
 
-def _thread_messages(client: WebClient, channel: str, thread_ts: str) -> list[Any]:
+async def _thread_messages(client: AsyncWebClient, channel: str, thread_ts: str) -> list[Any]:
     try:
-        return client.conversations_replies(channel=channel, ts=thread_ts, limit=200).get('messages') or []
+        return (await client.conversations_replies(channel=channel, ts=thread_ts, limit=200)).get('messages') or []
     except Exception as err:
         logger.warning(f'Arrivals: could not read thread {thread_ts}', exc_info=err)
         return []
 
 
-def handle_photo(
-    client: WebClient,
+async def handle_photo(
+    client: AsyncWebClient,
     event: dict[str, Any],
     correction: bool = False,
     text: str | None = None,
@@ -182,37 +178,35 @@ def handle_photo(
     thread_ts = event.get('thread_ts') or event['ts']
     in_thread = bool(event.get('thread_ts') and event.get('thread_ts') != event.get('ts'))
 
-    def reply(t: str, blocks: list[Any] | None = None) -> Any:
+    async def reply(t: str, blocks: list[Any] | None = None) -> Any:
         kwargs: dict[str, Any] = {'channel': event['channel'], 'thread_ts': thread_ts, 'text': t, 'unfurl_links': False}
         if blocks is not None:
             kwargs['blocks'] = blocks
-        return client.chat_postMessage(**kwargs)
+        return await client.chat_postMessage(**kwargs)
 
     try:
-        images = load_images(client, event.get('files') or [])
+        images = await load_images(client, event.get('files') or [])
         if not images:
             return
         look_around = in_thread or correction
         notion = _notion()
-        with ThreadPoolExecutor(max_workers=6) as pool:
-            text_f = pool.submit(with_names, client, text if text is not None else event.get('text') or '')
-            parent_f = pool.submit(parent_text, client, event['channel'], thread_ts) if look_around else None
-            rows_f = pool.submit(notion.open_rows)
-            people_f = pool.submit(people_map, client, notion)
-            thread_f = pool.submit(_thread_messages, client, event['channel'], thread_ts) if look_around else None
-            ids_f = pool.submit(_own_ids, client)
-            said = text_f.result()
-            parent = parent_f.result() if parent_f else None
-            open_rows = rows_f.result()
-            people = people_f.result()
-            thread = thread_f.result() if thread_f else []
-            ids = ids_f.result()
-        with _state_lock:
-            remembered = list(_rejected_in.get(thread_ts) or ())
+        text_f = aio.spawn(with_names, client, text if text is not None else event.get('text') or '')
+        parent_f = aio.spawn(parent_text, client, event['channel'], thread_ts) if look_around else None
+        rows_f = aio.spawn(notion.open_rows)
+        people_f = aio.spawn(people_map, client, notion)
+        thread_f = aio.spawn(_thread_messages, client, event['channel'], thread_ts) if look_around else None
+        ids_f = aio.spawn(_own_ids, client)
+        said = await text_f
+        parent = await parent_f if parent_f else None
+        open_rows = await rows_f
+        people = await people_f
+        thread = await thread_f if thread_f else []
+        ids = await ids_f
+        remembered = list(_rejected_in.get(thread_ts) or ())
         carded, rejected = thread_orders(thread, ids[0], remembered)
         # A correction is about the photo: its own message is the context, the correction the evidence.
         context = ('\n'.join(x for x in (parent, photo_text) if x) or None) if correction else parent
-        result = process_delivery(
+        result = await process_delivery(
             DeliveryMessage(
                 ts=event['ts'],
                 user=event.get('user') or '',
@@ -236,36 +230,33 @@ def handle_photo(
             return
 
         is_nudge = not any(b.get('type') == 'actions' for b in answer.blocks)
-        with _state_lock:
-            if is_nudge and thread_ts in _nudged and not correction:
-                return
-            # A second photo of a box we already answered for: point at that reply instead.
-            keys = [k for k in (package_key(p) for p in scan.packages) if k]
-            earlier = next((_packages[k] for k in keys if _packages.get(k)), None)
-            same_box = bool(earlier) and all(k in _packages for k in keys) and not correction
+        if is_nudge and thread_ts in _nudged and not correction:
+            return
+        # A second photo of a box we already answered for: point at that reply instead.
+        keys = [k for k in (package_key(p) for p in scan.packages) if k]
+        earlier = next((_packages[k] for k in keys if _packages.get(k)), None)
+        same_box = bool(earlier) and all(k in _packages for k in keys) and not correction
         if same_box:
-            reply(f':package: Same box as <{earlier}|this one> (same tracking number) — confirm it there.')
+            await reply(f':package: Same box as <{earlier}|this one> (same tracking number) — confirm it there.')
             return
 
-        posted = reply(answer.text, answer.blocks)
+        posted = await reply(answer.text, answer.blocks)
         if is_nudge:
-            with _state_lock:
-                _nudged.add(thread_ts)
+            _nudged.add(thread_ts)
         elif keys and posted.get('ts'):
             try:
-                link = client.chat_getPermalink(channel=event['channel'], message_ts=posted['ts']).get('permalink')
+                link = (await client.chat_getPermalink(channel=event['channel'], message_ts=posted['ts'])).get('permalink')
             except Exception:
                 link = None
             if link:
-                with _state_lock:
-                    for k in keys:
-                        _packages[k] = link
+                for k in keys:
+                    _packages[k] = link
     except Exception as err:
         logger.error('Arrivals: photo handling failed', exc_info=err)
         # Stay quiet in threads (most thread photos are banter); a top-level failure or an asked-for look gets one line.
         if not in_thread or correction:
             try:
-                reply(':warning: I couldn’t process that photo. Mark the order in Notion for now; the error is in the bot’s server logs.')
+                await reply(':warning: I couldn’t process that photo. Mark the order in Notion for now; the error is in the bot’s server logs.')
             except Exception:
                 pass
 
@@ -273,29 +264,29 @@ def handle_photo(
 # --- Corrections --------------------------------------------------------------------------------
 
 
-def _correct(client: WebClient, event: dict[str, Any], text: str) -> bool:
+async def _correct(client: AsyncWebClient, event: dict[str, Any], text: str) -> bool:
     """Look again at the thread's latest photo (at or before the correction) with `text` as the
     evidence. False: no photo there."""
     thread_ts = event['thread_ts']
-    thread = _thread_messages(client, event['channel'], thread_ts)
+    thread = await _thread_messages(client, event['channel'], thread_ts)
     photo = next((m for m in reversed(thread) if is_photo_post(m) and float(m['ts']) <= float(event['ts'])), None)
     if not photo:
         return False
     # A photo posted as a reply has its own message; the thread's first message comes in as the parent.
-    photo_text = with_names(client, photo['text']) if photo['ts'] != thread_ts and photo.get('text') else None
+    photo_text = await with_names(client, photo['text']) if photo['ts'] != thread_ts and photo.get('text') else None
     logger.info(f"Arrivals: looking again at {photo['ts']} with \"{text[:80]}\"")
-    handle_photo(client, {**photo, 'channel': event['channel'], 'thread_ts': thread_ts}, correction=True, text=text, photo_text=photo_text)
+    await handle_photo(client, {**photo, 'channel': event['channel'], 'thread_ts': thread_ts}, correction=True, text=text, photo_text=photo_text)
     return True
 
 
-def handle_arrivals_mention(client: WebClient, event: dict[str, Any], bot_user_id: str | None = None) -> bool:
+async def handle_arrivals_mention(client: AsyncWebClient, event: dict[str, Any], bot_user_id: str | None = None) -> bool:
     """`@PERBot <what's in it>` in a package thread: look again at that thread's photo with the text,
     rather than the docs search the mention would otherwise run (10/19: "no, elijah cooling fittings
     are in this picture" got a page of cooling-loop meeting notes). True when handled here."""
     if not config.arrivals.channel or not (event or {}).get('thread_ts'):
         return False
     try:
-        arrivals = _arrivals_channel_id(client)
+        arrivals = await _arrivals_channel_id(client)
     except Exception:
         arrivals = None
     if not arrivals or event.get('channel') != arrivals:
@@ -309,22 +300,20 @@ def handle_arrivals_mention(client: WebClient, event: dict[str, Any], bot_user_i
     text = re.sub(r'\s+', ' ', text).strip()
     if not text:
         return False
-    with _state_lock:
-        _awaiting.pop(event['thread_ts'], None)
-    return _correct(client, event, text)
+    _awaiting.pop(event['thread_ts'], None)
+    return await _correct(client, event, text)
 
 
 def _awaited_reply(e: dict[str, Any]) -> bool:
     """A plain reply from whoever just ran out of candidates on Wrong order (see `_awaiting`)."""
     if e.get('bot_id') or not e.get('user') or e.get('subtype') or not e.get('thread_ts') or not e.get('text'):
         return False
-    with _state_lock:
-        w = _awaiting.get(e['thread_ts'])
-        if not w or w[0] != e['user']:
-            return False
-        if w[1] < time.time():
-            _awaiting.pop(e['thread_ts'], None)
-            return False
+    w = _awaiting.get(e['thread_ts'])
+    if not w or w[0] != e['user']:
+        return False
+    if w[1] < time.time():
+        _awaiting.pop(e['thread_ts'], None)
+        return False
     return True
 
 
@@ -342,12 +331,12 @@ SWEEP_MIN_AGE_S = 2 * 60
 _own_ids_cache: tuple[str | None, str | None] | None = None
 
 
-def _own_ids(client: WebClient) -> tuple[str | None, str | None]:
+async def _own_ids(client: AsyncWebClient) -> tuple[str | None, str | None]:
     """PERBot's (bot id, user id): the id on its messages, and the one in its @-mentions."""
     global _own_ids_cache
     if _own_ids_cache is None:
         try:
-            r = client.auth_test()
+            r = await client.auth_test()
             _own_ids_cache = (r.get('bot_id'), r.get('user_id'))
         except Exception:
             return None, None
@@ -373,51 +362,53 @@ def already_answered(photo: Any, thread_messages: list[Any], bot: str | None) ->
     )
 
 
-def recent_photo_posts(client: WebClient, channel: str, oldest: str) -> list[tuple[dict[str, Any], list[Any]]]:
+async def recent_photo_posts(client: AsyncWebClient, channel: str, oldest: str) -> list[tuple[dict[str, Any], list[Any]]]:
     """Photo posts since `oldest` (top level, and replies in those threads) with each one's thread."""
     top: list[Any] = []
     cursor: str | None = None
     while True:
-        res = client.conversations_history(channel=channel, oldest=oldest, limit=200, cursor=cursor)
+        res = await client.conversations_history(channel=channel, oldest=oldest, limit=200, cursor=cursor)
         top.extend(res.get('messages') or [])
         cursor = (res.get('response_metadata') or {}).get('next_cursor') or None
         if not cursor:
             break
     out: list[tuple[dict[str, Any], list[Any]]] = []
     for m in top:
-        thread = (client.conversations_replies(channel=channel, ts=m['ts'], limit=200).get('messages') or [m]) if m.get('reply_count') else [m]
+        thread = ((await client.conversations_replies(channel=channel, ts=m['ts'], limit=200)).get('messages') or [m]) if m.get('reply_count') else [m]
         for t in thread:
             if is_photo_post(t) and float(t['ts']) >= float(oldest):
                 out.append((t, thread))
     return sorted(out, key=lambda p: float(p[0]['ts']))
 
 
-_sweeping = threading.Lock()
+_sweeping = False  # a sweep is running (one at a time; the next tick skips)
 
 
-def _sweep(client: WebClient) -> None:
-    if not _sweeping.acquire(blocking=False):
+async def _sweep(client: AsyncWebClient) -> None:
+    global _sweeping
+    if _sweeping:
         return
+    _sweeping = True
     try:
-        channel = _arrivals_channel_id(client)
+        channel = await _arrivals_channel_id(client)
         if not channel:
             return
-        bot = _own_ids(client)[0]
+        bot = (await _own_ids(client))[0]
         oldest = f'{time.time() - SWEEP_WINDOW_S:.6f}'
         fresh_cutoff = time.time() - SWEEP_MIN_AGE_S
-        posts = recent_photo_posts(client, channel, oldest)
+        posts = await recent_photo_posts(client, channel, oldest)
         for msg, thread in posts:
             if float(msg['ts']) > fresh_cutoff or not _claim(f"{channel}:{msg['ts']}"):
                 continue
             if already_answered(msg, thread, bot):
                 continue
             logger.info(f"Arrivals: catching up on a missed photo {msg['ts']}")
-            handle_photo(client, {**msg, 'channel': channel})
-        _remind_stale(client, channel, [t for _, t in posts], bot)
+            await handle_photo(client, {**msg, 'channel': channel})
+        await _remind_stale(client, channel, [t for _, t in posts], bot)
     except Exception as err:
         logger.warning('Arrivals: catch-up sweep failed', exc_info=err)
     finally:
-        _sweeping.release()
+        _sweeping = False
 
 
 # --- Reminders -----------------------------------------------------------------------------------
@@ -438,7 +429,7 @@ def _insert_after(blocks: list[Any], after_id: str, block: Any) -> list[Any]:
     return [*blocks, block] if i < 0 else [*blocks[: i + 1], block, *blocks[i + 1 :]]
 
 
-def _remind_stale(client: WebClient, channel: str, threads: list[list[Any]], bot: str | None) -> None:
+async def _remind_stale(client: AsyncWebClient, channel: str, threads: list[list[Any]], bot: str | None) -> None:
     if not bot or not _waking():
         return
     cutoff = time.time() - REMIND_AFTER_S
@@ -462,20 +453,20 @@ def _remind_stale(client: WebClient, channel: str, threads: list[list[Any]], bot
             if not key:
                 continue
             if open_rows is None:
-                open_rows = _notion().open_rows()
+                open_rows = await _notion().open_rows()
             if people is None:
-                people = people_map(client, _notion())
+                people = await people_map(client, _notion())
             order = next((o for o in group_orders(open_rows) if o.key == key), None)
             if not order:
                 continue  # marked in Notion meanwhile
             targets = list(dict.fromkeys(people[n] for r in order.rows for n in r.point_of_contact if people.get(n)))[:3]
             try:
-                link = client.chat_getPermalink(channel=channel, message_ts=m['ts']).get('permalink')
+                link = (await client.chat_getPermalink(channel=channel, message_ts=m['ts'])).get('permalink')
             except Exception:
                 link = None
             for target in targets:
                 try:
-                    client.chat_postMessage(channel=target, text=reminder_dm(order, link), unfurl_links=False)
+                    await client.chat_postMessage(channel=target, text=reminder_dm(order, link), unfurl_links=False)
                 except Exception as err:
                     logger.warning(f'Arrivals: reminder DM to {target} failed', exc_info=err)
             note = (
@@ -491,7 +482,7 @@ def _remind_stale(client: WebClient, channel: str, threads: list[list[Any]], bot
             logger.info(f"Arrivals: reminded {len(targets)} requester(s) about {m['ts']} card {index}.")
         if blocks is not m['blocks']:
             try:
-                client.chat_update(channel=channel, ts=m['ts'], text=m.get('text') or 'Package arrived', blocks=blocks)
+                await client.chat_update(channel=channel, ts=m['ts'], text=m.get('text') or 'Package arrived', blocks=blocks)
             except Exception as err:
                 logger.warning('Arrivals: could not note the reminder', exc_info=err)
 
@@ -499,28 +490,28 @@ def _remind_stale(client: WebClient, channel: str, threads: list[list[Any]], bot
 # --- Click handling ---------------------------------------------------------------------------
 
 _people_index: tuple[float, list[Indexed]] | None = None
-_people_index_lock = threading.Lock()
+_people_index_lock = asyncio.Lock()
 
 
-def _notion_people() -> list[Indexed]:
+async def _notion_people() -> list[Indexed]:
     global _people_index
-    with _people_index_lock:
+    async with _people_index_lock:
         if not _people_index or time.time() - _people_index[0] > 3600:
-            _people_index = (time.time(), index_notion_users(_notion().list_users()))
+            _people_index = (time.time(), index_notion_users(await _notion().list_users()))
         return _people_index[1]
 
 
-def _receiver_notion_id(client: WebClient, slack_user_id: str) -> str | None:
+async def _receiver_notion_id(client: AsyncWebClient, slack_user_id: str) -> str | None:
     try:
-        return Slack.wrap(client).slack_user_to_notion_id(slack_user_id, _notion_people())
+        return await Slack.wrap(client).slack_user_to_notion_id(slack_user_id, await _notion_people())
     except Exception as err:
         logger.warning(f'Arrivals: could not resolve {slack_user_id} to a Notion person', exc_info=err)
         return None
 
 
-def _rows_for(ids: list[str], known: list[PurchasingRow]) -> list[PurchasingRow]:
+async def _rows_for(ids: list[str], known: list[PurchasingRow]) -> list[PurchasingRow]:
     by_id = {r.id.replace('-', ''): r for r in known}
-    return [by_id.get(i) or _notion().fetch_row(i) for i in ids]
+    return [by_id.get(i) or await _notion().fetch_row(i) for i in ids]
 
 
 UNDO_WINDOW_S = 24 * 3600
@@ -537,7 +528,7 @@ def _card_base(blocks: list[Any], index: int) -> dict[str, str] | None:
     return None
 
 
-def _card_for_order(
+async def _card_for_order(
     index: int,
     key: str,
     base: dict[str, str],
@@ -549,7 +540,7 @@ def _card_for_order(
     reopened — the Notion query can lag the write by a moment), the vendor's other orders as the select."""
     rejected = rejected or []
     as_of = datetime.fromtimestamp(float(base['ts']), tz=timezone.utc)
-    by_id = {r.id: r for r in _notion().open_rows()}
+    by_id = {r.id: r for r in await _notion().open_rows()}
     for r in restored or []:
         by_id[r.id] = r
     orders = group_orders(eligible_rows(list(by_id.values()), as_of))
@@ -568,9 +559,9 @@ def _select_keys(blocks: list[Any], index: int) -> list[str]:
     return [str(o.get('value') or '') for o in (select or {}).get('options') or [] if o.get('value')]
 
 
-def _dm_requesters(client: WebClient, rows: list[PurchasingRow], clicker: str, poster: str, permalink: str | None, arrived_at_iso: str) -> None:
+async def _dm_requesters(client: AsyncWebClient, rows: list[PurchasingRow], clicker: str, poster: str, permalink: str | None, arrived_at_iso: str) -> None:
     """DM each requester whose rows were just marked (not the person who tapped, nor the one who posted the photo)."""
-    people = people_map(client, _notion())
+    people = await people_map(client, _notion())
     by_person: dict[str, list[PurchasingRow]] = {}
     for row in rows:
         for name in row.point_of_contact:
@@ -580,7 +571,7 @@ def _dm_requesters(client: WebClient, rows: list[PurchasingRow], clicker: str, p
             by_person.setdefault(slack_id, []).append(row)
     for slack_id, theirs in by_person.items():
         try:
-            client.chat_postMessage(
+            await client.chat_postMessage(
                 channel=slack_id,
                 text=arrival_dm(theirs, clicker=clicker, poster=poster, permalink=permalink, arrived_at_iso=arrived_at_iso),
                 unfurl_links=False,
@@ -589,12 +580,12 @@ def _dm_requesters(client: WebClient, rows: list[PurchasingRow], clicker: str, p
             logger.warning(f'Arrivals: could not DM {slack_id}', exc_info=err)
 
 
-def sweep_once(client: WebClient) -> None:
+async def sweep_once(client: AsyncWebClient) -> None:
     """One pass of the sweep (nudging requesters about cards nobody tapped)."""
-    _sweep(client)
+    await _sweep(client)
 
 
-def handle_message(client: WebClient, event: dict[str, Any]) -> None:
+async def handle_message(client: AsyncWebClient, event: dict[str, Any]) -> None:
     """A message in the arrivals channel: a delivery photo, or a reply to a card that asked
     what's in the box."""
     e = event
@@ -602,27 +593,26 @@ def handle_message(client: WebClient, event: dict[str, Any]) -> None:
     if not photo and not _awaited_reply(e):
         return
     try:
-        arrivals = _arrivals_channel_id(client)
+        arrivals = await _arrivals_channel_id(client)
     except Exception as err:
         logger.error('Arrivals: could not resolve the channel', exc_info=err)
         return
     if e.get('channel') != arrivals or not _claim(f"{e['channel']}:{e['ts']}"):
         return
     if photo:
-        handle_photo(client, e)
+        await handle_photo(client, e)
         return
-    me = _own_ids(client)[1]
+    me = (await _own_ids(client))[1]
     if me and f'<@{me}' in str(e.get('text')):
         return  # the mention handler has it
-    with _state_lock:
-        _awaiting.pop(e['thread_ts'], None)
+    _awaiting.pop(e['thread_ts'], None)
     try:
-        _correct(client, e, str(e.get('text')))
+        await _correct(client, e, str(e.get('text')))
     except Exception as err:
         logger.error('Arrivals: correction failed', exc_info=err)
 
 
-def handle_click(body: dict[str, Any], action: dict[str, Any], respond: Any, client: WebClient) -> None:
+async def handle_click(body: dict[str, Any], action: dict[str, Any], respond: Any, client: AsyncWebClient) -> None:
     action_id: str = action.get('action_id', '')
     block_id: str = action.get('block_id', '')
     clicker = (body.get('user') or {}).get('id')
@@ -635,11 +625,11 @@ def handle_click(body: dict[str, Any], action: dict[str, Any], respond: Any, cli
     card = index is not None and is_card(existing, index)
     notion = _notion()
 
-    def replace(blocks: list[Any], text: str | None = None) -> None:
-        respond(replace_original=True, text=text or message.get('text') or 'Package arrived', blocks=blocks)
+    async def replace(blocks: list[Any], text: str | None = None) -> None:
+        await respond(replace_original=True, text=text or message.get('text') or 'Package arrived', blocks=blocks)
 
-    def whisper(text: str) -> None:
-        respond(response_type='ephemeral', replace_original=False, text=text)
+    async def whisper(text: str) -> None:
+        await respond(response_type='ephemeral', replace_original=False, text=text)
 
     try:
         # "Other <vendor> orders…": swap this card for the picked order.
@@ -650,11 +640,11 @@ def handle_click(body: dict[str, Any], action: dict[str, Any], respond: Any, cli
                 return
             actions = next((b for b in existing if (b or {}).get('block_id') == f'arrival_actions:{index}'), None)
             rejected = [k for el in (actions or {}).get('elements') or [] for k in ((decode_value((el or {}).get('value')) or {}).get('n') or [])]
-            nxt = _card_for_order(index, key, base, f'↪️ <@{clicker}> switched orders.', [], rejected)
+            nxt = await _card_for_order(index, key, base, f'↪️ <@{clicker}> switched orders.', [], rejected)
             if not nxt:
-                whisper('That order isn’t open anymore — someone may have just marked it. Check Notion.')
+                await whisper('That order isn’t open anymore — someone may have just marked it. Check Notion.')
                 return
-            replace(replace_card(existing, index, nxt))
+            await replace(replace_card(existing, index, nxt))
             return
 
         value = decode_value(action.get('value'))
@@ -663,17 +653,17 @@ def handle_click(body: dict[str, Any], action: dict[str, Any], respond: Any, cli
 
         if action_id == ARRIVAL_ACTION_IDS['undo']:
             if value.get('t') and time.time() - value['t'] > UNDO_WINDOW_S:
-                whisper('Too late to undo here — fix it in Notion.')
+                await whisper('Too late to undo here — fix it in Notion.')
                 return
             ready = set(value.get('p') or [])
             restored: list[PurchasingRow] = []
             for id_ in value.get('r') or []:
                 previous = 'Ready for Pickup' if id_ in ready else 'No'
-                notion.unmark_arrived(id_, previous)
-                restored.append(dataclasses.replace(notion.fetch_row(id_), arrived=previous))
+                await notion.unmark_arrived(id_, previous)
+                restored.append(dataclasses.replace(await notion.fetch_row(id_), arrived=previous))
             lead = f"↩️ <@{clicker}> undid that — {len(restored)} item{'' if len(restored) == 1 else 's'} back to not arrived. "
-            nxt = _card_for_order(index, value['k'], value, lead, restored) if index is not None and value.get('k') else None  # type: ignore[arg-type]
-            replace(replace_card(existing, index, nxt) if nxt and index is not None else settle_card(existing, index or 0, lead.strip()))
+            nxt = await _card_for_order(index, value['k'], value, lead, restored) if index is not None and value.get('k') else None  # type: ignore[arg-type]
+            await replace(replace_card(existing, index, nxt) if nxt and index is not None else settle_card(existing, index or 0, lead.strip()))
             logger.info(f'Arrivals: {clicker} undid {len(restored)} rows.')
             return
 
@@ -685,18 +675,17 @@ def handle_click(body: dict[str, Any], action: dict[str, Any], respond: Any, cli
                 _reject(thread_ts, rejected)
             if card and index is not None:
                 for key in [k for k in _select_keys(existing, index) if k not in rejected]:
-                    nxt = _card_for_order(index, key, value, f'✗ <@{clicker}>: not that one — nothing was written.', [], rejected)  # type: ignore[arg-type]
+                    nxt = await _card_for_order(index, key, value, f'✗ <@{clicker}>: not that one — nothing was written.', [], rejected)  # type: ignore[arg-type]
                     if nxt:
-                        replace(replace_card(existing, index, nxt), 'Not that order')
+                        await replace(replace_card(existing, index, nxt), 'Not that order')
                         return
             text = (
                 f'✗ <@{clicker}>: not this order — nothing was written. Reply here with what’s in the box '
                 '(or who it’s for) and I’ll look again, or mark it in Notion.'
             )
             if thread_ts:
-                with _state_lock:
-                    _awaiting[thread_ts] = (clicker, time.time() + AWAIT_S)
-            replace(settle_card(existing, index, text) if card and index is not None else settle_blocks(existing, block_id, text), 'Not this order')
+                _awaiting[thread_ts] = (clicker, time.time() + AWAIT_S)
+            await replace(settle_card(existing, index, text) if card and index is not None else settle_blocks(existing, block_id, text), 'Not this order')
             return
 
         # Mark arrived: the ticked checkboxes. Legacy/whole-set buttons: the ids in the value.
@@ -709,36 +698,35 @@ def handle_click(body: dict[str, Any], action: dict[str, Any], respond: Any, cli
             selected = state.get('selected_options') if state else shown_ticks
             ids = [str(o.get('value')) for o in selected or []]
             if not ids:
-                whisper('Tick the items that arrived, then tap *Mark arrived*.')
+                await whisper('Tick the items that arrived, then tap *Mark arrived*.')
                 return
         else:
-            run_rows = notion.rows_for_run(value['g']) if value.get('g') else []
+            run_rows = await notion.rows_for_run(value['g']) if value.get('g') else []
             ids = target_ids(value, [r.id for r in run_rows])
-        rows = _rows_for(ids, run_rows)
+        rows = await _rows_for(ids, run_rows)
         already = [r for r in rows if r.arrived == ARRIVED_YES]
         todo = [r for r in rows if r.arrived != ARRIVED_YES]
 
         arrived_at = utils.to_iso(datetime.fromtimestamp(float(value['ts']), tz=timezone.utc))
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            received_f = pool.submit(_receiver_notion_id, client, value['u'])
-            name_f = pool.submit(slack_name, client, value['u'])
-            link_f = pool.submit(client.chat_getPermalink, channel=channel, message_ts=value['ts'])
-            received_by = received_f.result()
-            try:
-                name = name_f.result()
-                received_by_name = None if name == value['u'] else name
-            except Exception:
-                received_by_name = None
-            try:
-                permalink = link_f.result().get('permalink')
-            except Exception:
-                permalink = None
+        received_f = aio.spawn(_receiver_notion_id, client, value['u'])
+        name_f = aio.spawn(slack_name, client, value['u'])
+        link_f = aio.spawn(client.chat_getPermalink, channel=channel, message_ts=value['ts'])
+        received_by = await received_f
+        try:
+            name = await name_f
+            received_by_name = None if name == value['u'] else name
+        except Exception:
+            received_by_name = None
+        try:
+            permalink = (await link_f).get('permalink')
+        except Exception:
+            permalink = None
 
         marked: list[PurchasingRow] = []
         failed: list[PurchasingRow] = []
         for row in todo:
             try:
-                notion.mark_arrived(row.id, ArrivalWrite(arrived_at, received_by, received_by_name, permalink))
+                await notion.mark_arrived(row.id, ArrivalWrite(arrived_at, received_by, received_by_name, permalink))
                 marked.append(row)
             except Exception as err:
                 logger.error(f'Arrivals: write failed for {row.id}', exc_info=err)
@@ -765,13 +753,13 @@ def handle_click(body: dict[str, Any], action: dict[str, Any], respond: Any, cli
                 if value.get('k'):
                     undo['k'] = value['k']
                 undo['t'] = int(time.time())
-            replace(settle_card(existing, index, outcome, marked, undo), f'{done} items marked arrived')
+            await replace(settle_card(existing, index, outcome, marked, undo), f'{done} items marked arrived')
         else:
             chosen = re.match(r'^arrival_order:(\d+)$', action_id)
-            replace(settle_blocks(existing, block_id, outcome, int(chosen.group(1)) if chosen else None), f'{done} items marked arrived')
+            await replace(settle_blocks(existing, block_id, outcome, int(chosen.group(1)) if chosen else None), f'{done} items marked arrived')
         logger.info(f'Arrivals: {clicker} {action_id} → {done} marked, {len(already)} already, {len(failed)} failed.')
         if done:
-            _dm_requesters(client, marked, clicker, value['u'], permalink, arrived_at)
+            await _dm_requesters(client, marked, clicker, value['u'], permalink, arrived_at)
     except Exception as err:
         logger.error(f'Arrivals: {action_id} failed', exc_info=err)
-        whisper('✗ Could not update Notion. Try again, or set Arrived? in Notion.')
+        await whisper('✗ Could not update Notion. Try again, or set Arrived? in Notion.')

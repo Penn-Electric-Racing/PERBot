@@ -291,18 +291,18 @@ def rank_pages(loaded: LoadedIndex, parsed: ParsedQuery, query_embedding: np.nda
     return ranked
 
 
-def search_index(loaded: LoadedIndex, raw_query: str, rerank: bool = True, top_k: int | None = None) -> SearchResponse:
+async def search_index(loaded: LoadedIndex, raw_query: str, rerank: bool = True, top_k: int | None = None) -> SearchResponse:
     parsed = parse_query(raw_query)
     query_text = parsed['cleaned'] or parsed['raw']
     k = top_k if top_k is not None else config.app.top_k_results
 
-    ranked = rank_pages(loaded, parsed, embed_query(query_text))
+    ranked = rank_pages(loaded, parsed, await embed_query(query_text))
     if not ranked:
         return {'results': [], 'weak': True}
 
     ordered = ranked[:RERANK_CANDIDATES]
     if rerank and len(ordered) > 1:
-        order = rerank_results(
+        order = await rerank_results(
             query_text,
             [
                 RerankCandidate(

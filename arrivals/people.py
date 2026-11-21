@@ -5,14 +5,14 @@ ambiguous stays a plain name. Rebuilt every 6 hours; a failure leaves names unme
 """
 from __future__ import annotations
 
+import asyncio
 import logging
-import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
-from slack_sdk import WebClient
+from slack_sdk.web.async_client import AsyncWebClient
 
+from core import aio
 from core.slack import Slack
 
 logger = logging.getLogger(__name__)
@@ -27,20 +27,19 @@ People = dict[str, str]
 
 TTL_S = 6 * 3600
 _cached: tuple[float, People] | None = None
-_lock = threading.Lock()
+_lock = asyncio.Lock()
 
 
-def _build(client: WebClient, notion: 'ArrivalsNotion') -> People:
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        users_f = pool.submit(notion.list_users)
-        dir_f = pool.submit(Slack.wrap(client).fetch_directory)
-        users, slack_dir = users_f.result(), dir_f.result()
+async def _build(client: AsyncWebClient, notion: 'ArrivalsNotion') -> People:
+    users_f = aio.spawn(notion.list_users)
+    dir_f = aio.spawn(Slack.wrap(client).fetch_directory)
+    users, slack_dir = await users_f, await dir_f
     people: People = {}
     for user in users:
         if not user.name or user.name in people:
             continue
         try:
-            slack_id = Slack.wrap(client).notion_user_to_slack_id(user, slack_dir)
+            slack_id = await Slack.wrap(client).notion_user_to_slack_id(user, slack_dir)
         except Exception:
             slack_id = None
         if slack_id:
@@ -49,13 +48,13 @@ def _build(client: WebClient, notion: 'ArrivalsNotion') -> People:
     return people
 
 
-def people_map(client: WebClient, notion: 'ArrivalsNotion') -> People:
+async def people_map(client: AsyncWebClient, notion: 'ArrivalsNotion') -> People:
     global _cached
-    with _lock:
+    async with _lock:
         if _cached and time.time() - _cached[0] <= TTL_S:
             return _cached[1]
         try:
-            people = _build(client, notion)
+            people = await _build(client, notion)
         except Exception as err:
             logger.warning('Arrivals: could not map requesters to Slack; replies will use plain names', exc_info=err)
             _cached = None

@@ -65,7 +65,7 @@ Do NOT output "contact_strength" or "sponsors_other_teams" — those are human j
 Base your answer only on the provided company text. Be conservative; when unsure prefer "General"/"Other" and the LOWER score."""
 
 
-def classify_company_fit(company: str, domain: str, company_text: str, known_ask: str | None = None) -> CompanyClassification:
+async def classify_company_fit(company: str, domain: str, company_text: str, known_ask: str | None = None) -> CompanyClassification:
     # When the caller already knows the ask (directed add), steer tier/type/category to reflect it.
     # The ask itself is written verbatim as the angle by the caller, not here.
     ask_hint = (
@@ -75,7 +75,7 @@ def classify_company_fit(company: str, domain: str, company_text: str, known_ask
         if known_ask
         else ''
     )
-    content = LLM.shared().groq_json(SYSTEM_PROMPT, f'Company: {company}\nDomain: {domain}\n\nCompany website text:\n{company_text}{ask_hint}')
+    content = await LLM.shared().groq_json(SYSTEM_PROMPT, f'Company: {company}\nDomain: {domain}\n\nCompany website text:\n{company_text}{ask_hint}')
     try:
         raw = json.loads(content)
     except ValueError:

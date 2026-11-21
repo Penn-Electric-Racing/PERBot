@@ -5,9 +5,10 @@ describes the check.
 from __future__ import annotations
 
 import logging
-from typing import Any, Iterable
+from collections.abc import AsyncIterator
+from typing import Any
 
-from slack_sdk import WebClient
+from slack_sdk.web.async_client import AsyncWebClient
 
 from core import utils
 from core.config import PriceCheckConfig
@@ -57,16 +58,16 @@ class PriceFinder:
     def from_config(cls, cfg: PriceCheckConfig, verbose: bool = False, **llm_kw: Any) -> 'PriceFinder':
         return cls(make_llm(cfg, verbose=verbose, **llm_kw), cfg, verbose)
 
-    def __call__(self, row: PurchasingRow) -> list[ListingPayload]:
+    async def __call__(self, row: PurchasingRow) -> list[ListingPayload]:
         term, read = row.part_number, []
         if row.link:
-            link = llm_reader.part_info(
+            link = await llm_reader.part_info(
                 {'title': row.name or row.part_number, 'url': row.link, 'snippet': '', 'search_rank': 0}, self.llm, row.part_number
             )
             term, read = llm_reader.search_term(link) or row.part_number, [link]
             if self.verbose and term != row.part_number:
                 logger.info(f'  link shows {term!r}; searching that, not {row.part_number!r}')
-        return llm_reader.find(term, row.units, self.llm, pool=self.cfg.pool, read=read, verbose=self.verbose)[2]
+        return (await llm_reader.find(term, row.units, self.llm, pool=self.cfg.pool, read=read, verbose=self.verbose))[2]
 
 class Checker:
     """check(row) returns a CheckStatus. `find(row)` returns scored listings (PriceFinder);
@@ -80,7 +81,7 @@ class Checker:
         self,
         cfg: PriceCheckConfig,
         notion: Notion,
-        slack: WebClient | Slack | None,
+        slack: AsyncWebClient | Slack | None,
         find: Any,
         dry_run: bool = False,
         verbose: bool = False,
@@ -98,40 +99,40 @@ class Checker:
         if self.verbose:
             logger.info(msg)
 
-    def _notion_email(self, user_id: str) -> str | None:
+    async def _notion_email(self, user_id: str) -> str | None:
         """People properties may omit emails; the workspace user list (fetched once) has them."""
         if self._emails is None:
             try:
-                self._emails = {u.id: u.email for u in Notion.list_users(self.notion)}
+                self._emails = {u.id: u.email for u in await Notion.list_users(self.notion)}
             except Exception as err:
                 logger.warning(f'Price check: Notion users unavailable ({err}); matching by name.')
                 self._emails = {}
         return self._emails.get(user_id)
 
-    def targets(self, row: PurchasingRow) -> list[str]:
+    async def targets(self, row: PurchasingRow) -> list[str]:
         """Slack ids to DM: the row's contacts, else PRICE_CHECK_CHANNEL."""
         out: list[str] = []
         if self.slack is not None and row.contacts:
             slack = Slack.wrap(self.slack)
             if self._directory is None:
-                self._directory = slack.fetch_directory()
+                self._directory = await slack.fetch_directory()
             for c in row.contacts:
-                person = c if c.email else NotionUser(c.id, c.name, self._notion_email(c.id))
-                uid = slack.notion_user_to_slack_id(person, self._directory)
+                person = c if c.email else NotionUser(c.id, c.name, await self._notion_email(c.id))
+                uid = await slack.notion_user_to_slack_id(person, self._directory)
                 if uid:
                     out.append(uid)
         if not out and self.cfg.channel:
             out = [self.cfg.channel]
         return out
 
-    def check(self, row: PurchasingRow, label: str | None = None) -> CheckStatus:
+    async def check(self, row: PurchasingRow, label: str | None = None) -> CheckStatus:
         label = label or row_label(row)
         reason = self.purchasing.skip_reason(row)
         if reason:
             self._debug(f'{label}: skipped, {reason}')
             return CheckStatus.SKIPPED
         try:
-            results = self.find(row)
+            results = await self.find(row)
             failed = 'LLM failed on every page' if is_outage(results) else None
         except Exception as e:  # one bad row must not stop the rest
             failed = f'search failed: {e}'
@@ -142,13 +143,13 @@ class Checker:
         if f is None:
             self._debug(f'{label}: ok')
             return CheckStatus.OK
-        return CheckStatus.ALERTED if self._alert(f, label) else CheckStatus.OK
+        return CheckStatus.ALERTED if await self._alert(f, label) else CheckStatus.OK
 
-    def _count(self, statuses: Iterable[CheckStatus]) -> dict[str, int]:
+    async def _count(self, statuses: AsyncIterator[CheckStatus]) -> dict[str, int]:
         """Tally statuses, stopping after MAX_OUTAGE_ROWS retries in a row."""
         counts: dict[str, int] = {}
         outages = 0
-        for status in statuses:
+        async for status in statuses:
             counts[status] = counts.get(status, 0) + 1
             outages = outages + 1 if status == CheckStatus.RETRY else 0
             if outages >= self.MAX_OUTAGE_ROWS:
@@ -156,44 +157,49 @@ class Checker:
                 break
         return counts
 
-    def drain(self, entries: list[tuple[str | None, str]]) -> dict[str, int]:
+    async def drain(self, entries: list[tuple[str | None, str]]) -> dict[str, int]:
         """Check queued rows [(Job Log entry id, page id)] in order. Entries are marked done once
         their row is checked, skipped or gone; failures stay queued. An entry id of None (a dry-run
         preview) is checked but not marked. Returns {status: count}."""
 
-        def statuses() -> Iterable[CheckStatus]:
+        async def statuses() -> AsyncIterator[CheckStatus]:
             for i, (entry, pid) in enumerate(entries, 1):
                 try:
-                    row = self.purchasing.get(pid)
+                    row = await self.purchasing.get(pid)
                 except Exception as e:
                     gone = isinstance(e, NotionAPIError) and e.status == 404
                     logger.warning(f"[{i}/{len(entries)}] {pid}: {'row deleted' if gone else e}")
                     status = CheckStatus.GONE if gone else CheckStatus.RETRY
                 else:
-                    status = self.check(row, row_label(row, i, len(entries)))
+                    status = await self.check(row, row_label(row, i, len(entries)))
                 if status != CheckStatus.RETRY and entry and not self.dry_run:
                     try:
-                        self.queue.mark_done(entry)
+                        await self.queue.mark_done(entry)
                     except Exception as e:
                         logger.warning(f"Price check: couldn't mark queue entry {entry} done: {e}")
                 yield status
 
-        return self._count(statuses())
+        return await self._count(statuses())
 
-    def check_all(self, rows: list[PurchasingRow]) -> dict[str, int]:
+    async def check_all(self, rows: list[PurchasingRow]) -> dict[str, int]:
         """Sweep `rows` in order. Returns {status: count}."""
-        return self._count(self.check(row, row_label(row, i, len(rows))) for i, row in enumerate(rows, 1))
 
-    def _alert(self, f: Finding, label: str) -> bool:
+        async def statuses() -> AsyncIterator[CheckStatus]:
+            for i, row in enumerate(rows, 1):
+                yield await self.check(row, row_label(row, i, len(rows)))
+
+        return await self._count(statuses())
+
+    async def _alert(self, f: Finding, label: str) -> bool:
         """Claim the alert in the Job Log, then DM the row's contacts (or print it). False if it
         was already sent."""
         row, alert = f.row, PriceAlert(f)
         text = alert.text()
         key = f'price-alert {row.id} {row.unit_cost:g} x{row.quantity}'
-        if not JobLog(self.notion, self.cfg.job_log_data_source_id).claim_once(key, 'price-check', dry_run=self.dry_run):
+        if not await JobLog(self.notion, self.cfg.job_log_data_source_id).claim_once(key, 'price-check', dry_run=self.dry_run):
             self._debug(f'{label}: {f.delta_pct:+.0f}%, already alerted')
             return False
-        targets = self.targets(row)
+        targets = await self.targets(row)
         logger.info(f"{label}: {f.delta_pct:+.0f}% -> {', '.join(targets) or 'nobody to DM'}")
         blocks = alert.blocks(text)
         if self.dry_run:
@@ -205,10 +211,10 @@ class Checker:
         sent = False
         for t in targets:
             try:
-                self.slack.chat_postMessage(channel=t, text=text, blocks=blocks, unfurl_links=False)  # type: ignore[union-attr]
+                await self.slack.chat_postMessage(channel=t, text=text, blocks=blocks, unfurl_links=False)  # type: ignore[union-attr]
                 sent = True
             except Exception as e:
                 logger.warning(f'Price check: Slack post to {t} failed: {e}')
         if sent:
-            self.ledger.log_alert(f)
+            await self.ledger.log_alert(f)
         return True

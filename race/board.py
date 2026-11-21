@@ -5,12 +5,11 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
-from typing import Any, Literal, TypedDict
+from typing import Literal, TypedDict
 
-import httpx
-
-from core import utils
+from core import http, utils
 from core.config import config
 
 __all__ = ['BoardRow', 'Period', 'WEEK_MS', 'race_configured', 'fetch_board', 'format_lap']
@@ -35,11 +34,13 @@ def race_configured() -> bool:
     return bool(config.race.supabase_url and config.race.service_key)
 
 
-def fetch_board(period: Period, limit: int = 10, now_ms: float | None = None, http: Any = None) -> list[BoardRow]:
+async def fetch_board(
+    period: Period, limit: int = 10, now_ms: float | None = None, request: Callable[..., Awaitable[http.Response]] = http.request
+) -> list[BoardRow]:
     now = time.time() * 1000 if now_ms is None else now_ms
     since = utils.to_iso(datetime.fromtimestamp((now - WEEK_MS) / 1000, tz=timezone.utc)) if period == 'week' else None
-    client = http or httpx
-    res = client.post(
+    res = await request(
+        'POST',
         f"{config.race.supabase_url.rstrip('/')}/rest/v1/rpc/bot_leaderboard",
         headers={
             'apikey': config.race.service_key,
@@ -49,7 +50,7 @@ def fetch_board(period: Period, limit: int = 10, now_ms: float | None = None, ht
         json={'since': since, 'lim': limit},
         timeout=10,
     )
-    if not res.is_success:
+    if not res.ok:
         raise RuntimeError(f'leaderboard request failed ({res.status_code}): {res.text[:200]}')
     return res.json()
 

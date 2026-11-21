@@ -33,30 +33,30 @@ def _title_for(d: datetime) -> str:
     return f'{et.month}/{et.day} Mechanical Meeting'
 
 
-def create_meeting_notes_page(d: datetime, subsystem_contents: list[SubsystemContent]) -> str:
+async def create_meeting_notes_page(d: datetime, subsystem_contents: list[SubsystemContent]) -> str:
     children = _build_page_blocks(subsystem_contents)
     # Notion caps `children` at 100 blocks per request — create the page with the first batch,
     # then append the rest in batches of 100.
     batch_size = 100
-    result = _notion().pages.create(
+    result = await _notion().pages.create(
         parent={'page_id': NOTION_PARENT_PAGE_ID},
         properties={'title': {'title': [{'text': {'content': _title_for(d)}}]}},
         children=children[:batch_size],
     )
     page_id = result['id']
     for i in range(batch_size, len(children), batch_size):
-        _notion().blocks.children.append(page_id, children=children[i : i + batch_size])
+        await _notion().blocks.children.append(page_id, children=children[i : i + batch_size])
     return result['url']
 
 
-def find_existing_meeting_page_for_today(d: datetime | None = None) -> str | None:
+async def find_existing_meeting_page_for_today(d: datetime | None = None) -> str | None:
     """Check if a meeting notes page for today's date already exists under the parent page.
     Returns the page URL if found, else None. Used for idempotency when the Wednesday job might
     fire multiple times due to GitHub Actions cron unreliability."""
     expected_title = _title_for(d or datetime.now(ZoneInfo('America/New_York')))
     cursor: str | None = None
     while True:
-        result = _notion().blocks.children.list(NOTION_PARENT_PAGE_ID, start_cursor=cursor)
+        result = await _notion().blocks.children.list(NOTION_PARENT_PAGE_ID, start_cursor=cursor)
         for block in result.get('results') or []:
             if block.get('type') == 'child_page' and (block.get('child_page') or {}).get('title') == expected_title:
                 return f"https://www.notion.so/{block['id'].replace('-', '')}"

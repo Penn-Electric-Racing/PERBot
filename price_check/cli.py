@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from core import utils
+from core import http, utils
 from core.config import config
 from core.log import setup_logging
 from core.notion import Notion, page_id_from
@@ -25,7 +25,7 @@ from price_check.views import PriceAlert
 __all__ = ['main']
 
 
-def main(argv: list[str] | None = None) -> None:
+async def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog='python -m price_check.cli', description='DM yourself a test price alert.')
     p.add_argument('row', help='Notion row URL or id')
     p.add_argument('price', type=float, help="the 'found' price, in the row's units")
@@ -37,7 +37,7 @@ def main(argv: list[str] | None = None) -> None:
     if not row_id or not a.price > 0:
         p.error('need a Notion row URL/id and a price above 0')
 
-    row = PurchasingPrices(Notion.shared(), config.price_check).get(row_id)
+    row = await PurchasingPrices(Notion.shared(), config.price_check).get(row_id)
     if not (row.unit_cost > 0 and row.quantity > 0):
         sys.exit('That row has no Unit cost / Quant. to compare.')
     found = {'url': a.link or row.link, 'unit_cost': a.price / row.pack_size, 'supplier': a.supplier, 'notes': []}
@@ -45,7 +45,7 @@ def main(argv: list[str] | None = None) -> None:
     alert = PriceAlert(f, test=True)
     if alert.buttons() is None:
         sys.exit('No Use / Keep buttons for that link (not http, or over Slack\'s size cap).')
-    Slack.shared().chat_postMessage(
+    await Slack.shared().chat_postMessage(
         channel=a.to,
         text=f'Test price alert: ${utils.price(row.unit_cost)} → ${utils.price(a.price)}',
         blocks=alert.blocks(),
@@ -56,4 +56,4 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == '__main__':
     setup_logging()
-    main()
+    http.run(main())

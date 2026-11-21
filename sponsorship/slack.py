@@ -8,16 +8,16 @@ paragraph, the draft is never auto-sent, and a human reviews it first.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import logging
 import math
 import re
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from slack_sdk import WebClient
+from slack_sdk.web.async_client import AsyncWebClient
 
-from core import utils
+from core import aio, utils
 from core.config import config
 from core.slack import (
     EMAIL_RE,
@@ -124,18 +124,17 @@ def heatmap_text() -> str:
     )
 
 
-def _eph(respond: Respond, text: str, blocks: list[dict[str, Any]] | None = None) -> None:
+async def _eph(respond: Respond, text: str, blocks: list[dict[str, Any]] | None = None) -> None:
     if blocks is None:
-        respond(response_type='ephemeral', text=text)
+        await respond(response_type='ephemeral', text=text)
     else:
-        respond(response_type='ephemeral', text=text, blocks=blocks)
+        await respond(response_type='ephemeral', text=text, blocks=blocks)
 
 
-def _parallel(*fns: Callable[[], Any]) -> list[Any]:
+async def _parallel(*fns: Callable[[], Any]) -> list[Any]:
     """Run independent Notion reads at once (each is a paginated HTTP query)."""
-    with ThreadPoolExecutor(max_workers=len(fns)) as pool:
-        futures = [pool.submit(fn) for fn in fns]
-        return [f.result() for f in futures]
+    futures = [aio.spawn(fn) for fn in fns]
+    return [await f for f in futures]
 
 
 # --- Parsing ------------------------------------------------------------------
@@ -283,15 +282,15 @@ def _format_add_result(result: EnrichResult) -> str:
     return '\n'.join(lines)
 
 
-def resolve_assignees(client: WebClient, slack_ids: list[str], plain_handles: list[str] | None = None) -> ResolvedPeople:
+async def resolve_assignees(client: AsyncWebClient, slack_ids: list[str], plain_handles: list[str] | None = None) -> ResolvedPeople:
     """Assignees (mentions + typed @handles) → Notion user IDs, email first, name fallback."""
-    return Slack.wrap(client).resolve_people(slack_ids, plain_handles, notion.list_notion_users)
+    return await Slack.wrap(client).resolve_people(slack_ids, plain_handles, notion.list_notion_users)
 
 
-def _handle_add(client: WebClient, respond: Respond, arg: str) -> None:
+async def _handle_add(client: AsyncWebClient, respond: Respond, arg: str) -> None:
     parsed = parse_add(arg)
     if not parsed.company:
-        _eph(
+        await _eph(
             respond,
             'Usage: `/sponsor add <company or url> [for <your ask>] [contact: <name> <email>] [@person]`\n'
             'Example: `/sponsor add Jane Street for cash sponsorship contact: Stephanie Grassulo sgrassulo@janestreet.com @you`',
@@ -299,8 +298,8 @@ def _handle_add(client: WebClient, respond: Respond, arg: str) -> None:
         return
 
     try:
-        assignees = resolve_assignees(client, parsed.assignee_slack_ids, parsed.plain_handles)
-        result = enrich_company(
+        assignees = await resolve_assignees(client, parsed.assignee_slack_ids, parsed.plain_handles)
+        result = await enrich_company(
             parsed.company,
             EnrichOptions(
                 notion=notion,
@@ -313,12 +312,12 @@ def _handle_add(client: WebClient, respond: Respond, arg: str) -> None:
                 else None,
             ),
         )
-        _eph(respond, _format_add_result(result))
+        await _eph(respond, _format_add_result(result))
     except DomainResolutionError as err:
-        _eph(respond, f'✗ {err}')
+        await _eph(respond, f'✗ {err}')
     except Exception as err:
         logger.error('/sponsor add failed', exc_info=err)
-        _eph(respond, '✗ Enrichment failed. Check the PERBot logs and try again.')
+        await _eph(respond, '✗ Enrichment failed. Check the PERBot logs and try again.')
 
 
 # --- /sponsor me -------------------------------------------------------------
@@ -331,18 +330,18 @@ def _format_deal_line(row: PipelineRow) -> str:
     return f"• <{row.url}|{row.company or 'Untitled'}> — *{stage}*{nxt}{due}"
 
 
-def _handle_me(client: WebClient, respond: Respond, slack_user_id: str) -> None:
-    notion_id = Slack.wrap(client).slack_user_to_notion_id(slack_user_id, index_notion_users(notion.list_notion_users()))
+async def _handle_me(client: AsyncWebClient, respond: Respond, slack_user_id: str) -> None:
+    notion_id = await Slack.wrap(client).slack_user_to_notion_id(slack_user_id, index_notion_users(await notion.list_notion_users()))
     if not notion_id:
-        _eph(
+        await _eph(
             respond,
             "I couldn't match your Slack account to a Notion user (by email or name). Ask an admin to check your Notion access.",
         )
         return
 
-    deals = notion.query_active_deals_for_user(notion_id)
+    deals = await notion.query_active_deals_for_user(notion_id)
     if not deals:
-        _eph(respond, 'You have no active sponsorship deals. 🎉')
+        await _eph(respond, 'You have no active sponsorship deals. 🎉')
         return
 
     header = f'*Your active deals ({len(deals)}):*'
@@ -351,29 +350,29 @@ def _handle_me(client: WebClient, respond: Respond, slack_user_id: str) -> None:
     # message at 50 blocks; beyond ~20 deals the rest are listed without buttons.
     with_buttons = deals[:20]
     footer = f'_…and {len(deals) - len(with_buttons)} more — see Notion._' if len(deals) > len(with_buttons) else None
-    _eph(respond, text, deal_list_blocks(header, with_buttons, slack_user_id, footer=footer))
+    await _eph(respond, text, deal_list_blocks(header, with_buttons, slack_user_id, footer=footer))
 
 
 # --- /sponsor quota ------------------------------------------------------------
 
 
-def _handle_quota(client: WebClient, respond: Respond, slack_user_id: str) -> None:
+async def _handle_quota(client: AsyncWebClient, respond: Respond, slack_user_id: str) -> None:
     """Mid-week self-check against the Saturday quota audit: same roster, same window (the one
     ending next Saturday 10am ET), same counting rule (`compute_quota_results`), so what people see
     here is exactly what the audit will post. Ephemeral."""
     window = current_audit_window()
     quota = config.sponsorship.weekly_quota
-    members, deals, notion_users = _parallel(
+    members, deals, notion_users = await _parallel(
         notion.query_quota_roster,
-        lambda: notion.query_deals_edited_since(utils.to_iso(window.start)),
+        functools.partial(notion.query_deals_edited_since, utils.to_iso(window.start)),
         notion.list_notion_users,
     )
     if not members:
-        _eph(respond, 'The Ops Quota Roster has no active members — nothing to check.')
+        await _eph(respond, 'The Ops Quota Roster has no active members — nothing to check.')
         return
-    caller_notion_id = Slack.wrap(client).slack_user_to_notion_id(slack_user_id, index_notion_users(notion_users))
+    caller_notion_id = await Slack.wrap(client).slack_user_to_notion_id(slack_user_id, index_notion_users(notion_users))
     results = compute_quota_results(members, deals, window, quota)
-    _eph(respond, format_quota_standing(results, window, quota, caller_notion_id))
+    await _eph(respond, format_quota_standing(results, window, quota, caller_notion_id))
 
 
 # --- Bank / deal lookup --------------------------------------------------------
@@ -389,17 +388,17 @@ def _bank_host(row: BankLeadRow) -> str:
     return extract_hostname(row.domain) or ''
 
 
-def _lookup_bank_rows(query: str) -> NameMatch[BankLeadRow]:
+async def _lookup_bank_rows(query: str) -> NameMatch[BankLeadRow]:
     """Bank rows for a `/sponsor` argument: a URL/domain matches the Domain column (the only thing
     that tells two "SKF" rows apart); a name goes through the title search with
     exact-name-beats-substring (so "Keye" isn't ambiguous with "Hawkeyeind")."""
     host = _query_hostname(query)
     if host:
-        rows = notion.find_bank_rows_by_hostname(host)
+        rows = await notion.find_bank_rows_by_hostname(host)
         if len(rows) == 1:
             return NameMatch('one', row=rows[0])
         return NameMatch('many', rows=rows) if rows else NameMatch('none')
-    return pick_by_name(notion.find_bank_rows_by_company(query), query)
+    return pick_by_name(await notion.find_bank_rows_by_company(query), query)
 
 
 def _ambiguous_bank_text(query: str, rows: list[BankLeadRow], subcommand: str) -> str:
@@ -418,11 +417,11 @@ def _ambiguous_bank_text(query: str, rows: list[BankLeadRow], subcommand: str) -
     return f"Several Bank leads match *{query}*:\n{chr(10).join(lines)}{hint}"
 
 
-def resolve_single_bank_row(respond: Respond, raw_query: str, subcommand: str) -> BankLeadRow | None:
+async def resolve_single_bank_row(respond: Respond, raw_query: str, subcommand: str) -> BankLeadRow | None:
     """Find the single Bank prospect for `raw_query` (a name or a domain). Responds itself and
     returns None on zero or ambiguous matches; `subcommand` goes into the retry hint."""
     query = unwrap_links(raw_query).strip()
-    match = _lookup_bank_rows(query)
+    match = await _lookup_bank_rows(query)
     if match.kind == 'one':
         return match.row
     text = (
@@ -430,7 +429,7 @@ def resolve_single_bank_row(respond: Respond, raw_query: str, subcommand: str) -
         if match.kind == 'none'
         else _ambiguous_bank_text(query, match.rows, subcommand)
     )
-    _eph(respond, text)
+    await _eph(respond, text)
     return None
 
 
@@ -438,7 +437,7 @@ def _deal_list(deals: list[PipelineRow]) -> str:
     return '\n'.join(f"• <{d.url}|{d.company}> · {d.stage or 'no stage'}" for d in deals)
 
 
-def resolve_single_deal(respond: Respond, raw_query: str, subcommand: str) -> PipelineRow | None:
+async def resolve_single_deal(respond: Respond, raw_query: str, subcommand: str) -> PipelineRow | None:
     """Find the single Pipeline deal for `raw_query` (a name or a domain). Shared by log / won /
     stage. A name tries the deal titles first; a domain, or a name with no deal title, goes through
     the Bank row's `Bank source` link, so a deal still resolves when its title differs from what was
@@ -446,40 +445,40 @@ def resolve_single_deal(respond: Respond, raw_query: str, subcommand: str) -> Pi
     the name". Responds itself and returns None unless exactly one deal is found."""
     query = unwrap_links(raw_query).strip()
 
-    def reply(text: str) -> None:
-        _eph(respond, text)
+    async def reply(text: str) -> None:
+        await _eph(respond, text)
         return None
 
     if not _query_hostname(query):
-        by_title = pick_by_name(notion.find_deals_by_company(query), query)
+        by_title = pick_by_name(await notion.find_deals_by_company(query), query)
         deal = pick_live_deal(by_title.rows) if by_title.kind == 'many' else by_title
         if deal.kind == 'one':
             return deal.row
         if deal.kind == 'many':
-            return reply(
+            return await reply(
                 f"Several Pipeline deals match *{query}*:\n{_deal_list(deal.rows)}\nUse the exact deal name or the company's domain."
             )
 
-    bank = _lookup_bank_rows(query)
+    bank = await _lookup_bank_rows(query)
     if bank.kind == 'none':
-        return reply(
+        return await reply(
             f'No Pipeline deal or Bank lead matches *{query}*. Check the spelling, or add it with `/sponsor add <website>`.'
         )
     if bank.kind == 'many':
-        return reply(_ambiguous_bank_text(query, bank.rows, subcommand))
+        return await reply(_ambiguous_bank_text(query, bank.rows, subcommand))
 
     row = bank.row
     assert row is not None
-    deal = pick_live_deal(notion.find_deals_for_bank_row(row.id))
+    deal = pick_live_deal(await notion.find_deals_for_bank_row(row.id))
     if deal.kind == 'one':
         return deal.row
     claim_ref = _bank_host(row) or row.company
     if deal.kind == 'none':
-        return reply(
+        return await reply(
             f"*{row.company}* is in the Bank but isn't a Pipeline deal yet. <{row.url}|Open row>\n"
             f'Claim it first with `/sponsor claim {claim_ref}` (makes you the DRI), then re-run `/sponsor {subcommand}`.'
         )
-    return reply(f'*{row.company}* has several Pipeline deals:\n{_deal_list(deal.rows)}\nUpdate the right one from its Notion page.')
+    return await reply(f'*{row.company}* has several Pipeline deals:\n{_deal_list(deal.rows)}\nUpdate the right one from its Notion page.')
 
 
 # --- /sponsor email ------------------------------------------------------------
@@ -497,10 +496,10 @@ def parse_email_arg(arg: str) -> tuple[str, str]:
     return _leading_company(text[: m.start()]), text[m.end():].strip()
 
 
-def _handle_email(client: WebClient, respond: Respond, caller_slack_id: str, arg: str) -> None:
+async def _handle_email(client: AsyncWebClient, respond: Respond, caller_slack_id: str, arg: str) -> None:
     company, ask = parse_email_arg(arg)
     if not company:
-        _eph(
+        await _eph(
             respond,
             'Usage: `/sponsor email <company> [for <ask>]`\nDrafts outreach from the team template with a company-specific '
             'fit paragraph, saves it on the prospect’s Bank page, and gives you the text to copy. A 🎯 specific ask (set via '
@@ -508,20 +507,20 @@ def _handle_email(client: WebClient, respond: Respond, caller_slack_id: str, arg
         )
         return
 
-    row = resolve_single_bank_row(respond, company, 'email')
+    row = await resolve_single_bank_row(respond, company, 'email')
     if not row:
         return
 
     # The sender is the caller: their real name fills [NAME] and the signature.
     sender_name = ''
     try:
-        info: Any = client.users_info(user=caller_slack_id)
+        info: Any = await client.users_info(user=caller_slack_id)
         user = info.get('user') or {}
         sender_name = (user.get('profile') or {}).get('real_name') or user.get('real_name') or ''
     except Exception as err:
         logger.warning('/sponsor email: users.info failed; leaving the [NAME] placeholder', exc_info=err)
 
-    result = draft_outreach_email(notion, row, sender_name, ask)
+    result = await draft_outreach_email(notion, row, sender_name, ask)
 
     preview = (
         f'{result.email_text[:EMAIL_SLACK_PREVIEW_CHARS]}\n… (truncated — full draft is in Notion)'
@@ -537,7 +536,7 @@ def _handle_email(client: WebClient, respond: Respond, caller_slack_id: str, arg
         '_AI-assisted draft: the fit paragraph is generated. Review it (and make it yours) before sending._',
         f'```{preview}```',
     ]
-    _eph(respond, '\n'.join(x for x in lines if x))
+    await _eph(respond, '\n'.join(x for x in lines if x))
 
 
 # --- /sponsor ask --------------------------------------------------------------
@@ -552,10 +551,10 @@ def parse_log(arg: str) -> tuple[str, str] | None:
     return (company, note) if company and note else None
 
 
-def _handle_ask(respond: Respond, arg: str) -> None:
+async def _handle_ask(respond: Respond, arg: str) -> None:
     parsed = parse_log(unwrap_links(arg))
     if not parsed:
-        _eph(
+        await _eph(
             respond,
             'Usage: `/sponsor ask <company> - <what we want from them>`\n'
             'Example: `/sponsor ask Edgerton Gear - manufacture our planetary gearset (spur gears, 1mm module)`\n'
@@ -565,12 +564,12 @@ def _handle_ask(respond: Respond, arg: str) -> None:
         return
     company, ask = parsed
 
-    row = resolve_single_bank_row(respond, company, 'ask')
+    row = await resolve_single_bank_row(respond, company, 'ask')
     if not row:
         return
 
-    notion.write_ask_section(row.id, ask)
-    _eph(
+    await notion.write_ask_section(row.id, ask)
+    await _eph(
         respond,
         f'🎯 Set the specific ask on *{row.company}*. <{row.url}|Open row>\n'
         '_For detailed specs (dimensions, materials, tolerances), edit the 🎯 toggle on the page — every line under it goes '
@@ -615,24 +614,24 @@ SCORE_LABELS = {
 }
 
 
-def _handle_score(respond: Respond, arg: str) -> None:
+async def _handle_score(respond: Respond, arg: str) -> None:
     company, updates = parse_score(arg)
     if not company or not updates:
-        _eph(
+        await _eph(
             respond,
             'Usage: `/sponsor score <company> contact:<0-3> teams:<0-3>` (also `market:` `value:` `need:`)\n'
             'Example: `/sponsor score JLCPCB contact:2 teams:3` — sets the two human scores and recomputes Priority.',
         )
         return
 
-    row = resolve_single_bank_row(respond, company, 'score')
+    row = await resolve_single_bank_row(respond, company, 'score')
     if not row:
         return
 
-    notion.update_bank_scores(row.id, updates)
+    await notion.update_bank_scores(row.id, updates)
     merged = dataclasses.replace(row.scores, **updates)
     set_str = ' · '.join(f'{SCORE_LABELS[k]} {v}/3' for k, v in updates.items())
-    _eph(
+    await _eph(
         respond,
         f'✅ Scored *{row.company}* — set {set_str}.\n'
         f'• *Fit:* {utils.js_number(fit_score(merged))}/9 · *Impact:* {utils.js_number(impact_score(merged))}/6  →  '
@@ -655,13 +654,13 @@ def _resolve_category(arg: str) -> tuple[Category | None, str | None]:
 RANK_LIMIT = 10
 
 
-def _handle_rank(respond: Respond, arg: str) -> None:
+async def _handle_rank(respond: Respond, arg: str) -> None:
     category, unmatched = _resolve_category(arg)
-    rows = notion.query_rankable_prospects(category)
+    rows = await notion.query_rankable_prospects(category)
 
     if not rows:
         scope = f' in *{category}*' if category else ''
-        _eph(respond, f'No live prospects{scope} to rank yet. Add some with `/sponsor add`.')
+        await _eph(respond, f'No live prospects{scope} to rank yet. Add some with `/sponsor add`.')
         return
 
     # FSAE ties first, then highest Priority; tie-break on Fit so a warmer lead edges out a colder one.
@@ -689,18 +688,18 @@ def _handle_rank(respond: Respond, arg: str) -> None:
         if any(priority_score(r.scores) == 0 for r in ranked)
         else ''
     )
-    _eph(respond, '\n'.join([header, *lines]) + hint)
+    await _eph(respond, '\n'.join([header, *lines]) + hint)
 
 
 # --- /sponsor find -----------------------------------------------------------
 
 
-def _handle_find(respond: Respond, arg: str) -> None:
+async def _handle_find(respond: Respond, arg: str) -> None:
     """Free-text need → matching UNCLAIMED Bank leads (Status = Available), ranked by the LLM with a
     one-line why each. Read-only; claiming is a separate human step."""
     need = arg.strip()
     if not need:
-        _eph(
+        await _eph(
             respond,
             'Usage: `/sponsor find <what we need>`\n'
             'Searches the *unclaimed* Prospect Bank for leads that could supply or fund a need, best fit first.\n'
@@ -708,14 +707,14 @@ def _handle_find(respond: Respond, arg: str) -> None:
         )
         return
 
-    rows = [r for r in notion.query_rankable_prospects() if r.status == 'Available']
+    rows = [r for r in await notion.query_rankable_prospects() if r.status == 'Available']
     if not rows:
-        _eph(respond, 'The Bank has no unclaimed leads to search. Add some with `/sponsor add` or `/sponsor scout`.')
+        await _eph(respond, 'The Bank has no unclaimed leads to search. Add some with `/sponsor add` or `/sponsor scout`.')
         return
 
-    matches = find_matching_prospects(need, rows)
+    matches = await find_matching_prospects(need, rows)
     if not matches:
-        _eph(
+        await _eph(
             respond,
             f'No unclaimed Bank lead looks like a fit for *{need}* (searched {len(rows)}).\n'
             f'_Try `/sponsor scout {need}` to hunt for new companies._',
@@ -726,7 +725,7 @@ def _handle_find(respond: Respond, arg: str) -> None:
         f'{i + 1}. <{m.row.url}|{m.row.company}> — {m.why} _(priority {utils.js_number(priority_score(m.row.scores))} {quadrant(m.row.scores)})_'
         for i, m in enumerate(matches)
     ]
-    _eph(
+    await _eph(
         respond,
         f'*Unclaimed leads matching “{need}”* (searched {len(rows)}):\n'
         + '\n'.join(lines)
@@ -737,13 +736,13 @@ def _handle_find(respond: Respond, arg: str) -> None:
 # --- /sponsor scout ----------------------------------------------------------
 
 
-def _handle_scout(respond: Respond, arg: str) -> None:
+async def _handle_scout(respond: Respond, arg: str) -> None:
     """Free-text need → NEW candidate companies (not in the Bank), AI-suggested and then grounded
     against their live homepages. Read-only: writes nothing to Notion and spends no Hunter credits —
     a human adds keepers via `/sponsor add <domain>`."""
     need = arg.strip()
     if not need:
-        _eph(
+        await _eph(
             respond,
             'Usage: `/sponsor scout <what we need>`\n'
             'Suggests *new* companies for a need (not yet in the Bank), each checked against its live website.\n'
@@ -752,14 +751,14 @@ def _handle_scout(respond: Respond, arg: str) -> None:
         )
         return
 
-    known = notion.query_all_bank_domains()
-    result = scout_companies(need, known)
+    known = await notion.query_all_bank_domains()
+    result = await scout_companies(need, known)
     rejected = result.rejected_count
     suggestions = f"suggestion{'' if rejected == 1 else 's'}"
 
     if not result.candidates:
         dropped = f' ({rejected} {suggestions} failed the homepage check)' if rejected > 0 else ''
-        _eph(
+        await _eph(
             respond,
             f"Couldn't scout any new companies for *{need}*{dropped}. Try rephrasing the need, or ask around — warm intros "
             'beat cold lists anyway.',
@@ -774,7 +773,7 @@ def _handle_scout(respond: Respond, arg: str) -> None:
             f'{badge} *{c.company}* (<https://{c.hostname}|{c.hostname}>) — {c.why}{note}\n    ↳ `/sponsor add {c.hostname}`'
         )
     dropped_line = f"\n_{rejected} {suggestions} dropped — homepage didn't match the claim._" if rejected > 0 else ''
-    _eph(
+    await _eph(
         respond,
         f'*New sponsor candidates for “{need}”* — ✓ homepage-checked, not yet in the Bank:\n'
         + '\n'.join(lines)
@@ -786,22 +785,22 @@ def _handle_scout(respond: Respond, arg: str) -> None:
 # --- /sponsor log ------------------------------------------------------------
 
 
-def _handle_log(respond: Respond, arg: str) -> None:
+async def _handle_log(respond: Respond, arg: str) -> None:
     parsed = parse_log(arg)
     if not parsed:
-        _eph(
+        await _eph(
             respond,
             'Usage: `/sponsor log <company> - <note>`\nExample: `/sponsor log Altium - called, sending deck Monday`',
         )
         return
     company, note = parsed
 
-    deal = resolve_single_deal(respond, company, 'log')
+    deal = await resolve_single_deal(respond, company, 'log')
     if not deal:
         return
 
-    notion.log_touch(deal, note, utils.today_iso())
-    _eph(respond, f'✅ Logged a touch on <{deal.url}|{deal.company}> and stamped *Last contact* = today.')
+    await notion.log_touch(deal, note, utils.today_iso())
+    await _eph(respond, f'✅ Logged a touch on <{deal.url}|{deal.company}> and stamped *Last contact* = today.')
 
 
 # --- /sponsor won -------------------------------------------------------------
@@ -885,10 +884,10 @@ def parse_won(arg: str) -> ParsedWon | None:
     return ParsedWon(company=company, amount_usd=amount, note=note, kind=kind)
 
 
-def _handle_won(client: WebClient, respond: Respond, arg: str) -> None:
+async def _handle_won(client: AsyncWebClient, respond: Respond, arg: str) -> None:
     parsed = parse_won(arg)
     if not parsed:
-        _eph(
+        await _eph(
             respond,
             'Usage: `/sponsor won <company> <amount> [cash|in-kind|discount] [note]`\nAmount can be a number (`$5,000`, `5k`) '
             'or a discount (`38% of $9k` → $3,420, auto-tagged Valued discount).\nExamples: `/sponsor won Jane Street $5000 cash` '
@@ -896,23 +895,23 @@ def _handle_won(client: WebClient, respond: Respond, arg: str) -> None:
         )
         return
 
-    deal = resolve_single_deal(respond, parsed.company, 'won')
+    deal = await resolve_single_deal(respond, parsed.company, 'won')
     if not deal:
         return
 
-    notion.mark_won(deal, parsed.amount_usd, parsed.note, utils.today_iso(), parsed.kind)
+    await notion.mark_won(deal, parsed.amount_usd, parsed.note, utils.today_iso(), parsed.kind)
 
     # Post to #operations immediately. Same claim as the hourly job → no double-post.
     announced_suffix = ''
     try:
-        if announce_won_now(client, notion, deal, parsed.amount_usd, parsed.kind, parsed.note):
+        if await announce_won_now(client, notion, deal, parsed.amount_usd, parsed.kind, parsed.note):
             announced_suffix = f' and posted it to #{config.sponsorship.win_post_channel}'
     except Exception as err:
         logger.error('/sponsor won: announcement failed (deal still marked Won)', exc_info=err)
 
     computed_note = f' _({parsed.computed})_' if parsed.computed else ''
     kind_note = f' — {parsed.kind.lower()}' if parsed.kind else ''
-    _eph(
+    await _eph(
         respond,
         f'🎉 Marked <{deal.url}|{deal.company}> *Won* at {fmt_usd(parsed.amount_usd)}{computed_note}{kind_note}{announced_suffix}.',
     )
@@ -933,26 +932,26 @@ def parse_stage(arg: str) -> tuple[str, Stage] | None:
     return None
 
 
-def _handle_stage(respond: Respond, user_id: str, arg: str) -> None:
+async def _handle_stage(respond: Respond, user_id: str, arg: str) -> None:
     parsed = parse_stage(arg)
     if not parsed:
-        _eph(
+        await _eph(
             respond,
             f"Usage: `/sponsor stage <company> <stage>`\nStages: {' / '.join(STAGES)}\nExample: `/sponsor stage Jane Street In talks`",
         )
         return
     company, stage = parsed
 
-    deal = resolve_single_deal(respond, company, 'stage')
+    deal = await resolve_single_deal(respond, company, 'stage')
     if not deal:
         return
 
-    notion.set_stage(deal, stage, utils.today_iso())
+    await notion.set_stage(deal, stage, utils.today_iso())
     tip = ' _(tip: use `/sponsor won <company> <amount>` to record the $ and post the win)_' if stage == 'Won' else ''
     text = f'✅ Moved <{deal.url}|{deal.company}> to *{stage}*.{tip}'
     if stage == 'Lost' and not deal.loss_reason:
         # Same optional one-tap reason as the Lost button (handled in actions.py).
-        _eph(
+        await _eph(
             respond,
             text,
             [
@@ -961,7 +960,7 @@ def _handle_stage(respond: Respond, user_id: str, arg: str) -> None:
             ],
         )
         return
-    _eph(respond, text)
+    await _eph(respond, text)
 
 
 # --- /sponsor leaderboard -------------------------------------------------------
@@ -1001,10 +1000,10 @@ MEDALS = ('🥇', '🥈', '🥉')
 LEADERBOARD_LIMIT = 15
 
 
-def _handle_leaderboard(respond: Respond) -> None:
+async def _handle_leaderboard(respond: Respond) -> None:
     """Ephemeral-only by design (Arjun, 2026-07-08): the leaderboard is background tracking anyone
     can pull up, never a channel post."""
-    deals, notion_users, prospects = _parallel(
+    deals, notion_users, prospects = await _parallel(
         notion.query_all_deals, notion.list_notion_users, notion.query_rankable_prospects
     )
 
@@ -1018,7 +1017,7 @@ def _handle_leaderboard(respond: Respond) -> None:
     )
 
     if not rows:
-        _eph(respond, f"No deals on the board yet.{claim_hint or ' Add prospects with `/sponsor add`.'}")
+        await _eph(respond, f"No deals on the board yet.{claim_hint or ' Add prospects with `/sponsor add`.'}")
         return
 
     total = total_raised([d for d in deals if d.stage == 'Won'])
@@ -1037,7 +1036,7 @@ def _handle_leaderboard(respond: Respond) -> None:
         lines.append(f'_…and {len(rows) - LEADERBOARD_LIMIT} more_')
     lines.append('_Co-owned wins credit each DRI in full; the raised total counts each deal once (money in Received)._')
 
-    _eph(respond, '\n'.join([header, *lines]) + claim_hint)
+    await _eph(respond, '\n'.join([header, *lines]) + claim_hint)
 
 
 # --- /sponsor claim -----------------------------------------------------------
@@ -1050,42 +1049,42 @@ def _parse_claim(arg: str) -> tuple[str, list[str], list[str]]:
     return _leading_company(cleaned), assignee_slack_ids, plain_handles
 
 
-def _handle_claim(client: WebClient, respond: Respond, caller_slack_id: str, arg: str) -> None:
+async def _handle_claim(client: AsyncWebClient, respond: Respond, caller_slack_id: str, arg: str) -> None:
     """Claim an existing Bank lead → graduate it to a Pipeline deal. No mention needed: it defaults
     to the caller (using their own Slack identity), so it's the clean "own it myself" button. An
     explicit @mention assigns someone else instead."""
     company, assignee_slack_ids, plain_handles = _parse_claim(arg)
     if not company:
-        _eph(
+        await _eph(
             respond,
             'Usage: `/sponsor claim <company> [@person]`\nExample: `/sponsor claim Jane Street` (claims it for you) '
             'or `/sponsor claim Jane Street @teammate`',
         )
         return
 
-    bank = resolve_single_bank_row(respond, company, 'claim')
+    bank = await resolve_single_bank_row(respond, company, 'claim')
     if not bank:
         return
 
     if bank.has_pipeline_deal or bank.status == 'Graduated':
-        deals = notion.find_deals_for_bank_row(bank.id)
+        deals = await notion.find_deals_for_bank_row(bank.id)
         link = f' <{deals[0].url}|Open deal>' if deals else ''
-        _eph(respond, f'↩︎ *{bank.company}* is already an active deal.{link}')
+        await _eph(respond, f'↩︎ *{bank.company}* is already an active deal.{link}')
         return
 
     # Default owner = the caller; an explicit @mention or @handle assigns someone else.
     has_explicit = bool(assignee_slack_ids or plain_handles)
     assignees = (
-        resolve_assignees(client, assignee_slack_ids, plain_handles)
+        await resolve_assignees(client, assignee_slack_ids, plain_handles)
         if has_explicit
-        else resolve_assignees(client, [caller_slack_id])
+        else await resolve_assignees(client, [caller_slack_id])
     )
     if not assignees.notion_ids:
         who = ', '.join([*assignees.labels, *assignees.unresolved]) or 'you'
-        _eph(respond, f"✗ Couldn't match {who} to a Notion user (by email or name). Ask an admin to check Notion access.")
+        await _eph(respond, f"✗ Couldn't match {who} to a Notion user (by email or name). Ask an admin to check Notion access.")
         return
 
-    deal = notion.create_pipeline_deal(
+    deal = await notion.create_pipeline_deal(
         PipelineDealInput(
             bank_page_id=bank.id,
             company=bank.company,
@@ -1097,10 +1096,10 @@ def _handle_claim(client: WebClient, respond: Respond, caller_slack_id: str, arg
             next_action_date_iso=utils.iso_days_from_now(7),
         )
     )
-    notion.mark_bank_claimed(bank.id, assignees.notion_ids, 'Graduated')
+    await notion.mark_bank_claimed(bank.id, assignees.notion_ids, 'Graduated')
 
     unresolved_note = f" (couldn't match {', '.join(assignees.unresolved)})" if assignees.unresolved else ''
-    _eph(
+    await _eph(
         respond,
         f"✅ Claimed *{bank.company}* → <{deal.url}|Pipeline deal> (Prospect), owned by {', '.join(assignees.labels)}.{unresolved_note}",
     )
@@ -1109,7 +1108,7 @@ def _handle_claim(client: WebClient, respond: Respond, caller_slack_id: str, arg
 # --- Registration -------------------------------------------------------------
 
 
-def handle_command(ack, command, respond, client) -> None:  # noqa: ANN001
+async def handle_command(ack, command, respond, client) -> None:  # noqa: ANN001
     """`/sponsor <subcommand> ...`: dispatch to the handler for each subcommand."""
     parts = (command.get('text') or '').strip().split()
     subcommand = (parts[0] if parts else '').lower()
@@ -1119,59 +1118,59 @@ def handle_command(ack, command, respond, client) -> None:  # noqa: ANN001
     try:
         if subcommand == 'add':
             # Enrichment is slow (fetch + LLM + Hunter); ack fast, then post via response_url.
-            ack(response_type='ephemeral', text=f":hourglass_flowing_sand: Researching *{arg or '…'}*")
-            _handle_add(client, respond, arg)
+            await ack(response_type='ephemeral', text=f":hourglass_flowing_sand: Researching *{arg or '…'}*")
+            await _handle_add(client, respond, arg)
         elif subcommand == 'claim':
-            ack()
-            _handle_claim(client, respond, user_id, arg)
+            await ack()
+            await _handle_claim(client, respond, user_id, arg)
         elif subcommand == 'ask':
-            ack()
-            _handle_ask(respond, arg)
+            await ack()
+            await _handle_ask(respond, arg)
         elif subcommand in ('email', 'draft'):
             # Drafting is slow (template + homepage fetch + LLM + Notion writes) — ack fast, then
             # deliver via response_url (same pattern as add).
-            ack(response_type='ephemeral', text=f":hourglass_flowing_sand: Drafting outreach for *{arg or '…'}*")
-            _handle_email(client, respond, user_id, arg)
+            await ack(response_type='ephemeral', text=f":hourglass_flowing_sand: Drafting outreach for *{arg or '…'}*")
+            await _handle_email(client, respond, user_id, arg)
         elif subcommand == 'log':
-            ack()
-            _handle_log(respond, arg)
+            await ack()
+            await _handle_log(respond, arg)
         elif subcommand == 'won':
-            ack()
-            _handle_won(client, respond, arg)
+            await ack()
+            await _handle_won(client, respond, arg)
         elif subcommand == 'stage':
-            ack()
-            _handle_stage(respond, user_id, arg)
+            await ack()
+            await _handle_stage(respond, user_id, arg)
         elif subcommand == 'score':
-            ack()
-            _handle_score(respond, arg)
+            await ack()
+            await _handle_score(respond, arg)
         elif subcommand == 'rank':
-            ack()
-            _handle_rank(respond, arg)
+            await ack()
+            await _handle_rank(respond, arg)
         elif subcommand == 'find':
             # One LLM pass over the whole unclaimed Bank — ack fast, respond via response_url.
-            ack(response_type='ephemeral', text=f":mag: Searching the Bank for *{arg or '…'}*")
-            _handle_find(respond, arg)
+            await ack(response_type='ephemeral', text=f":mag: Searching the Bank for *{arg or '…'}*")
+            await _handle_find(respond, arg)
         elif subcommand in ('scout', 'discover'):
             # Slowest command (generate + N homepage fetches + verify) — can take a minute.
-            ack(
+            await ack(
                 response_type='ephemeral',
                 text=f":compass: Scouting new companies for *{arg or '…'}* — this can take a minute.",
             )
-            _handle_scout(respond, arg)
+            await _handle_scout(respond, arg)
         elif subcommand in ('leaderboard', 'board', 'top'):
-            ack()
-            _handle_leaderboard(respond)
+            await ack()
+            await _handle_leaderboard(respond)
         elif subcommand == 'quota':
             # Three Notion queries — ack fast, respond via response_url.
-            ack(response_type='ephemeral', text=':clipboard: Checking this week’s quota…')
-            _handle_quota(client, respond, user_id)
+            await ack(response_type='ephemeral', text=':clipboard: Checking this week’s quota…')
+            await _handle_quota(client, respond, user_id)
         elif subcommand == 'me':
-            ack()
-            _handle_me(client, respond, user_id)
+            await ack()
+            await _handle_me(client, respond, user_id)
         elif subcommand == 'heatmap':
-            ack(response_type='ephemeral', text=heatmap_text())
+            await ack(response_type='ephemeral', text=heatmap_text())
         else:
-            ack(response_type='ephemeral', text=USAGE)
+            await ack(response_type='ephemeral', text=USAGE)
     except Exception as err:
         logger.error(f'/sponsor {subcommand} failed', exc_info=err)
-        _eph(respond, '✗ Something went wrong. Check the PERBot logs.')
+        await _eph(respond, '✗ Something went wrong. Check the PERBot logs.')

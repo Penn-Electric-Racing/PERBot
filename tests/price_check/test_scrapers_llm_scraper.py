@@ -6,8 +6,10 @@
 
 import pytest
 
+from core import http
 from price_check.scrapers import llm_reader
 from price_check.scrapers.ranking import Scorer
+from tests.aio import awaitable
 
 PAGE = """<html><head>
 <script type="application/ld+json">{"@type": "Product", "name": "LM7805",
@@ -24,7 +26,7 @@ class FakeLLM:
     def __init__(self, reply=None, error=None):
         self.reply, self.error, self.prompts = reply or {}, error, []
 
-    def json(self, system, user):
+    async def json(self, system, user):
         self.prompts.append((system, user))
         if self.error:
             raise llm_reader.LLMError(self.error)
@@ -119,10 +121,10 @@ def test_listing_url_stays_a_listing_even_if_llm_disagrees():
 
 
 # ---------------------------------------------------------------- part_info
-def test_part_info_sends_page_and_maps_reply(monkeypatch):
-    monkeypatch.setattr(llm_reader, "_fetch_html", lambda url: PAGE)
+async def test_part_info_sends_page_and_maps_reply(monkeypatch):
+    monkeypatch.setattr(llm_reader, "_fetch_html", awaitable(lambda url: PAGE))
     llm = FakeLLM({"cost": 5.9, "currency": "USD", "supplier": "Acme", "pack_size": 10})
-    r = llm_reader.part_info(result(snippet="LM7805 from $5"), llm, "LM7805")
+    r = await llm_reader.part_info(result(snippet="LM7805 from $5"), llm, "LM7805")
     _, prompt = llm.prompts[0]
     assert "Searching for: LM7805" in prompt and "JSON-LD:" in prompt
     assert "Page text:" in prompt and "LM7805 from $5" in prompt
@@ -130,51 +132,51 @@ def test_part_info_sends_page_and_maps_reply(monkeypatch):
     assert r["page_title"] == "LM7805 Regulator (10pcs)" and r["fetch_error"] is None
 
 
-def test_failed_fetch_falls_back_to_snippet(monkeypatch):
+async def test_failed_fetch_falls_back_to_snippet(monkeypatch):
     def boom(url):
         raise llm_reader.BackendError("HTTP 403")
-    monkeypatch.setattr(llm_reader, "_fetch_html", boom)
+    monkeypatch.setattr(llm_reader, "_fetch_html", awaitable(boom))
     llm = FakeLLM({"cost": 1.25})
-    r = llm_reader.part_info(result(snippet="LM7805 $1.25"), llm, "LM7805")
+    r = await llm_reader.part_info(result(snippet="LM7805 $1.25"), llm, "LM7805")
     assert "Page text" not in llm.prompts[0][1]
     assert r["cost"] == 1.25 and r["cost_source"] == "llm snippet"
     assert r["fetch_error"] == "HTTP 403" and r["supplier"] == "acme.com"
 
 
-def test_parse_errors_stay_on_their_page(monkeypatch):
-    monkeypatch.setattr(llm_reader, "_fetch_html", lambda url: PAGE)
+async def test_parse_errors_stay_on_their_page(monkeypatch):
+    monkeypatch.setattr(llm_reader, "_fetch_html", awaitable(lambda url: PAGE))
     monkeypatch.setattr(llm_reader, "page_text", lambda html: 1 / 0)
-    r = llm_reader.part_info(result(snippet="LM7805 $2"), FakeLLM({"cost": 2}), "LM7805")
+    r = await llm_reader.part_info(result(snippet="LM7805 $2"), FakeLLM({"cost": 2}), "LM7805")
     assert r["fetch_error"].startswith("parse error") and r["cost"] == 2
 
 
-def test_llm_error_is_recorded_not_raised(monkeypatch):
-    monkeypatch.setattr(llm_reader, "_fetch_html", lambda url: PAGE)
-    r = llm_reader.part_info(result(), FakeLLM(error="HTTP 429"), "LM7805")
+async def test_llm_error_is_recorded_not_raised(monkeypatch):
+    monkeypatch.setattr(llm_reader, "_fetch_html", awaitable(lambda url: PAGE))
+    r = await llm_reader.part_info(result(), FakeLLM(error="HTTP 429"), "LM7805")
     assert r["cost"] is None and r["fetch_error"] == "llm: HTTP 429"
 
 
-def test_listing_url_is_flagged(monkeypatch):
-    monkeypatch.setattr(llm_reader, "_fetch_html", lambda url: PAGE)
-    r = llm_reader.part_info(result("https://shop.com/search?q=lm7805"), FakeLLM(), "LM7805")
+async def test_listing_url_is_flagged(monkeypatch):
+    monkeypatch.setattr(llm_reader, "_fetch_html", awaitable(lambda url: PAGE))
+    r = await llm_reader.part_info(result("https://shop.com/search?q=lm7805"), FakeLLM(), "LM7805")
     assert r["listing_page"] is True
 
 
-def test_snippets_info_maps_rows_by_index():
+async def test_snippets_info_maps_rows_by_index():
     rs = [result(f"https://site{i}.com/p", f"LM7805 #{i}") for i in range(3)]
     llm = FakeLLM({"results": [{"index": 2, "cost": 3}, {"index": 0, "cost": 1}, "junk"]})
-    out = llm_reader.snippets_info(rs, llm, "LM7805")
+    out = await llm_reader.snippets_info(rs, llm, "LM7805")
     assert [r["cost"] for r in out] == [1, None, 3]
     assert out[0]["cost_source"] == "llm snippet" and out[1]["supplier"] == "site1.com"
     assert len(llm.prompts) == 1 and "[2] LM7805 #2" in llm.prompts[0][1]
 
 
 # ---------------------------------------------------------------- batching
-def test_batch_sends_several_pages_per_request(monkeypatch):
-    monkeypatch.setattr(llm_reader, "_fetch_html", lambda url: PAGE)
+async def test_batch_sends_several_pages_per_request(monkeypatch):
+    monkeypatch.setattr(llm_reader, "_fetch_html", awaitable(lambda url: PAGE))
     rs = [result(f"https://site{i}.com/p", f"LM7805 #{i}", "$1 $2 $3") for i in range(5)]
     llm = FakeLLM({"results": [{"index": i, "cost": i + 1} for i in range(3)]})
-    out = llm_reader.pages_info(rs, llm, "LM7805", batch=3)
+    out = await llm_reader.pages_info(rs, llm, "LM7805", batch=3)
     assert len(llm.prompts) == 2  # 5 pages in groups of 3 + 2
     system, prompt = llm.prompts[0]
     assert '"index": n' in system and "=== [2] ===" in prompt and "=== [3] ===" not in prompt
@@ -183,25 +185,25 @@ def test_batch_sends_several_pages_per_request(monkeypatch):
     assert all(r["cost_source"] == "llm" for r in out)
 
 
-def test_batch_page_missing_from_reply_is_flagged(monkeypatch):
-    monkeypatch.setattr(llm_reader, "_fetch_html", lambda url: PAGE)
+async def test_batch_page_missing_from_reply_is_flagged(monkeypatch):
+    monkeypatch.setattr(llm_reader, "_fetch_html", awaitable(lambda url: PAGE))
     rs = [result(f"https://site{i}.com/p", snippet="$1") for i in range(3)]
-    out = llm_reader.pages_info(rs, FakeLLM({"results": [{"index": 0, "cost": 1}, "junk"]}), "LM7805", 3)
+    out = await llm_reader.pages_info(rs, FakeLLM({"results": [{"index": 0, "cost": 1}, "junk"]}), "LM7805", 3)
     assert out[0]["cost"] == 1 and out[1]["cost"] is None
     assert "no reply for this page" in out[1]["fetch_error"]
 
 
-def test_batch_llm_error_lands_on_every_page_in_it(monkeypatch):
-    monkeypatch.setattr(llm_reader, "_fetch_html", lambda url: PAGE)
+async def test_batch_llm_error_lands_on_every_page_in_it(monkeypatch):
+    monkeypatch.setattr(llm_reader, "_fetch_html", awaitable(lambda url: PAGE))
     rs = [result(f"https://site{i}.com/p") for i in range(2)]
-    out = llm_reader.pages_info(rs, FakeLLM(error="HTTP 429"), "LM7805", 2)
+    out = await llm_reader.pages_info(rs, FakeLLM(error="HTTP 429"), "LM7805", 2)
     assert [r["fetch_error"] for r in out] == ["llm: HTTP 429"] * 2
 
 
-def test_batch_reply_without_results_list(monkeypatch):
-    monkeypatch.setattr(llm_reader, "_fetch_html", lambda url: PAGE)
+async def test_batch_reply_without_results_list(monkeypatch):
+    monkeypatch.setattr(llm_reader, "_fetch_html", awaitable(lambda url: PAGE))
     rs = [result(f"https://site{i}.com/p") for i in range(2)]
-    out = llm_reader.pages_info(rs, FakeLLM({"cost": 5}), "LM7805", 2)
+    out = await llm_reader.pages_info(rs, FakeLLM({"cost": 5}), "LM7805", 2)
     assert all(r["cost"] is None and "no reply" in r["fetch_error"] for r in out)
 
 # ---------------------------------------------------------------- qty + ranking
@@ -260,7 +262,7 @@ def no_keys(monkeypatch):
 @pytest.fixture
 def llm(no_keys, monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "k")
-    monkeypatch.setattr(llm_reader.time, "sleep", lambda t: None)
+    monkeypatch.setattr(llm_reader.asyncio, "sleep", awaitable(lambda t: None))
     return llm_reader.LLM(rpm=60)
 
 
@@ -270,7 +272,7 @@ def replies(monkeypatch, *responses):
     def post(url, json, timeout, headers):
         calls.append({"url": url, "body": json, "headers": headers})
         return queue.pop(0)
-    monkeypatch.setattr(llm_reader.requests, "post", post)
+    monkeypatch.setattr(llm_reader.http, "post", awaitable(post))
     return calls
 
 
@@ -287,15 +289,15 @@ def test_first_provider_with_a_key_wins(no_keys, monkeypatch):
     assert llm.url == "https://api.groq.com/openai/v1/chat/completions"
 
 
-def test_openai_preferred_and_omits_temperature(no_keys, monkeypatch):
+async def test_openai_preferred_and_omits_temperature(no_keys, monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "g")
     monkeypatch.setenv("OPENAI_API_KEY", "o")
-    monkeypatch.setattr(llm_reader.time, "sleep", lambda t: None)
+    monkeypatch.setattr(llm_reader.asyncio, "sleep", awaitable(lambda t: None))
     llm = llm_reader.LLM(rpm=60)
     assert llm.provider == "openai" and llm.key == "o"
     assert llm.url == "https://api.openai.com/v1/chat/completions"
     calls = replies(monkeypatch, chat('{"cost": 1.5}'))
-    assert llm.json("sys", "user") == {"cost": 1.5}
+    assert await llm.json("sys", "user") == {"cost": 1.5}
     body = calls[0]["body"]
     assert "temperature" not in body and body["model"] == "gpt-5-mini"
 
@@ -319,82 +321,89 @@ def test_explicit_provider_needs_its_key(no_keys, monkeypatch):
         llm_reader.LLM("groq")
 
 
-def test_request_shape(llm, monkeypatch):
+async def test_request_shape(llm, monkeypatch):
     calls = replies(monkeypatch, chat('{"cost": 1}'))
-    assert llm.json("sys", "user") == {"cost": 1}
+    assert await llm.json("sys", "user") == {"cost": 1}
     body = calls[0]["body"]
     assert body["temperature"] == 0 and body["response_format"] == {"type": "json_object"}
     assert [m["role"] for m in body["messages"]] == ["system", "user"]
     assert calls[0]["headers"]["Authorization"] == "Bearer k"
 
 
-def test_code_fenced_json_is_accepted(llm, monkeypatch):
+async def test_code_fenced_json_is_accepted(llm, monkeypatch):
     replies(monkeypatch, chat('```json\n{"cost": 2.5}\n```'))
-    assert llm.json("s", "u") == {"cost": 2.5}
+    assert await llm.json("s", "u") == {"cost": 2.5}
 
 
-def test_rate_limit_is_retried(llm, monkeypatch):
+async def test_rate_limit_is_retried(llm, monkeypatch):
     calls = replies(monkeypatch, FakePost(429, headers={"Retry-After": "1"}),
                     FakePost(503), chat('{"ok": true}'))
-    assert llm.json("s", "u") == {"ok": True} and len(calls) == 3
+    assert await llm.json("s", "u") == {"ok": True} and len(calls) == 3
 
 
-def test_non_json_reply_is_retried_then_fails(llm, monkeypatch):
+async def test_non_json_reply_is_retried_then_fails(llm, monkeypatch):
     replies(monkeypatch, *[chat("sorry, I can't") for _ in range(5)])
     with pytest.raises(llm_reader.LLMError, match="not JSON"):
-        llm.json("s", "u")
+        await llm.json("s", "u")
 
 
-def test_client_error_fails_fast(llm, monkeypatch):
+async def test_client_error_fails_fast(llm, monkeypatch):
     calls = replies(monkeypatch, FakePost(400, text="model not found"))
     with pytest.raises(llm_reader.LLMError, match="HTTP 400: model not found"):
-        llm.json("s", "u")
+        await llm.json("s", "u")
     assert len(calls) == 1
 
 
-def test_requests_are_paced(no_keys, monkeypatch):
+async def test_requests_are_paced(no_keys, monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "k")
     clock, slept = [100.0], []
     monkeypatch.setattr(llm_reader.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(llm_reader.time, "sleep", slept.append)
+    monkeypatch.setattr(llm_reader.asyncio, "sleep", awaitable(slept.append))
     llm = llm_reader.LLM(rpm=30)  # one request every 2s
     for _ in range(3):
-        llm._wait_turn()
+        await llm._wait_turn()
     assert slept == [0, 2, 4]
 
 
 # ---------------------------------------------------------------- LLM client edges
-def test_network_errors_are_retried(llm, monkeypatch):
-    queue = [llm_reader.requests.ConnectionError("reset"), chat('{"ok": 1}')]
+async def test_network_errors_are_retried(llm, monkeypatch):
+    queue = [http.ConnectError("reset"), chat('{"ok": 1}')]
 
     def post(url, json, timeout, headers):
         r = queue.pop(0)
         if isinstance(r, Exception):
             raise r
         return r
-    monkeypatch.setattr(llm_reader.requests, "post", post)
-    assert llm.json("s", "u") == {"ok": 1}
+    monkeypatch.setattr(llm_reader.http, "post", awaitable(post))
+    assert await llm.json("s", "u") == {"ok": 1}
 
 
-def test_unexpected_response_shape(llm, monkeypatch):
+async def test_unexpected_response_shape(llm, monkeypatch):
     replies(monkeypatch, FakePost(200, {"error": "weird"}, text="weird"))
     with pytest.raises(llm_reader.LLMError, match="unexpected response"):
-        llm.json("s", "u")
+        await llm.json("s", "u")
 
 
 def test_ollama_up(monkeypatch):
-    monkeypatch.setattr(llm_reader.requests, "get", lambda *a, **k: type("R", (), {"ok": True})())
+    class Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(llm_reader.socket, "create_connection", lambda addr, timeout: Conn())
     assert llm_reader._ollama_up() is True
 
     def down(*a, **k):
-        raise llm_reader.requests.ConnectionError("refused")
-    monkeypatch.setattr(llm_reader.requests, "get", down)
+        raise ConnectionRefusedError("refused")
+    monkeypatch.setattr(llm_reader.socket, "create_connection", down)
     assert llm_reader._ollama_up() is False
 
 
-def test_snippets_info_exits_when_llm_fails():
+async def test_snippets_info_exits_when_llm_fails():
     with pytest.raises(SystemExit, match="LLM failed: HTTP 429"):
-        llm_reader.snippets_info([result()], FakeLLM(error="HTTP 429"), "LM7805")
+        await llm_reader.snippets_info([result()], FakeLLM(error="HTTP 429"), "LM7805")
 
 
 def test_to_info_product_name_and_listing():
@@ -428,19 +437,19 @@ Our website requires JavaScript. Please enable it in your browser.
 To place an order, email us or call (630) 833-0300.</body></html>"""
 
 
-def test_price_from_a_page_that_never_rendered_is_dropped(monkeypatch):
-    monkeypatch.setattr(llm_reader, "_fetch_html", lambda url: JS_SHELL)
+async def test_price_from_a_page_that_never_rendered_is_dropped(monkeypatch):
+    monkeypatch.setattr(llm_reader, "_fetch_html", awaitable(lambda url: JS_SHELL))
     llm = FakeLLM({"cost": 14.58, "currency": "USD", "price_breaks": [{"min_qty": 10, "price": 12.9}]})
-    r = llm_reader.part_info(result("https://www.mcmaster.com/4459T251/", '0.25" tab stock'), llm, "4459T251")
+    r = await llm_reader.part_info(result("https://www.mcmaster.com/4459T251/", '0.25" tab stock'), llm, "4459T251")
     assert r["cost"] is None and r["cost_source"] is None and r["price_breaks"] == []
     assert r["fetch_error"] == "llm price not on page: 14.58, 12.9"
 
 
-def test_prices_shown_on_the_page_are_kept(monkeypatch):
-    monkeypatch.setattr(llm_reader, "_fetch_html", lambda url: PAGE)
+async def test_prices_shown_on_the_page_are_kept(monkeypatch):
+    monkeypatch.setattr(llm_reader, "_fetch_html", awaitable(lambda url: PAGE))
     llm = FakeLLM({"cost": 5.9, "price_breaks": [{"min_qty": 10, "price": 5.0}],
                    "price_min": 5.9, "price_max": 9.99})
-    r = llm_reader.part_info(result(), llm, "LM7805")
+    r = await llm_reader.part_info(result(), llm, "LM7805")
     assert r["cost"] == 5.9
     assert r["price_breaks"] == []  # $5.00 isn't on PAGE: that break alone goes
     assert r["fetch_error"] == "llm price not on page: 5"

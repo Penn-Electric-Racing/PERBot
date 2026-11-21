@@ -44,10 +44,10 @@ class NotionModel:
             raise NotionError(f'{type(self).__name__} {self.id} was not read from a database, so it cannot be changed.')
         return self._db
 
-    def save(self, properties: dict[str, Any]) -> None:
+    async def save(self, properties: dict[str, Any]) -> None:
         """Write Notion properties to this row's page."""
-        self.db.update(self.id, properties)
+        await self.db.update(self.id, properties)
 
-    def refresh(self) -> Self:
+    async def refresh(self) -> Self:
         """This row as Notion has it now."""
-        return self.db.get(self.id)
+        return await self.db.get(self.id)

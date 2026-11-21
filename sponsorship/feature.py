@@ -18,5 +18,5 @@ class Sponsorship(Feature):
         self.views = [DealView()]
 
     @command('/sponsor')
-    def sponsor(self, ack, command, respond, client) -> None:
-        handle_command(ack, command, respond, client)
+    async def sponsor(self, ack, command, respond, client) -> None:
+        await handle_command(ack, command, respond, client)

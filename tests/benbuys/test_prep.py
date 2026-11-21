@@ -18,7 +18,7 @@ def test_normalize_part_number_trims_collapses_wrapped_whitespace_uppercases():
     assert normalize_part_number('MS1238E24B1+6-FHR-2EM') == 'MS1238E24B1+6-FHR-2EM'
 
 
-def test_aggregate_rows_sums_quantities_across_rows_with_the_same_normalized_part_number():
+async def test_aggregate_rows_sums_quantities_across_rows_with_the_same_normalized_part_number():
     rows = [
         row('F2895CT-ND', quantity=4, unit_cost=1, sanitized_description='TVS DIODE 5.5VWM 13VC SC705'),
         row('f2895ct-nd ', quantity=8, unit_cost=1, sanitized_description='TVS DIODE 5.5VWM 13VC SC705'),
@@ -35,7 +35,7 @@ def test_aggregate_rows_sums_quantities_across_rows_with_the_same_normalized_par
     assert lines[0].reference == 'TVS DIODE 5.5VWM 13VC SC705'
 
 
-def test_aggregate_rows_skips_rows_with_an_empty_part_number_keeps_first_seen_order():
+async def test_aggregate_rows_skips_rows_with_an_empty_part_number_keeps_first_seen_order():
     lines = aggregate_rows([row('   '), row('B-ND'), row('A-ND')], test_adapter)
     assert [l.part_number for l in lines] == ['B-ND', 'A-ND']
 
@@ -63,13 +63,13 @@ def test_clean_reference_text_commas_and_newlines_never_survive_into_a_cart_line
     assert clean_reference_text('LEAD FREE, NO CLEAN\nFLUX  1L') == 'LEAD FREE NO CLEAN FLUX 1L'
 
 
-def test_truncate_reference_falls_back_to_the_part_number_when_the_description_is_empty_or_too_short():
+async def test_truncate_reference_falls_back_to_the_part_number_when_the_description_is_empty_or_too_short():
     assert truncate_reference('497-16630-ND', [row('497-16630-ND', sanitized_description='')], 35) == '497-16630-ND'
     assert truncate_reference('497-16630-ND', [row('497-16630-ND', sanitized_description='digikey')], 35) == '497-16630-ND'
     assert truncate_reference('X-ND', [row('X-ND', sanitized_description='ABCDEFG HIJKLMNOPQRSTUVWXYZ0123456789ABCDEF')], 35) == 'X-ND'
 
 
-def test_truncate_reference_aggregated_rows_with_differing_descriptions_get_plus_n_and_stay_within_the_cap():
+async def test_truncate_reference_aggregated_rows_with_differing_descriptions_get_plus_n_and_stay_within_the_cap():
     rows = [
         row('P-ND', sanitized_description='RES 1.5K OHM 1% 1/10W 0603 THICK FILM'),
         row('P-ND', sanitized_description='RESISTOR 1.5K'),
@@ -82,7 +82,7 @@ def test_truncate_reference_aggregated_rows_with_differing_descriptions_get_plus
     assert truncate_reference('P-ND', [rows[0], rows[2]], 35) == 'RES 1.5K OHM 1% 1/10W 0603 THICK'
 
 
-def test_warnings_for_the_four_checks_none_of_which_exclude_a_row():
+async def test_warnings_for_the_four_checks_none_of_which_exclude_a_row():
     rows = [
         row('CPF0603B47KE', quantity=5, unit_cost=0.23),  # no -ND
         row('MS1238E24B1+6-FHR-2EM', quantity=2, unit_cost=34.95, name='MS1238E24B1+6-FHR-2EM', sanitized_description='digikey'),
@@ -101,7 +101,7 @@ def test_warnings_for_the_four_checks_none_of_which_exclude_a_row():
     ]
 
 
-def test_build_prep_include_in_next_order_narrows_to_the_ticked_rows_only():
+async def test_build_prep_include_in_next_order_narrows_to_the_ticked_rows_only():
     ready = [row('A-ND', include_in_next_order=True), row('B-ND'), row('C-ND', include_in_next_order=True)]
     prep = build_prep(test_adapter, ready, [])
     assert prep.cherry_picked is True
@@ -112,12 +112,12 @@ def test_build_prep_include_in_next_order_narrows_to_the_ticked_rows_only():
     assert len(every.lines) == 3
 
 
-def test_build_prep_estimated_total_is_qty_times_unit_cost_rounded_to_cents():
+async def test_build_prep_estimated_total_is_qty_times_unit_cost_rounded_to_cents():
     prep = build_prep(test_adapter, [row('A-ND', quantity=500, unit_cost=0.14502), row('B-ND', quantity=3, unit_cost=3.47)], [])
     assert prep.estimated_total == 82.92
 
 
-def test_format_prep_zero_ready_rows_no_paste_block_not_ready_rows_still_listed():
+async def test_format_prep_zero_ready_rows_no_paste_block_not_ready_rows_still_listed():
     not_ready = [row('1727-7329-1-ND', unit_cost=0, readiness='❌ Missing fields', name='DIODE SCHOTTKY 20V 500MA SOD123')]
     blocks = format_prep(test_adapter, build_prep(test_adapter, [], not_ready), 500)
     assert blocks.cart == ''
@@ -131,7 +131,7 @@ def test_format_prep_zero_ready_rows_no_paste_block_not_ready_rows_still_listed(
 SNAPSHOT = Path(__file__).parent / 'fixtures' / 'prep.snapshot.txt'
 
 
-def test_format_prep_snapshot_of_the_three_blocks():
+async def test_format_prep_snapshot_of_the_three_blocks():
     ready = [
         row('399-C1206X223KDRACTUCT-ND', id='r1', url='https://notion.so/r1', quantity=10, unit_cost=0.434, sanitized_description='CAP CER 0.022UF 1KV X7R 1206', order_batch='Order 1'),
         row('399-C0603C103K5RACTUCT-ND', id='r2', url='https://notion.so/r2', quantity=8, unit_cost=0.16, sanitized_description='CAP CER 10000PF 50V X7R 0603', order_batch='Order 1'),

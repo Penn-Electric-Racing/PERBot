@@ -13,11 +13,12 @@ from benbuys.email import build_requisition_email, render_email
 from benbuys.mailer import create_mailer
 from benbuys.notion import PurchasingNotion
 from benbuys.prep import build_prep, format_prep
+from core import http
 from core.config import config
 from core.log import setup_logging
 
 
-def main(argv: list[str] | None = None) -> None:
+async def main(argv: list[str] | None = None) -> None:
     args = sys.argv[1:] if argv is None else argv
     mode = args[0] if args else 'prep'
     arg = args[1] if len(args) > 1 else None
@@ -26,7 +27,7 @@ def main(argv: list[str] | None = None) -> None:
         raise RuntimeError(f'Unknown or non-live vendor "{arg}".')
 
     if mode == 'prep':
-        selection = PurchasingNotion().select_rows(adapter)
+        selection = await PurchasingNotion().select_rows(adapter)
         prep = build_prep(adapter, selection.ready, selection.not_ready)
         blocks = format_prep(adapter, prep, config.benbuys.approval_threshold)
         print(f'--- BLOCK 1: cart ({len(prep.lines)} lines) ---\n{blocks.cart}\n')
@@ -51,7 +52,7 @@ def main(argv: list[str] | None = None) -> None:
         )
         test = dataclasses.replace(email, to=[arg], subject=f'[TEST — ignore] {email.subject}')
         print(render_email(test))
-        msg_id = mailer.send(test)
+        msg_id = await mailer.send(test)
         print(f"\nSent via {mailer.name}{f' (id {msg_id})' if msg_id else ''}.")
         return
 
@@ -61,7 +62,7 @@ def main(argv: list[str] | None = None) -> None:
 if __name__ == '__main__':
     setup_logging()
     try:
-        main()
+        http.run(main())
     except Exception as err:
         print(err, file=sys.stderr)
         sys.exit(1)

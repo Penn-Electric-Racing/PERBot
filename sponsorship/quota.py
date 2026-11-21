@@ -6,11 +6,12 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Callable
 
-from slack_sdk import WebClient
+from slack_sdk.web.async_client import AsyncWebClient
 
 from core import utils
 from core.config import config
@@ -258,16 +259,16 @@ def _quota_meta(week_end_iso: str) -> MessageMarker:
     return MessageMarker(event_type='sponsor_quota_audit', key='week_end', value=week_end_iso)
 
 def _slack_mention_resolver(
-    client: WebClient, notion_users: list[NotionUser], slack_dir: list[Indexed]
-) -> Callable[[QuotaRosterMember], str | None]:
+    client: AsyncWebClient, notion_users: list[NotionUser], slack_dir: list[Indexed]
+) -> Callable[[QuotaRosterMember], Awaitable[str | None]]:
     """Roster member → Slack mention, via the Notion directory (email first, then name)."""
     by_id = {u.id: u for u in notion_users}
 
-    def resolve(m: QuotaRosterMember) -> str | None:
+    async def resolve(m: QuotaRosterMember) -> str | None:
         user = by_id.get(m.notion_user_id)
         if not user:
             return None
-        slack_id = Slack.wrap(client).notion_user_to_slack_id(user, slack_dir)
+        slack_id = await Slack.wrap(client).notion_user_to_slack_id(user, slack_dir)
         return f'<@{slack_id}>' if slack_id else None
 
     return resolve

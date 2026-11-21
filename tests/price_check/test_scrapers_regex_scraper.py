@@ -11,6 +11,7 @@ from bs4 import BeautifulSoup
 from price_check.scrapers import regex_reader
 from price_check.scrapers import regex_scraper as s
 from price_check.scrapers.ranking import relevance, ship_days
+from tests.aio import awaitable
 
 
 def text_info(text, listing=False):
@@ -124,7 +125,7 @@ def test_ship_days(text, days):
 class FakeResponse:
     def __init__(self, ctype, body=b"<html><h1>Hi</h1></html>", status=200):
         self.status_code, self.headers, self._body = status, {"Content-Type": ctype}, body
-        self.encoding = "utf-8"
+        self.content, self.encoding = body, "utf-8"
 
     def iter_content(self, size):
         for i in range(0, len(self._body), size):
@@ -137,23 +138,23 @@ class FakeResponse:
         return False
 
 
-def test_pdf_results_are_not_parsed(monkeypatch):
-    monkeypatch.setattr(regex_reader.requests, "get", lambda *a, **k: FakeResponse("application/pdf"))
-    r = regex_reader.part_info({"title": "LM7805 datasheet", "url": "https://x.com/lm7805.pdf",
+async def test_pdf_results_are_not_parsed(monkeypatch):
+    monkeypatch.setattr(regex_reader.http, "get", awaitable(lambda *a, **k: FakeResponse("application/pdf")))
+    r = await regex_reader.part_info({"title": "LM7805 datasheet", "url": "https://x.com/lm7805.pdf",
                      "snippet": ""})
     assert "not a web page" in r["fetch_error"]
 
 
-def test_html_is_fetched(monkeypatch):
-    monkeypatch.setattr(regex_reader.requests, "get",
-                        lambda *a, **k: FakeResponse("text/html; charset=utf-8"))
-    assert "<h1>Hi</h1>" in regex_reader._fetch_html("https://x.com/")
+async def test_html_is_fetched(monkeypatch):
+    monkeypatch.setattr(regex_reader.http, "get",
+                        awaitable(lambda *a, **k: FakeResponse("text/html; charset=utf-8")))
+    assert "<h1>Hi</h1>" in await regex_reader._fetch_html("https://x.com/")
 
 
-def test_parse_errors_stay_on_their_page(monkeypatch):
-    monkeypatch.setattr(regex_reader.requests, "get", lambda *a, **k: FakeResponse("text/html"))
+async def test_parse_errors_stay_on_their_page(monkeypatch):
+    monkeypatch.setattr(regex_reader.http, "get", awaitable(lambda *a, **k: FakeResponse("text/html")))
     monkeypatch.setattr(regex_reader, "_from_meta", lambda *a: 1 / 0)
-    r = regex_reader.part_info({"title": "t", "url": "https://x.com/p", "snippet": "$1.00"})
+    r = await regex_reader.part_info({"title": "t", "url": "https://x.com/p", "snippet": "$1.00"})
     assert r["fetch_error"].startswith("parse error")
     assert r["cost"] == 1.0  # snippet fallback still runs
 

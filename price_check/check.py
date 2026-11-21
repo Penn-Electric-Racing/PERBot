@@ -38,6 +38,7 @@ from core.slack import Slack
 from price_check.checker import Checker, PriceFinder
 
 logger = logging.getLogger(__name__)
+from core import http
 from price_check.database import CheckQueue
 from price_check.scrapers import llm_reader
 
@@ -67,24 +68,24 @@ def _row_id(s: str) -> str:
     return pid
 
 
-def main(argv: list[str] | None = None) -> None:
+async def main(argv: list[str] | None = None) -> None:
     a = parser().parse_args(argv)
     cfg = config.price_check
     notion = Notion.shared()
     queue = CheckQueue(notion, cfg)
     if a.enqueue:
         pid = _row_id(a.enqueue)
-        logger.info(f"{pid}: {'queued' if queue.enqueue(pid) else 'already queued'}")
+        logger.info(f"{pid}: {'queued' if await queue.enqueue(pid) else 'already queued'}")
         return
 
     entries: list[tuple[str | None, str]] = []
     if a.queue:
         since = datetime.now(timezone.utc) - timedelta(hours=cfg.lookback_hours)
-        found = queue.queue_new_rows(since, dry_run=a.dry_run) if cfg.lookback_hours > 0 else []
+        found = await queue.queue_new_rows(since, dry_run=a.dry_run) if cfg.lookback_hours > 0 else []
         if found:
             logger.info(f"Price check: {len(found)} new row(s) {'would be ' if a.dry_run else ''}queued.")
         limit = a.limit or cfg.batch
-        entries = list(queue.entries(limit))
+        entries = list(await queue.entries(limit))
         if a.dry_run:  # nothing was written: preview the new rows too
             entries = (entries + [(None, pid) for pid in found])[:limit]
         if not entries:  # nothing to do: don't touch the LLM
@@ -103,14 +104,14 @@ def main(argv: list[str] | None = None) -> None:
     )
     if a.queue:
         logger.info(f'Price check: {len(entries)} queued row(s), {thresholds}')
-        counts = checker.drain(entries)
+        counts = await checker.drain(entries)
     else:
-        rows = [checker.purchasing.get(_row_id(a.row))] if a.row else checker.purchasing.open_rows(a.limit)
+        rows = [await checker.purchasing.get(_row_id(a.row))] if a.row else await checker.purchasing.open_rows(a.limit)
         logger.info(f'Price check: {len(rows)} row(s), {thresholds}')
-        counts = checker.check_all(rows)
+        counts = await checker.check_all(rows)
     logger.info('Price check: ' + ', '.join(f'{n} {k}' for k, n in sorted(counts.items())))
 
 
 if __name__ == '__main__':
     setup_logging()
-    main()
+    http.run(main())

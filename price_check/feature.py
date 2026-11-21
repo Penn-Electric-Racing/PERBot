@@ -9,8 +9,8 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
-import time
 from datetime import datetime, timezone
 
 from core.config import config
@@ -46,28 +46,28 @@ class PriceCheck(Feature):
         self.views = [PriceAlertView(self.purchasing, self.ledger)]
 
     @command('/pricecheck')
-    def stats(self, ack, command, respond) -> None:
-        ack()
+    async def stats(self, ack, command, respond) -> None:
+        await ack()
         q = StatsQuery.parse(command.get('text') or '')
         if q.help:
-            respond(response_type='ephemeral', text=self.USAGE)
+            await respond(response_type='ephemeral', text=self.USAGE)
             return
         if not self.ledger.enabled:
-            respond(response_type='ephemeral', text='The savings ledger is off (PRICE_CHECK_LEDGER_DS_ID is empty).')
+            await respond(response_type='ephemeral', text='The savings ledger is off (PRICE_CHECK_LEDGER_DS_ID is empty).')
             return
         try:
             season = config.benbuys.season
             now = datetime.now(timezone.utc)
-            rows: list[LedgerRow] = [r for r in self.ledger.rows() if r.in_period(q.period, season, now)]
+            rows: list[LedgerRow] = [r for r in await self.ledger.rows() if r.in_period(q.period, season, now)]
             text = Summary.of(rows).text(q.period, season, config.price_check.ledger_url)
-            respond(response_type='in_channel' if q.share else 'ephemeral', text=text, unfurl_links=False)
+            await respond(response_type='in_channel' if q.share else 'ephemeral', text=text, unfurl_links=False)
         except Exception as err:
             logger.error('/pricecheck failed', exc_info=err)
-            respond(response_type='ephemeral', text='✗ Could not read the savings ledger. Try again in a minute.')
+            await respond(response_type='ephemeral', text='✗ Could not read the savings ledger. Try again in a minute.')
 
-    def sweep_once(self) -> int:
+    async def sweep_once(self) -> int:
         try:
-            n = self.ledger.sweep_realized(self.purchasing.price_row)
+            n = await self.ledger.sweep_realized(self.purchasing.price_row)
             if n:
                 logger.info(f'Price check ledger: {n} row(s) now Realized.')
             return n
@@ -76,18 +76,18 @@ class PriceCheck(Feature):
             return 0
 
     @task
-    def sweep(self) -> None:
+    async def sweep(self) -> None:
         if not self.ledger.enabled:
             return
-        time.sleep(self.SWEEP_DELAY_S)
+        await asyncio.sleep(self.SWEEP_DELAY_S)
         while True:
-            self.sweep_once()
-            time.sleep(self.SWEEP_EVERY_S)
+            await self.sweep_once()
+            await asyncio.sleep(self.SWEEP_EVERY_S)
 
     @task
-    def worker(self) -> None:
+    async def worker(self) -> None:
         if not self.run_worker:
             return
         w = Worker.from_config()
         if w:
-            w.run()
+            await w.run()

@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import re
 
-import httpx
+from core import http
 
 logger = logging.getLogger(__name__)
 
@@ -31,16 +31,15 @@ def strip_html(html: str) -> str:
     return re.sub(r'\s+', ' ', s).strip()
 
 
-def fetch_html(url: str) -> str:
+async def fetch_html(url: str) -> str:
     """Raw HTML (or plain text) of `url`, '' on any failure or non-text response."""
     try:
-        res = httpx.get(
+        res = await http.get(
             url,
-            follow_redirects=True,
             headers={'User-Agent': 'PERBot-Sponsorship/1.0 (+https://github.com/Penn-Electric-Racing/PERBot)'},
             timeout=FETCH_TIMEOUT_S,
         )
-        if not res.is_success:
+        if not res.ok:
             return ''
         content_type = res.headers.get('content-type') or ''
         if 'text/html' not in content_type and 'text/plain' not in content_type:
@@ -51,17 +50,17 @@ def fetch_html(url: str) -> str:
         return ''
 
 
-def _fetch_text(url: str) -> str:
-    return strip_html(fetch_html(url))
+async def _fetch_text(url: str) -> str:
+    return strip_html(await fetch_html(url))
 
 
-def fetch_company_text(hostname: str) -> str:
+async def fetch_company_text(hostname: str) -> str:
     """Cleaned homepage text for `hostname`, augmented with /about text when the homepage alone is
     thin. Capped at MAX_TEXT_CHARS."""
     base = f'https://{hostname}'
-    text = _fetch_text(base)
+    text = await _fetch_text(base)
     if len(text) < 600:
-        about = _fetch_text(f'{base}/about')
+        about = await _fetch_text(f'{base}/about')
         if about:
             text = f'{text} {about}'.strip()
     return text[:MAX_TEXT_CHARS]

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import sys
 
-from core import utils
+from core import http, utils
 from core.log import setup_logging
 from sponsorship.discovery import find_matching_prospects, scout_companies
 from sponsorship.notion import SponsorNotion
@@ -16,7 +16,7 @@ from sponsorship.scoring import priority_score, quadrant
 USAGE = 'Usage: python -m sponsorship.discovery_cli find "<need>"  |  … scout "<need>"'
 
 
-def main(argv: list[str]) -> int:
+async def main(argv: list[str]) -> int:
     mode = argv[0] if argv else ''
     need = ' '.join(argv[1:]).strip()
     if mode not in ('find', 'scout') or not need:
@@ -26,9 +26,9 @@ def main(argv: list[str]) -> int:
     notion = SponsorNotion()
 
     if mode == 'find':
-        rows = [r for r in notion.query_rankable_prospects() if r.status == 'Available']
+        rows = [r for r in await notion.query_rankable_prospects() if r.status == 'Available']
         print(f'\nSearching {len(rows)} unclaimed Bank leads for: {need}\n')
-        matches = find_matching_prospects(need, rows)
+        matches = await find_matching_prospects(need, rows)
         if not matches:
             print('No matches.\n')
             return 0
@@ -38,9 +38,9 @@ def main(argv: list[str]) -> int:
         print('')
         return 0
 
-    known = notion.query_all_bank_domains()
+    known = await notion.query_all_bank_domains()
     print(f'\nScouting new companies for: {need} (skipping {len(known)} known domains)\n')
-    result = scout_companies(need, known)
+    result = await scout_companies(need, known)
     if not result.candidates:
         print(f'No candidates survived ({result.rejected_count} rejected by the homepage check).\n')
         return 0
@@ -57,4 +57,4 @@ def main(argv: list[str]) -> int:
 
 if __name__ == '__main__':
     setup_logging()
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(http.run(main(sys.argv[1:])))

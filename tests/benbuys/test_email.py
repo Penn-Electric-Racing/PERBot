@@ -1,12 +1,11 @@
 import base64
-import json
 import re
 
-import httpx
 import pytest
 
 from benbuys.email import build_requisition_email, render_email
 from benbuys.mailer import GmailApiMailer, WebhookMailer, to_rfc822
+from tests.aio import FakeHTTP, response
 from tests.benbuys.helpers import test_adapter
 
 BASE = dict(from_addr='electric@engineering.upenn.edu', cc=['oat@engineering.upenn.edu', 'arjunsh@sas.upenn.edu'], approval_threshold=500)
@@ -56,53 +55,43 @@ def test_render_email_and_to_rfc822_carry_from_to_cc_subject():
     assert re.search(r'\r\n\r\nHi,\r\n\r\nI just placed', raw)
 
 
-def test_gmail_mailer_refreshes_the_token_then_posts_a_base64url_raw_message():
-    calls: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(request)
-        if 'oauth2' in str(request.url):
-            return httpx.Response(200, json={'access_token': 'tok'})
-        return httpx.Response(200, json={'id': 'msg-1'})
-
-    mailer = GmailApiMailer('id', 'sec', 'rt', http=httpx.Client(transport=httpx.MockTransport(handler)))
+async def test_gmail_mailer_refreshes_the_token_then_posts_a_base64url_raw_message():
+    fake = FakeHTTP(lambda call: response(200, {'access_token': 'tok'} if 'oauth2' in call.url else {'id': 'msg-1'}))
+    mailer = GmailApiMailer('id', 'sec', 'rt', request=fake)
     e = email()
-    assert mailer.send(e) == 'msg-1'
+    assert await mailer.send(e) == 'msg-1'
+    calls = fake.calls
     assert len(calls) == 2
-    assert calls[0].content.decode() == 'client_id=id&client_secret=sec&refresh_token=rt&grant_type=refresh_token'
+    assert calls[0].data == {'client_id': 'id', 'client_secret': 'sec', 'refresh_token': 'rt', 'grant_type': 'refresh_token'}
     assert calls[1].headers['Authorization'] == 'Bearer tok'
-    raw = json.loads(calls[1].content)['raw']
+    raw = calls[1].json['raw']
     assert not re.search(r'[+/=]', raw)
     assert base64.urlsafe_b64decode(raw + '=' * (-len(raw) % 4)).decode('utf-8') == to_rfc822(e)
 
 
-def test_gmail_mailer_a_failed_token_refresh_throws_before_any_send():
+async def test_gmail_mailer_a_failed_token_refresh_throws_before_any_send():
     sends = 0
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(call):
         nonlocal sends
-        if 'oauth2' in str(request.url):
-            return httpx.Response(400, json={'error': 'invalid_grant', 'error_description': 'Token has been expired or revoked.'})
+        if 'oauth2' in call.url:
+            return response(400, {'error': 'invalid_grant', 'error_description': 'Token has been expired or revoked.'})
         sends += 1
-        return httpx.Response(200, json={})
+        return response(200, {})
 
-    mailer = GmailApiMailer('id', 'sec', 'rt', http=httpx.Client(transport=httpx.MockTransport(handler)))
+    mailer = GmailApiMailer('id', 'sec', 'rt', request=FakeHTTP(handler))
     with pytest.raises(RuntimeError, match='invalid_grant.*expired or revoked'):
-        mailer.send(email())
+        await mailer.send(email())
     assert sends == 0
 
 
-def test_webhook_mailer_posts_the_flat_json_shape_and_surfaces_non_2xx():
-    seen = []
-
-    def ok(request: httpx.Request) -> httpx.Response:
-        seen.append(json.loads(request.content))
-        return httpx.Response(202)
-
+async def test_webhook_mailer_posts_the_flat_json_shape_and_surfaces_non_2xx():
+    ok = FakeHTTP(lambda call: response(202))
     e = email()
-    WebhookMailer('https://example.test/flow', http=httpx.Client(transport=httpx.MockTransport(ok))).send(e)
+    await WebhookMailer('https://example.test/flow', request=ok).send(e)
+    seen = [c.json for c in ok.calls]
     assert list(seen[0].keys()) == ['from', 'to', 'cc', 'subject', 'body']
     assert seen[0]['cc'] == 'oat@engineering.upenn.edu;arjunsh@sas.upenn.edu'
-    bad = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(500, text='nope')))
+    bad = FakeHTTP(lambda call: response(500, text='nope'))
     with pytest.raises(RuntimeError, match='Email webhook failed: 500 nope'):
-        WebhookMailer('https://example.test/flow', http=bad).send(e)
+        await WebhookMailer('https://example.test/flow', request=bad).send(e)

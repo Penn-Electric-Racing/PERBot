@@ -13,6 +13,7 @@ from price_check.models import Finding
 from price_check.scrapers import llm_reader, regex_reader
 from price_check.scrapers.ranking import Scorer
 from price_check.views import PriceAlert
+from tests.aio import as_coroutine, awaitable
 from tests.price_check.fakes import CFG, DS, FakeNotion, FakeSlack, cfg, page
 
 
@@ -31,28 +32,28 @@ def scored(*rs, query='LM7805CT/NOPB', qty=50):
 
 def checker(notion=None, slack=None, find=None, c=CFG, dry_run=False):
     return pc.Checker(c, notion or FakeNotion(), None if dry_run else (slack or FakeSlack()),
-                         find or (lambda row: scored(listing(row.link, 2.0))), dry_run)
+                         as_coroutine(find or (lambda row: scored(listing(row.link, 2.0)))), dry_run)
 
 
 # ---------------------------------------------------------------- find
 def _find_spy(monkeypatch, link_info):
     calls = []
-    monkeypatch.setattr(llm_reader, 'part_info', lambda r, llm, q: {**r, **link_info})
-    monkeypatch.setattr(llm_reader, 'find', lambda term, qty, llm, read=(), **k:
-                        calls.append((term, [r['url'] for r in read])) or ('', '', []))
+    monkeypatch.setattr(llm_reader, 'part_info', awaitable(lambda r, llm, q: {**r, **link_info}))
+    monkeypatch.setattr(llm_reader, 'find', awaitable(lambda term, qty, llm, read=(), **k:
+                        calls.append((term, [r['url'] for r in read])) or ('', '', [])))
     return pc.PriceFinder(None, CFG), calls
 
 
-def test_find_searches_the_part_number_on_the_link(monkeypatch):
+async def test_find_searches_the_part_number_on_the_link(monkeypatch):
     find, calls = _find_spy(monkeypatch, {'mpn': '91290A115', 'manufacturer': None})
-    find(PurchasingRow.from_page(page(part='M3 socket head screws', link='https://mcmaster.com/x')))
+    await find(PurchasingRow.from_page(page(part='M3 socket head screws', link='https://mcmaster.com/x')))
     assert calls == [('91290A115', ['https://mcmaster.com/x'])]
 
 
-def test_find_falls_back_to_the_row_without_a_part_number_on_the_link(monkeypatch):
+async def test_find_falls_back_to_the_row_without_a_part_number_on_the_link(monkeypatch):
     find, calls = _find_spy(monkeypatch, {'mpn': None, 'fetch_error': 'HTTP 403'})
-    find(PurchasingRow.from_page(page(part='M3 socket head screws', link='https://mcmaster.com/x')))
-    find(PurchasingRow.from_page(page(part='M3 socket head screws', link='')))
+    await find(PurchasingRow.from_page(page(part='M3 socket head screws', link='https://mcmaster.com/x')))
+    await find(PurchasingRow.from_page(page(part='M3 socket head screws', link='')))
     assert calls == [('M3 socket head screws', ['https://mcmaster.com/x']), ('M3 socket head screws', [])]
 
 
@@ -95,11 +96,11 @@ def test_page_id_from_rejects_other_text():
     ({'parent': '00000000-0000-0000-0000-000000000000'}, 'not a Purchasing row'),
     ({'exported': True}, 'already ordered'), ({'season': 'REV11'}, 'season REV11'), ({'season': ''}, 'season empty'),
     ({'cost': 0}, 'missing'), ({'part': ''}, 'missing'), ({'qty': 0}, 'missing')])
-def test_rows_that_are_not_checked(kw, reason):
+async def test_rows_that_are_not_checked(kw, reason):
     row = PurchasingRow.from_page(page(**kw))
     assert reason in PurchasingPrices(FakeNotion(), CFG).skip_reason(row)
     searched = []
-    assert checker(find=searched.append).check(row) == 'skipped' and searched == []
+    assert await checker(find=searched.append).check(row) == 'skipped' and searched == []
 
 
 def test_open_purchasing_row_is_checked():
@@ -107,9 +108,9 @@ def test_open_purchasing_row_is_checked():
     assert PurchasingPrices(FakeNotion(), CFG).skip_reason(PurchasingRow.from_page(page(parent=DS.replace('-', '')))) is None
 
 
-def test_open_rows_query():
+async def test_open_rows_query():
     notion = FakeNotion(rows=[page('a'), page('b')])
-    assert [r.id for r in PurchasingPrices(notion, CFG).open_rows(limit=1)] == ['a']
+    assert [r.id for r in await PurchasingPrices(notion, CFG).open_rows(limit=1)] == ['a']
     ds, f, sorts, page_size = notion.queries[0]
     assert ds == DS and page_size == 1
     assert {'property': 'Exported?', 'checkbox': {'equals': False}} in f['and']
@@ -171,69 +172,69 @@ def test_alert_lists_flags_but_not_estimated_shipping():
 
 
 # ---------------------------------------------------------------- checker
-def test_check_dms_point_of_contact_once():
+async def test_check_dms_point_of_contact_once():
     row = PurchasingRow.from_page(page())
     notion, slack = FakeNotion(), FakeSlack()
     find = lambda row: scored(listing(row.link, 1.40))  # noqa: E731
-    assert checker(notion, slack, find).check(row) == 'alerted'
+    assert await checker(notion, slack, find).check(row) == 'alerted'
     assert notion.created == ['price-alert p1 1 x50']
     assert slack.posts[0][0] == 'S1' and '+40%' in slack.posts[0][1]
-    assert checker(FakeNotion(claimed=notion.created), slack, find).check(row) == 'ok'
+    assert await checker(FakeNotion(claimed=notion.created), slack, find).check(row) == 'ok'
     assert len(slack.posts) == 1
 
 
-def test_new_quantity_can_alert_again():
+async def test_new_quantity_can_alert_again():
     notion = FakeNotion(claimed=['price-alert p1 1 x50'])
-    assert checker(notion).check(PurchasingRow.from_page(page(qty=100))) == 'alerted'
+    assert await checker(notion).check(PurchasingRow.from_page(page(qty=100))) == 'alerted'
     assert notion.created == ['price-alert p1 1 x100']
 
 
-def test_contact_matched_by_name_when_email_differs():
+async def test_contact_matched_by_name_when_email_differs():
     slack = FakeSlack([('S2', 'Alan Turing', None)])
-    checker(slack=slack).check(PurchasingRow.from_page(page(contacts=(('u2', 'Alan Turing', 'alan@other.edu'),))))
+    await checker(slack=slack).check(PurchasingRow.from_page(page(contacts=(('u2', 'Alan Turing', 'alan@other.edu'),))))
     assert [c for c, _ in slack.posts] == ['S2']
 
 
-def test_contact_email_comes_from_the_workspace_users():
+async def test_contact_email_comes_from_the_workspace_users():
     slack = FakeSlack([('S9', 'Someone Else', 'ada@upenn.edu')])
     notion = FakeNotion(users=[{'id': 'u1', 'type': 'person', 'name': 'Ada', 'person': {'email': 'ada@upenn.edu'}}])
-    checker(notion, slack).check(PurchasingRow.from_page(page(contacts=(('u1', 'Ada', None),))))
+    await checker(notion, slack).check(PurchasingRow.from_page(page(contacts=(('u1', 'Ada', None),))))
     assert [c for c, _ in slack.posts] == ['S9']
 
 
-def test_unmatched_contact_falls_back_to_channel():
+async def test_unmatched_contact_falls_back_to_channel():
     slack = FakeSlack()
-    checker(slack=slack, c=cfg(channel='purchasing')).check(PurchasingRow.from_page(page(contacts=(('u9', 'Nobody Known', None),))))
+    await checker(slack=slack, c=cfg(channel='purchasing')).check(PurchasingRow.from_page(page(contacts=(('u9', 'Nobody Known', None),))))
     assert [c for c, _ in slack.posts] == ['purchasing']
 
 
-def test_no_target_and_no_channel_logs_the_alert(caplog):
-    checker().check(PurchasingRow.from_page(page(contacts=())))
+async def test_no_target_and_no_channel_logs_the_alert(caplog):
+    await checker().check(PurchasingRow.from_page(page(contacts=())))
     assert 'alert not sent' in caplog.text
 
 
-def test_dry_run_sends_and_claims_nothing(capsys):
+async def test_dry_run_sends_and_claims_nothing(capsys):
     notion = FakeNotion()
-    assert checker(notion, dry_run=True).check(PurchasingRow.from_page(page())) == 'alerted'
+    assert await checker(notion, dry_run=True).check(PurchasingRow.from_page(page())) == 'alerted'
     assert notion.created == [] and notion.ledger == []
     out = capsys.readouterr().out
     assert 'Price went up' in out
     assert '[View www.digikey.com (your link) ↗ | Use $2.00/unit · www.digikey.com | Keep $1.00/unit]' in out
 
 
-def test_unfindable_part_is_ok_not_retried():
-    assert checker(find=lambda row: []).check(PurchasingRow.from_page(page())) == 'ok'
+async def test_unfindable_part_is_ok_not_retried():
+    assert await checker(find=lambda row: []).check(PurchasingRow.from_page(page())) == 'ok'
 
 
-def test_search_failure_and_llm_outage_mean_retry():
+async def test_search_failure_and_llm_outage_mean_retry():
     def boom(row):
         raise RuntimeError('All backends failed')
-    assert checker(find=boom).check(PurchasingRow.from_page(page())) == 'retry'
+    assert await checker(find=boom).check(PurchasingRow.from_page(page())) == 'retry'
     outage = lambda row: scored(listing(row.link, None, fetch_error='llm: HTTP 429'))  # noqa: E731
-    assert checker(find=outage).check(PurchasingRow.from_page(page())) == 'retry'
+    assert await checker(find=outage).check(PurchasingRow.from_page(page())) == 'retry'
 
 
-def test_sweep_counts_and_stops_on_repeated_outage():
+async def test_sweep_counts_and_stops_on_repeated_outage():
     calls = []
 
     def find(row):
@@ -242,53 +243,53 @@ def test_sweep_counts_and_stops_on_repeated_outage():
             return scored(listing(row.link, 2.0))
         return scored(listing(row.link, None, fetch_error='llm: HTTP 429'))
     rows = [PurchasingRow.from_page(page(f'p{i}')) for i in range(6)]
-    assert checker(find=find).check_all(rows) == {'alerted': 1, 'retry': 3}
+    assert await checker(find=find).check_all(rows) == {'alerted': 1, 'retry': 3}
     assert calls == ['p0', 'p1', 'p2', 'p3']
 
 
-def test_one_failure_does_not_stop_the_sweep():
+async def test_one_failure_does_not_stop_the_sweep():
     def find(row):
         if row.id == 'p0':
             raise RuntimeError('All backends failed')
         return scored(listing(row.link, 1.0))
-    assert checker(find=find).check_all([PurchasingRow.from_page(page(f'p{i}')) for i in range(3)]) == {'retry': 1, 'ok': 2}
+    assert await checker(find=find).check_all([PurchasingRow.from_page(page(f'p{i}')) for i in range(3)]) == {'retry': 1, 'ok': 2}
 
 
-def test_slack_post_failure_does_not_stop_the_run(caplog):
+async def test_slack_post_failure_does_not_stop_the_run(caplog):
     class Down(FakeSlack):
-        def chat_postMessage(self, **kw):
+        async def chat_postMessage(self, **kw):
             raise RuntimeError('not_in_channel')
     notion = FakeNotion()
-    checker(notion, Down()).check(PurchasingRow.from_page(page()))
+    await checker(notion, Down()).check(PurchasingRow.from_page(page()))
     assert 'Slack post to S1 failed' in caplog.text
     assert notion.ledger == []  # not sent, so not logged
 
 
-def test_alert_dm_carries_the_buttons():
+async def test_alert_dm_carries_the_buttons():
     slack = FakeSlack()
-    checker(slack=slack).check(PurchasingRow.from_page(page()))
+    await checker(slack=slack).check(PurchasingRow.from_page(page()))
     section, links, actions = slack.blocks[0]
     assert section['text']['text'] == slack.posts[0][1]
     assert links['block_id'] == 'price_swap_links' and actions['block_id'] == 'price_swap_actions'
 
 
 # ---------------------------------------------------------------- queue (Job Log)
-def test_enqueue_claims_the_queue_key():
+async def test_enqueue_claims_the_queue_key():
     notion = FakeNotion()
-    assert CheckQueue(notion, CFG).enqueue('p1') is True and notion.created == ['price-check-queue p1']
-    assert CheckQueue(notion, CFG).enqueue('p1') is False
+    assert await CheckQueue(notion, CFG).enqueue('p1') is True and notion.created == ['price-check-queue p1']
+    assert await CheckQueue(notion, CFG).enqueue('p1') is False
 
 
-def test_queued_reads_entries_oldest_first():
+async def test_queued_reads_entries_oldest_first():
     notion = FakeNotion(entries=[('e1', 'price-check-queue p1'), ('e2', 'price-check-queue  p2 '),
                                  ('e3', 'price-alert p1 1 x50')])
-    assert CheckQueue(notion, CFG).entries(limit=10) == [('e1', 'p1'), ('e2', 'p2')]
+    assert await CheckQueue(notion, CFG).entries(limit=10) == [('e1', 'p1'), ('e2', 'p2')]
     ds, f, sorts, _ = notion.queries[0]
     assert ds == 'joblog-ds' and f == {'property': 'Job', 'rich_text': {'equals': 'price-check-queue'}}
     assert sorts == [{'property': 'Ran at', 'direction': 'ascending'}]
 
 
-def test_queue_new_rows_once_and_only_settled():
+async def test_queue_new_rows_once_and_only_settled():
     notion = FakeNotion(rows=[page('new1', edited='2026-11-21T11:00:00.000Z'),
                               page('new2', edited='2026-11-21T11:00:00.000Z'),
                               page('busy', edited='2026-11-21T11:59:00.000Z'),
@@ -296,52 +297,52 @@ def test_queue_new_rows_once_and_only_settled():
                         claimed=['price-check-queue new2'])
     since = datetime(2026, 11, 20, tzinfo=timezone.utc)
     settled = datetime(2026, 11, 21, 11, 30, tzinfo=timezone.utc)
-    assert CheckQueue(notion, CFG).queue_new_rows(since, settled) == ['new1']
+    assert await CheckQueue(notion, CFG).queue_new_rows(since, settled) == ['new1']
     assert notion.created == ['price-check-queue new1']
     _, f, sorts, _ = notion.queries[0]
     assert {'timestamp': 'last_edited_time', 'last_edited_time': {'on_or_after': '2026-11-20T00:00:00.000Z'}} in f['and']
     assert sorts == [{'timestamp': 'last_edited_time', 'direction': 'ascending'}]
     dry = FakeNotion(rows=[page('new1')])
-    assert CheckQueue(dry, CFG).queue_new_rows(since, dry_run=True) == ['new1'] and dry.created == []
+    assert await CheckQueue(dry, CFG).queue_new_rows(since, dry_run=True) == ['new1'] and dry.created == []
 
 
-def test_drain_marks_finished_entries_done():
+async def test_drain_marks_finished_entries_done():
     notion = FakeNotion(pages={'p1': page('p1'), 'p2': page('p2', exported=True)})
-    assert checker(notion).drain([('e1', 'p1'), ('e2', 'p2'), ('e3', 'gone')]) == {'alerted': 1, 'skipped': 1, 'gone': 1}
+    assert await checker(notion).drain([('e1', 'p1'), ('e2', 'p2'), ('e3', 'gone')]) == {'alerted': 1, 'skipped': 1, 'gone': 1}
     assert notion.done == ['e1', 'e2', 'e3']
 
 
-def test_drain_preview_entries_are_not_marked():
+async def test_drain_preview_entries_are_not_marked():
     notion = FakeNotion(pages={'p1': page('p1')})
-    assert checker(notion).drain([(None, 'p1')]) == {'alerted': 1} and notion.done == []
+    assert await checker(notion).drain([(None, 'p1')]) == {'alerted': 1} and notion.done == []
 
 
-def test_drain_keeps_failures_queued_and_stops_on_outage():
+async def test_drain_keeps_failures_queued_and_stops_on_outage():
     notion = FakeNotion(pages={f'p{i}': page(f'p{i}') for i in range(5)})
     outage = lambda row: scored(listing(row.link, None, fetch_error='llm: HTTP 429'))  # noqa: E731
-    assert checker(notion, find=outage).drain([(f'e{i}', f'p{i}') for i in range(5)]) == {'retry': 3}
+    assert await checker(notion, find=outage).drain([(f'e{i}', f'p{i}') for i in range(5)]) == {'retry': 3}
     assert notion.done == []
 
 
-def test_drain_unreadable_page_is_retried():
+async def test_drain_unreadable_page_is_retried():
     notion = FakeNotion(pages={'p1': NotionAPIError(502, '', 'bad gateway'), 'p2': page('p2')})
-    assert checker(notion).drain([('e1', 'p1'), ('e2', 'p2')]) == {'retry': 1, 'alerted': 1}
+    assert await checker(notion).drain([('e1', 'p1'), ('e2', 'p2')]) == {'retry': 1, 'alerted': 1}
     assert notion.done == ['e2']
 
 
-def test_drain_dry_run_leaves_the_queue():
+async def test_drain_dry_run_leaves_the_queue():
     notion = FakeNotion(pages={'p1': page('p1')})
-    checker(notion, dry_run=True).drain([('e1', 'p1')])
+    await checker(notion, dry_run=True).drain([('e1', 'p1')])
     assert notion.done == [] and notion.created == []
 
 
-def test_mark_done_failure_does_not_stop_the_queue(caplog):
+async def test_mark_done_failure_does_not_stop_the_queue(caplog):
     notion = FakeNotion(pages={'p1': page('p1'), 'p2': page('p2')})
 
     def update(page_id, properties):
         raise NotionAPIError(409, 'conflict_error', 'conflict')
     notion.pages.update = update
-    assert checker(notion).drain([('e1', 'p1'), ('e2', 'p2')]) == {'alerted': 2}
+    assert await checker(notion).drain([('e1', 'p1'), ('e2', 'p2')]) == {'alerted': 2}
     assert caplog.text.count("couldn't mark queue entry") == 2
 
 
@@ -438,10 +439,10 @@ def test_use_asks_for_a_check_first():
 
 
 # ---------------------------------------------------------------- savings ledger
-def test_alert_is_logged_to_the_ledger_once_sent():
+async def test_alert_is_logged_to_the_ledger_once_sent():
     notion, slack = FakeNotion(), FakeSlack()
     find = lambda r: scored(listing(r.link, 1.30), listing('https://shop.com/p', 0.80))  # noqa: E731
-    assert checker(notion, slack, find).check(PurchasingRow.from_page(page(cost=1.00))) == 'alerted'
+    assert await checker(notion, slack, find).check(PurchasingRow.from_page(page(cost=1.00))) == 'alerted'
     (props,) = notion.ledger
     assert props['Outcome']['select']['name'] == 'Pending'
     assert props['Name']['title'][0]['text']['content'] == '5V regulator ×50'
@@ -468,13 +469,13 @@ def test_price_rise_is_logged_as_a_rise():
     assert 'Listing' in props
 
 
-def test_nothing_logged_when_ledger_off():
+async def test_nothing_logged_when_ledger_off():
     notion = FakeNotion()
-    checker(notion, c=cfg(ledger_data_source_id='')).check(PurchasingRow.from_page(page()))
+    await checker(notion, c=cfg(ledger_data_source_id='')).check(PurchasingRow.from_page(page()))
     assert notion.ledger == []
 
 
-def test_ledger_failure_does_not_stop_the_alert(caplog):
+async def test_ledger_failure_does_not_stop_the_alert(caplog):
     notion, slack = FakeNotion(), FakeSlack()
     create = notion.pages.create
 
@@ -483,5 +484,5 @@ def test_ledger_failure_does_not_stop_the_alert(caplog):
             raise NotionAPIError(404, 'object_not_found', 'no ledger')
         return create(parent, properties)
     notion.pages.create = no_ledger
-    assert checker(notion, slack).check(PurchasingRow.from_page(page())) == 'alerted'
+    assert await checker(notion, slack).check(PurchasingRow.from_page(page())) == 'alerted'
     assert slack.posts and "couldn't log the alert" in caplog.text

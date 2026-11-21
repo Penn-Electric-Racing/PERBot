@@ -7,19 +7,19 @@ from __future__ import annotations
 
 import sys
 
-from core import utils
+from core import http, utils
 from core.log import setup_logging
 from sponsorship.enrich_company import DomainResolutionError, enrich_company
 
 
-def main(argv: list[str]) -> int:
+async def main(argv: list[str]) -> int:
     text = ' '.join(argv).strip()
     if not text:
         print('Usage: python -m sponsorship.enrich_cli "<company or url>"', file=sys.stderr)
         return 1
 
     try:
-        result = enrich_company(text)
+        result = await enrich_company(text)
     except DomainResolutionError as err:
         print(f'\n✗  {err}\n', file=sys.stderr)
         return 1
@@ -70,4 +70,4 @@ def main(argv: list[str]) -> int:
 
 if __name__ == '__main__':
     setup_logging()
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(http.run(main(sys.argv[1:])))

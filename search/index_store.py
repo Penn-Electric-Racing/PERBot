@@ -12,7 +12,6 @@ import itertools
 import json
 import logging
 import os
-import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -62,14 +61,12 @@ def set_loaded_index(loaded: LoadedIndex | None) -> None:
 
 
 _temp_counter = itertools.count(1)
-_temp_lock = threading.Lock()
 
 
 def _write_json_atomic(file_path: str, value: Any) -> None:
     """Unique temp name per call so concurrent writers (status updates) never race on one file."""
     Path(file_path).parent.mkdir(parents=True, exist_ok=True)
-    with _temp_lock:
-        n = next(_temp_counter)
+    n = next(_temp_counter)
     temp_path = f'{file_path}.{os.getpid()}.{n}.tmp'
     with open(temp_path, 'w', encoding='utf-8') as f:
         json.dump(value, f, ensure_ascii=False, separators=(',', ':'))

@@ -5,8 +5,8 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
 
-from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
+from slack_sdk.web.async_client import AsyncWebClient
 
 from core.slack import Slack
 from meeting_notes.config import KICKOFF_SIGNATURE, SLACK_WORKSPACE_SUBDOMAIN
@@ -18,7 +18,7 @@ __all__ = [
 
 
 @lru_cache(maxsize=1)
-def _slack() -> WebClient:
+def _slack() -> AsyncWebClient:
     return Slack.shared()
 
 
@@ -31,14 +31,14 @@ def _log_slack_error(prefix: str, err: Exception) -> None:
         print(f'{prefix}', json.dumps(err.response.data, indent=2))
 
 
-def get_channel_id(channel_name: str) -> str:
+async def get_channel_id(channel_name: str) -> str:
     if channel_name in _channel_id_cache:
         return _channel_id_cache[channel_name]
     # Paginate through channels (Slack returns up to 1000 at a time)
     cursor: str | None = None
     while True:
         try:
-            result: Any = _slack().conversations_list(types='public_channel,private_channel', limit=1000, cursor=cursor)
+            result: Any = await _slack().conversations_list(types='public_channel,private_channel', limit=1000, cursor=cursor)
         except Exception as err:
             _log_slack_error('Slack error in conversations.list:', err)
             raise
@@ -52,10 +52,10 @@ def get_channel_id(channel_name: str) -> str:
     raise RuntimeError(f'Slack channel #{channel_name} not found (is the bot invited?)')
 
 
-def post_kickoff_message(channel_name: str, text: str) -> str:
-    channel_id = get_channel_id(channel_name)
+async def post_kickoff_message(channel_name: str, text: str) -> str:
+    channel_id = await get_channel_id(channel_name)
     try:
-        result: Any = _slack().chat_postMessage(channel=channel_id, text=text, mrkdwn=True)
+        result: Any = await _slack().chat_postMessage(channel=channel_id, text=text, mrkdwn=True)
     except Exception as err:
         _log_slack_error(f'Slack error details for #{channel_name}:', err)
         raise
@@ -64,16 +64,16 @@ def post_kickoff_message(channel_name: str, text: str) -> str:
     return result['ts']
 
 
-def find_most_recent_bot_thread(channel_name: str, since_unix_seconds: int) -> str | None:
+async def find_most_recent_bot_thread(channel_name: str, since_unix_seconds: int) -> str | None:
     """Find the most recent kickoff message posted by THIS bot in the given channel since the
     supplied unix timestamp. Returns the message ts (thread root) or None."""
-    channel_id = get_channel_id(channel_name)
-    bot_user_id = _slack().auth_test().get('user_id')
+    channel_id = await get_channel_id(channel_name)
+    bot_user_id = (await _slack().auth_test()).get('user_id')
     since = datetime.fromtimestamp(since_unix_seconds, tz=timezone.utc).isoformat()
     print(f'[{channel_name}] Bot user ID: {bot_user_id}, searching since {since}')
 
     try:
-        result: Any = _slack().conversations_history(channel=channel_id, oldest=str(since_unix_seconds), limit=100)
+        result: Any = await _slack().conversations_history(channel=channel_id, oldest=str(since_unix_seconds), limit=100)
     except Exception as err:
         _log_slack_error(f'[{channel_name}] Slack error in conversations.history:', err)
         raise
@@ -95,10 +95,10 @@ def find_most_recent_bot_thread(channel_name: str, since_unix_seconds: int) -> s
     return bot_messages[0].get('ts') if bot_messages else None
 
 
-def get_thread_replies(channel_name: str, thread_ts: str) -> list[dict[str, Any]]:
-    channel_id = get_channel_id(channel_name)
+async def get_thread_replies(channel_name: str, thread_ts: str) -> list[dict[str, Any]]:
+    channel_id = await get_channel_id(channel_name)
     try:
-        result: Any = _slack().conversations_replies(channel=channel_id, ts=thread_ts, limit=200)
+        result: Any = await _slack().conversations_replies(channel=channel_id, ts=thread_ts, limit=200)
     except Exception as err:
         _log_slack_error(f'[{channel_name}] Slack error in conversations.replies:', err)
         raise
@@ -115,13 +115,13 @@ def get_message_permalink(channel_id: str, ts: str) -> str:
 _user_name_cache: dict[str, str] = {}
 
 
-def get_user_display_name(user_id: str) -> str:
+async def get_user_display_name(user_id: str) -> str:
     """Resolve user IDs to display names so the LLM sees "[Alan] busbar replaced" instead of
     "[U07A9C3D2] busbar replaced". Cached per run."""
     if user_id in _user_name_cache:
         return _user_name_cache[user_id]
     try:
-        user = _slack().users_info(user=user_id).get('user') or {}
+        user = (await _slack().users_info(user=user_id)).get('user') or {}
         profile = user.get('profile') or {}
         name = profile.get('display_name') or profile.get('real_name') or user.get('name') or user_id
         _user_name_cache[user_id] = name

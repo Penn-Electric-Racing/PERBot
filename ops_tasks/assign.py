@@ -17,6 +17,7 @@ Both post the public confirmation as a reply IN that thread.
 """
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import re
@@ -25,7 +26,7 @@ from datetime import date
 from functools import lru_cache
 from typing import Any
 
-from slack_sdk import WebClient
+from slack_sdk.web.async_client import AsyncWebClient
 
 from core import utils
 from core.notion import Notion
@@ -143,8 +144,8 @@ def _short_date(iso: str) -> str:
     return f"{d.strftime('%a')}, {d.month}/{d.day}"
 
 
-def create_and_announce(
-    client: WebClient,
+async def create_and_announce(
+    client: AsyncWebClient,
     assigner_slack_id: str,
     assignee_slack_ids: list[str],
     owner_notion_ids: list[str],
@@ -158,19 +159,19 @@ def create_and_announce(
     # unlinked and the Sunday digest links it once the page exists.
     meeting_id: str | None = None
     try:
-        meeting = notion.meeting_for_date(utils.today_iso())
+        meeting = await notion.meeting_for_date(utils.today_iso())
         meeting_id = meeting.id if meeting else None
         if not meeting_id:
             logger.warning(f'/assign: no Ops Meetings page for the week of {utils.today_iso()} yet — creating "{task_title}" unlinked.')
     except Exception as err:
         logger.warning('/assign: meeting lookup failed — creating the task unlinked.', exc_info=err)
-    task = notion.create_task(task_title, owner_notion_ids, due_iso, meeting_id)
+    task = await notion.create_task(task_title, owner_notion_ids, due_iso, meeting_id)
     who = ', '.join(f'<@{i}>' for i in assignee_slack_ids)
     due_part = f' · due {_short_date(task.due)}' if task.due else ''
     public_text = f':pushpin: <@{assigner_slack_id}> assigned {who}: *{task.title}*{due_part} · <{task.url}|Open in Notion>'
     for assignee in assignee_slack_ids:
         try:
-            client.chat_postMessage(
+            await client.chat_postMessage(
                 channel=assignee,
                 text=f'<@{assigner_slack_id}> assigned you: {task_line(task)}',
                 blocks=assignment_dm_blocks(task, assigner_slack_id, assignee),
@@ -181,9 +182,9 @@ def create_and_announce(
     return task, public_text
 
 
-def resolve_owners(client: WebClient, slack_ids: list[str], handles: list[str]) -> tuple[list[str], list[str], list[str]]:
+async def resolve_owners(client: AsyncWebClient, slack_ids: list[str], handles: list[str]) -> tuple[list[str], list[str], list[str]]:
     """Resolve Slack mentions/handles → Notion owners; returns Slack ids alongside for the DMs."""
-    notion_ids, labels, unresolved = Slack.wrap(client).resolve_people(slack_ids, handles, lambda: Notion.list_users(_notion().client))
+    notion_ids, labels, unresolved = await Slack.wrap(client).resolve_people(slack_ids, handles, functools.partial(Notion.list_users, _notion().client))
     # labels are `<@U…>` for every resolved person, in the same order as notion_ids.
     resolved_slack_ids = [re.sub(r'^<@|>$', '', label) for label in labels]
     return notion_ids, resolved_slack_ids, unresolved
@@ -242,33 +243,33 @@ def task_from_message(text: str) -> str:
     return re.sub(r'\s+', ' ', MENTION_RE.sub('', unwrap_links(text))).strip()[:200]
 
 
-def assign_from_mention(client: WebClient, text: str, user_id: str, channel: str, thread_ts: str | None = None) -> None:
+async def assign_from_mention(client: AsyncWebClient, text: str, user_id: str, channel: str, thread_ts: str | None = None) -> None:
     """`@PERBot assign @person <task> [by <date>]` — the in-thread text path (app_mention).
     `text` must already have the bot's own mention removed but OTHER mentions intact. There's no
     trigger_id on an event, so missing info gets a usage reply in the thread instead of the form."""
     body = re.sub(r'^\s*assign\b[:,]?\s*', '', text, flags=re.I)
     parsed = parse_assign(body)
 
-    def reply(t: str) -> None:
+    async def reply(t: str) -> None:
         kwargs: dict[str, Any] = {'channel': channel, 'text': t, 'unfurl_links': False}
         if thread_ts:
             kwargs['thread_ts'] = thread_ts
-        client.chat_postMessage(**kwargs)
+        await client.chat_postMessage(**kwargs)
 
     if not parsed.task or (not parsed.slack_ids and not parsed.handles and not parsed.self):
         usage = USAGE.replace('Usage: `/assign', 'Usage: `@PERBot assign').replace(
             ' Plain `/assign` opens a form.',
             ' (Slash commands don’t work in threads — the ··· menu → *Assign as Ops task* opens the form.)',
         )
-        reply(f'<@{user_id}> {usage}')
+        await reply(f'<@{user_id}> {usage}')
         return
     try:
         slack_ids = dedupe([user_id, *parsed.slack_ids]) if parsed.self else parsed.slack_ids
-        notion_ids, resolved_slack_ids, unresolved = resolve_owners(client, slack_ids, parsed.handles)
+        notion_ids, resolved_slack_ids, unresolved = await resolve_owners(client, slack_ids, parsed.handles)
         if not notion_ids:
-            reply(f"<@{user_id}> I couldn't match {', '.join(unresolved) or 'that person'} to a Notion account — nothing assigned.")
+            await reply(f"<@{user_id}> I couldn't match {', '.join(unresolved) or 'that person'} to a Notion account — nothing assigned.")
             return
-        _, public_text = create_and_announce(
+        _, public_text = await create_and_announce(
             client, user_id, resolved_slack_ids, notion_ids, parsed.task, parsed.due_iso or next_saturday_iso()
         )
         notes: list[str] = []
@@ -276,7 +277,7 @@ def assign_from_mention(client: WebClient, text: str, user_id: str, channel: str
             notes.append(f"(couldn't match {', '.join(unresolved)} — not added)")
         if parsed.bad_date:
             notes.append(f'(didn\'t understand "{parsed.bad_date}" — used next Saturday)')
-        reply(f"{public_text}\n_{' '.join(notes)}_" if notes else public_text)
+        await reply(f"{public_text}\n_{' '.join(notes)}_" if notes else public_text)
     except Exception as err:
         logger.error('assign-from-mention failed', exc_info=err)
-        reply(f'<@{user_id}> ✗ Something went wrong creating that task. Check the PERBot logs.')
+        await reply(f'<@{user_id}> ✗ Something went wrong creating that task. Check the PERBot logs.')

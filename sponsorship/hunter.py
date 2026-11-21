@@ -13,8 +13,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
-
+from core import http
 from core.config import config
 from sponsorship.models import HunterContact
 
@@ -44,10 +43,10 @@ def _role_rank(position: str | None) -> int:
     return next((i for i, rx in enumerate(ROLE_PRIORITY) if rx.search(position)), len(ROLE_PRIORITY))
 
 
-def _hunter_get(path: str, params: dict[str, str]) -> Any | None:
+async def _hunter_get(path: str, params: dict[str, str]) -> Any | None:
     try:
-        res = httpx.get(f'{HUNTER_BASE}/{path}', params={**params, 'api_key': config.hunter.api_key}, timeout=HUNTER_TIMEOUT_S)
-        if not res.is_success:
+        res = await http.get(f'{HUNTER_BASE}/{path}', params={**params, 'api_key': config.hunter.api_key}, timeout=HUNTER_TIMEOUT_S)
+        if not res.ok:
             logger.warning(f'Hunter {path} returned {res.status_code}: {res.text}')
             return None
         return res.json()
@@ -63,13 +62,13 @@ class _DomainSearch:
     emails: list[dict[str, Any]]
 
 
-def _domain_search(domain: str | None = None, company: str | None = None) -> _DomainSearch:
+async def _domain_search(domain: str | None = None, company: str | None = None) -> _DomainSearch:
     query = {'limit': '10'}
     if domain:
         query['domain'] = domain
     if company:
         query['company'] = company
-    data = ((_hunter_get('domain-search', query) or {}).get('data')) or {}
+    data = ((await _hunter_get('domain-search', query) or {}).get('data')) or {}
     return _DomainSearch(
         domain=data['domain'] if isinstance(data.get('domain'), str) else None,
         organization=data['organization'] if isinstance(data.get('organization'), str) else None,
@@ -84,9 +83,9 @@ def _pick_best_email(emails: list[dict[str, Any]]) -> dict[str, Any] | None:
     return sorted(with_email, key=lambda e: (_role_rank(e.get('position')), -(e.get('confidence') or 0)))[0]
 
 
-def _verify_email(email: str) -> tuple[str, float] | None:
+async def _verify_email(email: str) -> tuple[str, float] | None:
     """Best-effort deliverability verification of the chosen email. None on any failure."""
-    data = (_hunter_get('email-verifier', {'email': email}) or {}).get('data')
+    data = (await _hunter_get('email-verifier', {'email': email}) or {}).get('data')
     if not data:
         return None
     return (
@@ -95,10 +94,10 @@ def _verify_email(email: str) -> tuple[str, float] | None:
     )
 
 
-def _build_contact(best: dict[str, Any] | None) -> HunterContact | None:
+async def _build_contact(best: dict[str, Any] | None) -> HunterContact | None:
     if not best:
         return None
-    verification = _verify_email(best['value'])
+    verification = await _verify_email(best['value'])
     name = ' '.join(x for x in (best.get('first_name'), best.get('last_name')) if x).strip()
     fallback_status = ((best.get('verification') or {}).get('status')) or 'unverified'
     return HunterContact(
@@ -109,12 +108,12 @@ def _build_contact(best: dict[str, Any] | None) -> HunterContact | None:
     )
 
 
-def find_contact_by_domain(hostname: str) -> HunterContact | None:
+async def find_contact_by_domain(hostname: str) -> HunterContact | None:
     """Find the best contact for a known domain."""
     if not config.has_hunter:
         logger.warning('HUNTER_API_KEY not set — skipping contact enrichment.')
         return None
-    return _build_contact(_pick_best_email(_domain_search(domain=hostname).emails))
+    return await _build_contact(_pick_best_email((await _domain_search(domain=hostname)).emails))
 
 
 @dataclass
@@ -124,11 +123,11 @@ class CompanyLookup:
     contact: HunterContact | None
 
 
-def resolve_by_company(name: str) -> CompanyLookup:
+async def resolve_by_company(name: str) -> CompanyLookup:
     """Resolve a bare company name → domain via Hunter, and return the best contact from the same
     call. Used when `/sponsor add` is given a name rather than a URL."""
     if not config.has_hunter:
         logger.warning('HUNTER_API_KEY not set — cannot resolve a company name to a domain.')
         return CompanyLookup(None, None, None)
-    result = _domain_search(company=name)
-    return CompanyLookup(result.domain, result.organization, _build_contact(_pick_best_email(result.emails)))
+    result = await _domain_search(company=name)
+    return CompanyLookup(result.domain, result.organization, await _build_contact(_pick_best_email(result.emails)))

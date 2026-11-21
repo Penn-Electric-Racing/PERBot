@@ -6,6 +6,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from core import http
 from core.log import setup_logging
 from meeting_notes.config import SUBSYSTEMS
 from meeting_notes.notion_writer import (
@@ -30,7 +31,7 @@ from meeting_notes.time_check import assert_expected_et_hour_range
 ET = ZoneInfo('America/New_York')
 
 
-def main() -> None:
+async def main() -> None:
     # Accept any Wednesday run between 11am-1pm ET (target is 12pm, but cron is flaky).
     assert_expected_et_hour_range(11, 13)
 
@@ -42,7 +43,7 @@ def main() -> None:
     )
 
     # Idempotency: if a meeting page for this date already exists, don't create another one
-    existing = find_existing_meeting_page_for_today(note_date)
+    existing = await find_existing_meeting_page_for_today(note_date)
     if existing:
         print(f'⊘ Meeting page for today already exists, skipping generation: {existing}')
         return
@@ -54,23 +55,23 @@ def main() -> None:
     for sub in SUBSYSTEMS:
         print(f'\n--- Processing {sub.name} (#{sub.slack_channel}) ---')
         try:
-            contents.append(_process_subsystem(sub.name, sub.slack_channel, since_unix))
+            contents.append(await _process_subsystem(sub.name, sub.slack_channel, since_unix))
         except Exception as err:
             print(f'Failed to process {sub.name}: {err}', file=sys.stderr)
             contents.append(SubsystemContent(sub.name, EMPTY_UPDATE, None, 0))
 
-    url = create_meeting_notes_page(note_date, contents)
+    url = await create_meeting_notes_page(note_date, contents)
     print(f'\n✓ Meeting notes created: {url}')
 
 
-def _process_subsystem(name: str, channel_name: str, since_unix: int) -> SubsystemContent:
-    channel_id = get_channel_id(channel_name)
-    thread_ts = find_most_recent_bot_thread(channel_name, since_unix)
+async def _process_subsystem(name: str, channel_name: str, since_unix: int) -> SubsystemContent:
+    channel_id = await get_channel_id(channel_name)
+    thread_ts = await find_most_recent_bot_thread(channel_name, since_unix)
     if not thread_ts:
         print(f'No kickoff thread found in #{channel_name} since Monday', file=sys.stderr)
         return SubsystemContent(name, EMPTY_UPDATE, None, 0)
 
-    replies = get_thread_replies(channel_name, thread_ts)
+    replies = await get_thread_replies(channel_name, thread_ts)
     thread_link = get_message_permalink(channel_id, thread_ts)
     if not replies:
         print(f'Kickoff thread exists in #{channel_name} but no one replied')
@@ -79,7 +80,7 @@ def _process_subsystem(name: str, channel_name: str, since_unix: int) -> Subsyst
     processed: list[ProcessedMessage] = []
     total_images = 0
     for m in replies:
-        author = get_user_display_name(m['user']) if m.get('user') else 'unknown'
+        author = await get_user_display_name(m['user']) if m.get('user') else 'unknown'
         text = (m.get('text') or '').strip()
         image_count = sum(1 for f in m.get('files') or [] if (f.get('mimetype') or '').startswith('image/'))
         total_images += image_count
@@ -88,7 +89,7 @@ def _process_subsystem(name: str, channel_name: str, since_unix: int) -> Subsyst
             processed.append(ProcessedMessage(author, text, image_count, permalink))
 
     print(f'Found {len(replies)} replies, {total_images} images. Parsing...')
-    updates = parse_subsystem_updates(name, processed) if processed else EMPTY_UPDATE
+    updates = await parse_subsystem_updates(name, processed) if processed else EMPTY_UPDATE
     return SubsystemContent(name, updates, thread_link, total_images)
 
 
@@ -104,7 +105,7 @@ def _monday_midnight_et_unix() -> int:
 if __name__ == '__main__':
     setup_logging()
     try:
-        main()
+        http.run(main())
     except Exception as err:
         print(f'Generate notes job crashed: {err}', file=sys.stderr)
         sys.exit(1)

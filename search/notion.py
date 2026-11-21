@@ -112,11 +112,11 @@ class NotionService:
     _block_parent_cache: dict[str, dict[str, Any] | None] = field(default_factory=dict)
     _ancestor_cache: dict[str, list[str]] = field(default_factory=dict)
 
-    def list_all_shared_pages(self) -> list[RawNotionPage]:
+    async def list_all_shared_pages(self) -> list[RawNotionPage]:
         pages: list[RawNotionPage] = []
         cursor: str | None = None
         while True:
-            response = self.client.search(
+            response = await self.client.search(
                 filter={'property': 'object', 'value': 'page'}, page_size=100, start_cursor=cursor
             )
             for item in response.get('results') or []:
@@ -140,42 +140,42 @@ class NotionService:
         logger.info(f'Discovered {len(pages)} shared Notion pages.')
         return pages
 
-    def get_page_markdown(self, page_id: str) -> str:
-        data = self.client.pages.markdown(page_id)
+    async def get_page_markdown(self, page_id: str) -> str:
+        data = await self.client.pages.markdown(page_id)
         markdown = data.get('markdown') if isinstance(data.get('markdown'), str) else ''
         if data.get('truncated'):
             logger.warning(f'Markdown for page {page_id} was truncated. Results may be incomplete.')
         return markdown
 
-    def _get_database(self, database_id: str) -> _DbInfo | None:
+    async def _get_database(self, database_id: str) -> _DbInfo | None:
         key = norm_id(database_id)
         if key in self._db_cache:
             return self._db_cache[key]
         result: _DbInfo | None = None
         try:
-            db = self.client.databases.retrieve(database_id)
+            db = await self.client.databases.retrieve(database_id)
             result = _DbInfo(title=rich_text(db.get('title')) or '(database)', parent=db.get('parent'))
-            sleep(120)
+            await sleep(120)
         except Exception as err:
             logger.warning(f'Could not retrieve database {database_id} for breadcrumbs: {err}')
         self._db_cache[key] = result
         return result
 
-    def _get_block_parent(self, block_id: str) -> dict[str, Any] | None:
+    async def _get_block_parent(self, block_id: str) -> dict[str, Any] | None:
         key = norm_id(block_id)
         if key in self._block_parent_cache:
             return self._block_parent_cache[key]
         parent = None
         try:
-            block = self.client.blocks.retrieve(block_id)
+            block = await self.client.blocks.retrieve(block_id)
             parent = block.get('parent')
-            sleep(120)
+            await sleep(120)
         except Exception as err:
             logger.warning(f'Could not retrieve block {block_id} for breadcrumbs: {err}')
         self._block_parent_cache[key] = parent
         return parent
 
-    def ancestors_of(self, parent: dict[str, Any] | None, pages_by_id: dict[str, RawNotionPage], depth: int = 0) -> list[str]:
+    async def ancestors_of(self, parent: dict[str, Any] | None, pages_by_id: dict[str, RawNotionPage], depth: int = 0) -> list[str]:
         """Titles of everything above `parent`, top-down. Page parents resolve from the pages we
         already listed (no API call); database and block parents cost one cached request each.
         Stops silently where the integration cannot see further up."""
@@ -190,25 +190,25 @@ class NotionService:
             p = pages_by_id.get(key)
             if not p:
                 return []
-            chain = [*self.ancestors_of(p.parent, pages_by_id, depth + 1), p.title]
+            chain = [*await self.ancestors_of(p.parent, pages_by_id, depth + 1), p.title]
             self._ancestor_cache[key] = chain
             return chain
         if kind in ('data_source_id', 'database_id'):
             db_id = parent.get('database_id') or parent.get('data_source_id')
-            db = self._get_database(db_id)
+            db = await self._get_database(db_id)
             if not db:
                 return []
-            return [*self.ancestors_of(db.parent, pages_by_id, depth + 1), db.title]
+            return [*await self.ancestors_of(db.parent, pages_by_id, depth + 1), db.title]
         if kind == 'block_id':
-            return self.ancestors_of(self._get_block_parent(parent['block_id']), pages_by_id, depth + 1)
+            return await self.ancestors_of(await self._get_block_parent(parent['block_id']), pages_by_id, depth + 1)
         return []
 
-    def build_indexable_documents(self, cache: BuildCache) -> tuple[list[SourceDocument], dict[str, CachedPage]]:
+    async def build_indexable_documents(self, cache: BuildCache) -> tuple[list[SourceDocument], dict[str, CachedPage]]:
         """Lists every shared page, fetches (or reuses cached) markdown, cleans it, and keeps the
         pages worth indexing. Database rows are only kept when they carry a real write-up, unless
         their data source is in `NOTION_INDEX_DATA_SOURCE_IDS`, in which case they are indexed as
         records."""
-        raw_pages = self.list_all_shared_pages()
+        raw_pages = await self.list_all_shared_pages()
         pages_by_id = {norm_id(p.id): p for p in raw_pages}
         allowed = {norm_id(x) for x in config.notion.allowed_page_ids}
         forced_sources = {norm_id(x) for x in config.notion.index_data_source_ids}
@@ -232,14 +232,14 @@ class NotionService:
                 counts['cached'] += 1
             else:
                 try:
-                    markdown = self.get_page_markdown(page.id)
+                    markdown = await self.get_page_markdown(page.id)
                     counts['fetched'] += 1
                 except Exception as err:
                     logger.warning(f'Skipping page {page.title} ({page.id}): {err}')
                     counts['failed'] += 1
                     continue
                 finally:
-                    sleep(config.app.index_rate_limit_ms)
+                    await sleep(config.app.index_rate_limit_ms)
             next_cache[page.id] = {'lastEditedTime': page.last_edited_time, 'markdown': markdown}
 
             body = clean_notion_markdown(markdown)
@@ -268,7 +268,7 @@ class NotionService:
                     kind=kind,
                     title=page.title,
                     url=page.url,
-                    ancestors=self.ancestors_of(page.parent, pages_by_id),
+                    ancestors=await self.ancestors_of(page.parent, pages_by_id),
                     clean_text=clean_text,
                     created_time=page.created_time,
                     last_edited_time=page.last_edited_time,

@@ -64,7 +64,7 @@ Rules:
 - Plain, specific, student-engineer voice. No buzzwords ("synergy", "leverage", "passionate"), no empty flattery."""
 
 
-def _write_fit_paragraph(row: BankLeadRow, company_text: str, ask: str) -> str:
+async def _write_fit_paragraph(row: BankLeadRow, company_text: str, ask: str) -> str:
     """LLM step: the fit paragraph. Falls back to a mechanical sentence built from the stored
     enrichment reasoning if the model returns nothing usable."""
     knowns = '\n'.join(
@@ -87,7 +87,7 @@ def _write_fit_paragraph(row: BankLeadRow, company_text: str, ask: str) -> str:
         if x
     )
     page = company_text or '(homepage unavailable — use only the fit notes above, and stay general about their products)'
-    content = LLM.shared().groq_json(PARAGRAPH_SYSTEM_PROMPT, f'Company: {row.company}\n{knowns}\n\nCompany website text:\n{page}', temperature=0.4)
+    content = await LLM.shared().groq_json(PARAGRAPH_SYSTEM_PROMPT, f'Company: {row.company}\n{knowns}\n\nCompany website text:\n{page}', temperature=0.4)
 
     paragraph = ''
     try:
@@ -122,7 +122,7 @@ def _fill_placeholders(paragraph: str, row: BankLeadRow, sender_name: str) -> st
 MAX_ASK_CHARS = 1800
 
 
-def draft_outreach_email(notion: SponsorNotion, row: BankLeadRow, sender_name: str, ask: str | None = None) -> DraftEmailResult:
+async def draft_outreach_email(notion: SponsorNotion, row: BankLeadRow, sender_name: str, ask: str | None = None) -> DraftEmailResult:
     """Assemble + persist a draft outreach email for one Bank prospect. Template (live from Notion) →
     homepage re-fetch → LLM fit paragraph → mechanical fill → written to the Bank page as a
     `📧 Draft email` toggle (replacing any previous draft). Raises if the template page is
@@ -134,21 +134,21 @@ def draft_outreach_email(notion: SponsorNotion, row: BankLeadRow, sender_name: s
     and the toggle supplies the verbatim block (so a quick `for gears` doesn't clobber a detailed spec).
 
     `sender_name` is the real name of the person the email is from (fills [NAME] + the signature)."""
-    template = notion.fetch_page_paragraphs(config.sponsorship.email_template_page_id)
+    template = await notion.fetch_page_paragraphs(config.sponsorship.email_template_page_id)
     if not template:
         raise RuntimeError(
             'The email template page is empty or unreachable — check SPONSOR_EMAIL_TEMPLATE_PAGE_ID and the integration’s access to it.'
         )
 
     inline_ask = (ask or '').strip()
-    stored_ask = notion.fetch_ask_section(row.id)[:MAX_ASK_CHARS]
+    stored_ask = (await notion.fetch_ask_section(row.id))[:MAX_ASK_CHARS]
     steering_ask = inline_ask or stored_ask
     # The verbatim block prefers the stored spec; a lone inline ask becomes a one-liner.
     ask_block = stored_ask or (f'- {inline_ask}' if inline_ask else '')
 
     hostname = re.sub(r'/.*$', '', re.sub(r'^https?://', '', row.domain))
-    company_text = fetch_company_text(hostname) if hostname else ''
-    personalized = _write_fit_paragraph(row, company_text, steering_ask)
+    company_text = await fetch_company_text(hostname) if hostname else ''
+    personalized = await _write_fit_paragraph(row, company_text, steering_ask)
 
     # Splice the generated paragraph in: replace the [PERSONALIZED] marker paragraph, or insert after
     # the intro paragraph if the marker was removed from the template. The verbatim ask block
@@ -173,7 +173,7 @@ def draft_outreach_email(notion: SponsorNotion, row: BankLeadRow, sender_name: s
     filled = [_fill_placeholders(p, row, sender_name) for p in paragraphs]
 
     title = f'{DRAFT_EMAIL_MARKER} — generated {utils.today_iso()} · AI-assisted, review before sending'
-    block_id = notion.write_draft_email(row.id, title, filled)
+    block_id = await notion.write_draft_email(row.id, title, filled)
     draft_url = f"{row.url}#{block_id.replace('-', '')}" if block_id else row.url
 
     return DraftEmailResult(

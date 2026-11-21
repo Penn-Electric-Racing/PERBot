@@ -4,7 +4,6 @@ single long-running worker and the window is 24h; a restart simply means "run pr
 `done` tells the operator."""
 from __future__ import annotations
 
-import threading
 import time
 from dataclasses import dataclass
 from typing import Callable
@@ -31,24 +30,20 @@ class PrepCache:
         self._store: dict[str, CachedPrep] = {}
         self._ttl_ms = ttl_ms
         self._now = now
-        self._lock = threading.Lock()
 
     def set(self, slack_user_id: str, vendor_key: str, prep: PrepResult) -> None:
-        with self._lock:
-            self._store[_key(slack_user_id, vendor_key)] = CachedPrep(prep, self._now())
+        self._store[_key(slack_user_id, vendor_key)] = CachedPrep(prep, self._now())
 
     def get(self, slack_user_id: str, vendor_key: str) -> CachedPrep | None:
         """None when missing or older than the TTL (expired entries are dropped)."""
         k = _key(slack_user_id, vendor_key)
-        with self._lock:
-            hit = self._store.get(k)
-            if not hit:
-                return None
-            if self._now() - hit.created_at > self._ttl_ms:
-                del self._store[k]
-                return None
-            return hit
+        hit = self._store.get(k)
+        if not hit:
+            return None
+        if self._now() - hit.created_at > self._ttl_ms:
+            del self._store[k]
+            return None
+        return hit
 
     def clear(self, slack_user_id: str, vendor_key: str) -> None:
-        with self._lock:
-            self._store.pop(_key(slack_user_id, vendor_key), None)
+        self._store.pop(_key(slack_user_id, vendor_key), None)

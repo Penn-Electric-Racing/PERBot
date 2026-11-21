@@ -32,9 +32,8 @@ import logging
 import os
 import re
 import sys
-from concurrent.futures import ThreadPoolExecutor
 
-from core import utils
+from core import aio, http, utils
 from core.config import config
 from core.log import setup_logging
 from core.slack import Slack
@@ -53,7 +52,7 @@ from sponsorship.quota import (
 logger = logging.getLogger(__name__)
 
 
-def run_quota_audit(force: bool | None = None) -> int:
+async def run_quota_audit(force: bool | None = None) -> int:
     """Returns the process exit code (1 when the audit was recorded but couldn't be posted)."""
     if force is None:
         force = (os.environ.get('FORCE_QUOTA_AUDIT') or '').lower() == 'true'
@@ -76,17 +75,16 @@ def run_quota_audit(force: bool | None = None) -> int:
     client = Slack.shared()
     notion = SponsorNotion()
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        f_members = pool.submit(notion.query_quota_roster)
-        f_deals = pool.submit(notion.query_deals_edited_since, utils.to_iso(window.start))
-        f_users = pool.submit(notion.list_notion_users)
-        f_contacted = pool.submit(notion.query_contacted_deals)
-        members, deals, notion_users, contacted_deals = (
-            f_members.result(),
-            f_deals.result(),
-            f_users.result(),
-            f_contacted.result(),
-        )
+    f_members = aio.spawn(notion.query_quota_roster)
+    f_deals = aio.spawn(notion.query_deals_edited_since, utils.to_iso(window.start))
+    f_users = aio.spawn(notion.list_notion_users)
+    f_contacted = aio.spawn(notion.query_contacted_deals)
+    members, deals, notion_users, contacted_deals = (
+        await f_members,
+        await f_deals,
+        await f_users,
+        await f_contacted,
+    )
     if not members:
         logger.warning('Quota audit: the Ops Quota Roster has no active members — nothing to audit.')
         return 0
@@ -97,13 +95,13 @@ def run_quota_audit(force: bool | None = None) -> int:
         logger.info(f"Quota audit: {r.member.name} — {len(r.deals)}/{quota} {'MET' if r.met else 'missed'}{companies}")
 
     # Slack side: resolve mentions for the misses only (the met list uses plain names).
-    slack_dir = Slack.wrap(client).fetch_directory()
+    slack_dir = await Slack.wrap(client).fetch_directory()
     resolve = _slack_mention_resolver(client, notion_users, slack_dir)
     mentions: dict[str, str | None] = {}
     for r in results:
         if r.met:
             continue
-        mention = resolve(r.member)
+        mention = await resolve(r.member)
         if not mention:
             logger.warning(f'Quota audit: no Slack match for {r.member.name} — will use their name.')
         mentions[r.member.notion_user_id] = mention
@@ -123,23 +121,23 @@ def run_quota_audit(force: bool | None = None) -> int:
 
     # Durable record first: one row per member per week (upsert — re-runs refresh in place).
     for r in results:
-        ref = notion.upsert_quota_audit_row(r)
+        ref = await notion.upsert_quota_audit_row(r)
         logger.info(f'Quota audit: recorded {r.member.name} (week ending {r.week_end_iso}) → {ref.url}')
 
-    channel_id = Slack.wrap(client).resolve_channel_id(config.sponsorship.quota_channel)
+    channel_id = await Slack.wrap(client).resolve_channel_id(config.sponsorship.quota_channel)
     if not channel_id:
         logger.error(
             f'Quota audit: channel "{config.sponsorship.quota_channel}" not found — audit recorded in Notion but not posted.'
         )
         return 1
     meta = _quota_meta(window.week_end_iso)
-    if Slack.wrap(client).already_posted(channel_id, meta, f'sponsor-quota-audit:{window.week_end_iso}'):
+    if await Slack.wrap(client).already_posted(channel_id, meta, f'sponsor-quota-audit:{window.week_end_iso}'):
         logger.info(
             f'Quota audit: week ending {window.week_end_iso} already posted in #{config.sponsorship.quota_channel} '
             '— audit rows refreshed, no repost.'
         )
         return 0
-    client.chat_postMessage(channel=channel_id, text=text, metadata=meta.metadata(), unfurl_links=False)
+    await client.chat_postMessage(channel=channel_id, text=text, metadata=meta.metadata(), unfurl_links=False)
     logger.info(
         f'Quota audit: posted to #{config.sponsorship.quota_channel} ({sum(1 for r in results if not r.met)} below quota).'
     )
@@ -149,7 +147,7 @@ def run_quota_audit(force: bool | None = None) -> int:
 if __name__ == '__main__':
     setup_logging()
     try:
-        sys.exit(run_quota_audit())
+        sys.exit(http.run(run_quota_audit()))
     except Exception as err:
         logger.error('Quota audit job failed.', exc_info=err)
         sys.exit(1)

@@ -34,6 +34,7 @@ from arrivals.pipeline import (
     with_names,
 )
 from arrivals.slack import already_answered, handle_photo, is_photo_post
+from core import http
 from core.config import config
 from core.log import setup_logging
 from core.purchasing import PurchasingRow
@@ -42,7 +43,7 @@ from core.slack import Slack
 TYPES = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp'}
 
 
-def _flag(args: list[str], name: str) -> str | None:
+async def _flag(args: list[str], name: str) -> str | None:
     if name in args:
         i = args.index(name)
         value = args[i + 1] if i + 1 < len(args) else None
@@ -100,8 +101,8 @@ def _summarize(label: str, result: DeliveryResult, seconds: float) -> None:
     print('')
 
 
-def try_local(args: list[str], open_rows: list[PurchasingRow]) -> None:
-    text = _flag(args, '--text') or ''
+async def try_local(args: list[str], open_rows: list[PurchasingRow]) -> None:
+    text = await _flag(args, '--text') or ''
     each = '--each' in args
     targets = [a for a in args if a != '--each']
     if not targets:
@@ -117,20 +118,20 @@ def try_local(args: list[str], open_rows: list[PurchasingRow]) -> None:
         images = [SlipImage(f.read_bytes(), TYPES.get(f.suffix.lower(), 'image/jpeg')) for f in group]
         started = time.time()
         msg = DeliveryMessage(ts=str(time.time()), user='U_LOCAL', text=text, in_thread=False, images=images)
-        _summarize(' + '.join(f.name for f in group), process_delivery(msg, open_rows), time.time() - started)
+        _summarize(' + '.join(f.name for f in group), await process_delivery(msg, open_rows), time.time() - started)
 
 
-def backtest(args: list[str], open_rows: list[PurchasingRow]) -> None:
-    limit = int(_flag(args, '--limit') or 50)
+async def backtest(args: list[str], open_rows: list[PurchasingRow]) -> None:
+    limit = int(await _flag(args, '--limit') or 50)
     client = Slack.shared()
-    channel = Slack.wrap(client).resolve_channel_id(config.arrivals.channel or 'packages')
+    channel = await Slack.wrap(client).resolve_channel_id(config.arrivals.channel or 'packages')
     if not channel:
         raise RuntimeError('ARRIVALS_CHANNEL not found')
 
     top: list[Any] = []
     cursor: str | None = None
     while True:
-        res = client.conversations_history(channel=channel, limit=200, cursor=cursor)
+        res = await client.conversations_history(channel=channel, limit=200, cursor=cursor)
         top.extend(res.get('messages') or [])
         cursor = (res.get('response_metadata') or {}).get('next_cursor') or None
         if not cursor:
@@ -140,7 +141,7 @@ def backtest(args: list[str], open_rows: list[PurchasingRow]) -> None:
     for m in top:
         posts.append((m, None))
         if m.get('reply_count'):
-            res = client.conversations_replies(channel=channel, ts=m['ts'], limit=200)
+            res = await client.conversations_replies(channel=channel, ts=m['ts'], limit=200)
             posts.extend((r, m) for r in (res.get('messages') or [])[1:])
     photos = sorted(
         (p for p in posts if not p[0].get('bot_id') and p[0].get('user') and any(is_image(f) for f in p[0].get('files') or [])),
@@ -151,14 +152,14 @@ def backtest(args: list[str], open_rows: list[PurchasingRow]) -> None:
     tally: dict[str, int] = {}
     for msg, parent in photos:
         started = time.time()
-        result = process_delivery(
+        result = await process_delivery(
             DeliveryMessage(
                 ts=msg['ts'],
                 user=msg['user'],
-                text=with_names(client, msg.get('text') or ''),
-                parent_text=with_names(client, parent.get('text') or '') if parent else None,
+                text=await with_names(client, msg.get('text') or ''),
+                parent_text=await with_names(client, parent.get('text') or '') if parent else None,
                 in_thread=bool(parent),
-                images=load_images(client, msg.get('files') or []),
+                images=await load_images(client, msg.get('files') or []),
             ),
             open_rows,
         )
@@ -175,7 +176,7 @@ def backtest(args: list[str], open_rows: list[PurchasingRow]) -> None:
     print('Outcomes:', json.dumps(tally))
 
 
-def post_missed(args: list[str]) -> None:
+async def post_missed(args: list[str]) -> None:
     """Post the reply the live bot missed (it was down, or the event never arrived): runs the same
     handler as the listener on one message and replies in its thread as PERBot. Taps on the buttons
     are handled by the deployed bot, so run this only once the deploy is healthy. Refuses if PERBot
@@ -187,27 +188,27 @@ def post_missed(args: list[str]) -> None:
         raise RuntimeError('Usage: python -m arrivals.cli post <message ts or permalink> [--force | --replace]')
     message_ts = f'{m.group(1)}.{m.group(2)}'
     client = Slack.shared()
-    channel = Slack.wrap(client).resolve_channel_id(config.arrivals.channel or 'packages')
+    channel = await Slack.wrap(client).resolve_channel_id(config.arrivals.channel or 'packages')
     if not channel:
         raise RuntimeError('ARRIVALS_CHANNEL not found')
 
-    res = client.conversations_history(channel=channel, latest=message_ts, oldest=message_ts, inclusive=True, limit=1)
+    res = await client.conversations_history(channel=channel, latest=message_ts, oldest=message_ts, inclusive=True, limit=1)
     msg = (res.get('messages') or [None])[0]
     if not msg:
         # A thread reply: permalinks carry the parent as ?thread_ts=…
         parent = re.search(r'thread_ts=(\d+\.\d+)', ' '.join(args))
         if not parent:
             raise RuntimeError(f'No top-level message {message_ts} in the channel; for a thread reply pass its permalink.')
-        thread = client.conversations_replies(channel=channel, ts=parent.group(1), latest=message_ts, oldest=message_ts, inclusive=True, limit=1)
+        thread = await client.conversations_replies(channel=channel, ts=parent.group(1), latest=message_ts, oldest=message_ts, inclusive=True, limit=1)
         msg = next((x for x in thread.get('messages') or [] if x.get('ts') == message_ts), None)
         if not msg:
             raise RuntimeError(f'Message {message_ts} not found.')
     if not is_photo_post(msg):
         raise RuntimeError('That message has no photo.')
 
-    me = client.auth_test()
+    me = await client.auth_test()
     thread_ts = msg.get('thread_ts') or msg['ts']
-    thread_messages = client.conversations_replies(channel=channel, ts=thread_ts, limit=200).get('messages') or []
+    thread_messages = (await client.conversations_replies(channel=channel, ts=thread_ts, limit=200)).get('messages') or []
     if '--replace' in args:
         # Rebuild PERBot's earlier reply in place (e.g. after a layout change) — never one someone already tapped.
         earlier = next((x for x in thread_messages if x.get('bot_id') == me.get('bot_id') and float(x['ts']) > float(msg['ts'])), None)
@@ -217,49 +218,49 @@ def post_missed(args: list[str]) -> None:
             raise RuntimeError('That reply was already settled; leaving it alone.')
         in_thread = bool(msg.get('thread_ts') and msg['thread_ts'] != msg['ts'])
         notion = ArrivalsNotion()
-        result = process_delivery(
+        result = await process_delivery(
             DeliveryMessage(
                 ts=msg['ts'],
                 user=msg['user'],
-                text=with_names(client, msg.get('text') or ''),
-                parent_text=parent_text(client, channel, msg['thread_ts']) if in_thread else None,
+                text=await with_names(client, msg.get('text') or ''),
+                parent_text=await parent_text(client, channel, msg['thread_ts']) if in_thread else None,
                 in_thread=in_thread,
-                images=load_images(client, msg.get('files') or []),
-                people=people_map(client, notion),
+                images=await load_images(client, msg.get('files') or []),
+                people=await people_map(client, notion),
             ),
-            notion.open_rows(),
+            await notion.open_rows(),
         )
         if not result.reply:
             raise RuntimeError('The pipeline now stays silent on this photo; not touching the old reply.')
-        client.chat_update(channel=channel, ts=earlier['ts'], text=result.reply.text, blocks=result.reply.blocks)
+        await client.chat_update(channel=channel, ts=earlier['ts'], text=result.reply.text, blocks=result.reply.blocks)
         print(render(result.reply))
         print(f"Replaced PERBot's reply {earlier['ts']}.")
         return
     if already_answered(msg, thread_messages, me.get('bot_id')) and not force:
         raise RuntimeError('PERBot already replied in that thread (pass --force to post anyway).')
 
-    handle_photo(client, {**msg, 'channel': channel})
+    await handle_photo(client, {**msg, 'channel': channel})
     print(f'Done — check the thread on {message_ts}.')
 
 
-def main(argv: list[str] | None = None) -> None:
+async def main(argv: list[str] | None = None) -> None:
     args = list(sys.argv[1:] if argv is None else argv)
     mode = args.pop(0) if args else ''
     if mode == 'post':
-        post_missed(args)
+        await post_missed(args)
         return
-    open_rows = ArrivalsNotion().open_rows()
+    open_rows = await ArrivalsNotion().open_rows()
     print(f'{len(open_rows)} open Purchasing rows.\n')
     if mode == 'backtest':
-        backtest(args, open_rows)
+        await backtest(args, open_rows)
     else:
-        try_local(args, open_rows)
+        await try_local(args, open_rows)
 
 
 if __name__ == '__main__':
     setup_logging()
     try:
-        main()
+        http.run(main())
     except Exception as err:
         print(err, file=sys.stderr)
         sys.exit(1)

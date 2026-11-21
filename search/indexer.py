@@ -15,7 +15,7 @@ import traceback
 
 import numpy as np
 
-from core import utils
+from core import http, utils
 from core.config import config
 from core.log import setup_logging
 from search.chunk import ChunkOptions, build_embed_text, chunk_markdown
@@ -164,7 +164,7 @@ def to_page_record(doc: SourceDocument, current_rev: int | None) -> PageRecord:
     }
 
 
-def build_drive_documents(cache: BuildCache) -> tuple[list[SourceDocument], dict[str, CachedDriveFile] | None]:
+async def build_drive_documents(cache: BuildCache) -> tuple[list[SourceDocument], dict[str, CachedDriveFile] | None]:
     """Google Shared Drive documents, or none when the service account isn't configured or fails."""
     if not config.has_drive:
         logger.info('Google Drive source not configured (GDRIVE_SERVICE_ACCOUNT_JSON unset); Notion only.')
@@ -175,7 +175,7 @@ def build_drive_documents(cache: BuildCache) -> tuple[list[SourceDocument], dict
             return [], cache.get('drive')
         auth = ServiceAccountAuth(key, ['https://www.googleapis.com/auth/drive.readonly'])
         logger.info(f'Google Drive source: indexing as {auth.email}.')
-        return DriveService(auth).build_documents(cache, lambda partial: save_build_cache({**cache, 'drive': partial}))
+        return await DriveService(auth).build_documents(cache, lambda partial: save_build_cache({**cache, 'drive': partial}))
     except Exception as err:
         # A Drive outage must not take the Notion index down with it; keep last night's Drive text.
         logger.error('Google Drive indexing failed; continuing with Notion only.', exc_info=err)
@@ -185,12 +185,12 @@ def build_drive_documents(cache: BuildCache) -> tuple[list[SourceDocument], dict
 StoredVector = tuple[np.ndarray, float]
 
 
-def load_previous_embeddings() -> dict[str, StoredVector]:
+async def load_previous_embeddings() -> dict[str, StoredVector]:
     reuse: dict[str, StoredVector] = {}
     if not config.app.index_incremental:
         return reuse
     # On the server the bot has index + embeddings but never the build cache; fetch whatever is missing.
-    download_build_inputs_from_release()
+    await download_build_inputs_from_release()
     if not index_exists():
         return reuse
     try:
@@ -209,18 +209,18 @@ def load_previous_embeddings() -> dict[str, StoredVector]:
     return reuse
 
 
-def main() -> None:
+async def main() -> None:
     started_at = utils.iso_now()
     logger.info('Starting PERBot Notion indexing job...')
     save_status({'state': 'indexing', 'phase': 'discovering', 'startedAt': started_at})
 
-    previous = load_previous_embeddings()
+    previous = await load_previous_embeddings()
     cache: BuildCache = load_build_cache() if config.app.index_incremental else {'version': 1, 'pages': {}}
 
     notion = NotionService()
     save_status({'state': 'indexing', 'phase': 'building_pages', 'startedAt': started_at})
-    notion_docs, pages_cache = notion.build_indexable_documents(cache)
-    drive_docs, drive_cache = build_drive_documents(cache)
+    notion_docs, pages_cache = await notion.build_indexable_documents(cache)
+    drive_docs, drive_cache = await build_drive_documents(cache)
     docs = [*notion_docs, *drive_docs]
     new_cache: BuildCache = {'version': 1, 'pages': pages_cache}
     if drive_cache:
@@ -306,7 +306,7 @@ def main() -> None:
         except Exception as err:
             logger.warning('Could not write index status.', exc_info=err)
 
-    fresh = embed_texts([embed_inputs[i] for i in to_embed], on_batch)
+    fresh = await embed_texts([embed_inputs[i] for i in to_embed], on_batch)
     for k, chunk_idx in enumerate(to_embed):
         vectors[chunk_idx] = quantize(fresh[k])
 
@@ -349,7 +349,7 @@ def main() -> None:
 if __name__ == '__main__':
     setup_logging()
     try:
-        main()
+        http.run(main())
     except Exception as error:
         logger.error('Indexing failed.', exc_info=error)
         save_status({'state': 'error', 'phase': 'error', 'failedAt': utils.iso_now(), 'lastError': traceback.format_exc()})

@@ -5,8 +5,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from slack_bolt import App
-from slack_sdk import WebClient
+from slack_bolt.async_app import AsyncApp
+from slack_sdk.web.async_client import AsyncWebClient
 
 from core.feature import Feature, command, task
 from search.bot import DocSearch
@@ -20,25 +20,29 @@ class Search(Feature):
     def __init__(self, docs: DocSearch | None = None):
         self.docs = docs or DocSearch()
 
-    def register(self, app: App) -> None:
+    def register(self, app: AsyncApp) -> None:
         index = self.docs.index
         if index.post is None:
-            index.post = lambda ch, ts, text: app.client.chat_postMessage(channel=ch, thread_ts=ts, text=text)
+
+            async def post(ch: str, ts: str | None, text: str) -> None:
+                await app.client.chat_postMessage(channel=ch, thread_ts=ts, text=text)
+
+            index.post = post
         super().register(app)
 
     @command('/dt')
-    def dt(self, ack: Any, command: dict[str, Any], client: WebClient) -> None:
-        self.docs.dt(ack, command, client)
+    async def dt(self, ack: Any, command: dict[str, Any], client: AsyncWebClient) -> None:
+        await self.docs.dt(ack, command, client)
 
     @command('/reindex')
-    def reindex(self, ack: Any, command: dict[str, Any], client: WebClient) -> None:
-        self.docs.reindex(ack, command, client)
+    async def reindex(self, ack: Any, command: dict[str, Any], client: AsyncWebClient) -> None:
+        await self.docs.reindex(ack, command, client)
 
     @command('/indexstatus')
-    def index_status(self, ack: Any, command: dict[str, Any], client: WebClient) -> None:
-        self.docs.index_status(ack, command, client)
+    async def index_status(self, ack: Any, command: dict[str, Any], client: AsyncWebClient) -> None:
+        await self.docs.index_status(ack, command, client)
 
     @task
-    def index(self) -> None:
+    async def index(self) -> None:
         """Load (or bootstrap) the index, then keep it fresh."""
-        self.docs.index.start()
+        await self.docs.index.start()

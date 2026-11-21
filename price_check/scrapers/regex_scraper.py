@@ -26,7 +26,7 @@ Ranking (--rank best, default; weights in ranking.py or --weights file.json):
 --rank cheapest just sorts by order total (same filters).
 
 Usage:
-    pip install requests beautifulsoup4
+    pip install aiohttp beautifulsoup4
     python -m price_check.scrapers.regex_scraper "LM7805 voltage regulator"
     python -m price_check.scrapers.regex_scraper "LM7805" -q 50            # need 50 units
     python -m price_check.scrapers.regex_scraper "LM7805" --rank cheapest  # lowest order total only
@@ -42,6 +42,7 @@ from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
+from core import http
 from core.log import setup_logging
 from price_check.scrapers import distributors, regex_reader
 from price_check.scrapers.ranking import Scorer, Weights, pick_top
@@ -51,7 +52,7 @@ from price_check.scrapers.websearch import (
 )
 
 
-def main():
+async def main():
     """Command-line entry point: search, scrape, score and print or dump JSON."""
     p = argparse.ArgumentParser(
         prog="python -m price_check.scrapers.regex_scraper",
@@ -92,9 +93,9 @@ def main():
     base = " ".join(a.query)
     query = base if a.exact or "price" in base.lower() else base + " price"
     variants = () if a.exact else (f"buy {base}", f"{base} in stock")
-    api, used = distributors.lookup(base, a.qty, a.api, a.verbose) if a.api else ([], [])
+    api, used = (await distributors.lookup(base, a.qty, a.api, a.verbose)) if a.api else ([], [])
     try:
-        source, results = search(query, a.pool, a.verbose, variants)
+        source, results = await search(query, a.pool, a.verbose, variants)
     except RuntimeError as e:
         msg = str(e)
         if api:  # the distributor APIs alone are still worth ranking
@@ -117,7 +118,7 @@ def main():
             info["supplier"] = urlparse(r["url"]).netloc.lower().removeprefix("www.")
             r.update(info)
     else:
-        results = regex_reader.enrich(results)
+        results = await regex_reader.enrich(results)
     results = [regex_reader.apply_qty(r, a.qty) for r in results + api]
     scorer.score_all(results, base, a.qty)
     top = pick_top(results, a.top, a.rank, a.per_supplier)
@@ -182,4 +183,4 @@ def main():
 
 if __name__ == "__main__":
     setup_logging()
-    main()
+    http.run(main())

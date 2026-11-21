@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys
 
+from core import http
 from core.log import setup_logging
 from sponsorship.email_draft import draft_outreach_email
 from sponsorship.notion import SponsorNotion
@@ -16,7 +17,7 @@ from sponsorship.notion import SponsorNotion
 USAGE = 'Usage: python -m sponsorship.draft_cli "<company>" ["Sender Name"] ["inline ask"]'
 
 
-def main(argv: list[str]) -> int:
+async def main(argv: list[str]) -> int:
     args = [a.strip() for a in argv]
     company = args[0] if args else ''
     sender_name = args[1] if len(args) > 1 else ''
@@ -27,7 +28,7 @@ def main(argv: list[str]) -> int:
 
     notion = SponsorNotion()
     try:
-        rows = notion.find_bank_rows_by_company(company)
+        rows = await notion.find_bank_rows_by_company(company)
         if len(rows) > 1:
             row = next((r for r in rows if r.company.lower() == company.lower()), None)
         else:
@@ -46,7 +47,7 @@ def main(argv: list[str]) -> int:
                 )
             return 1
 
-        result = draft_outreach_email(notion, row, sender_name, ask)
+        result = await draft_outreach_email(notion, row, sender_name, ask)
     except Exception as err:
         print(f'\n✗  Draft failed: {err}\n', file=sys.stderr)
         return 1
@@ -66,4 +67,4 @@ def main(argv: list[str]) -> int:
 
 if __name__ == '__main__':
     setup_logging()
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(http.run(main(sys.argv[1:])))

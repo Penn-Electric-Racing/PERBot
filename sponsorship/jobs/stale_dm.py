@@ -16,12 +16,11 @@ import logging
 import math
 import os
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from core import utils
+from core import aio, http, utils
 from core.job_log import JobLog
 from core.log import setup_logging
 from core.slack import Slack
@@ -180,7 +179,7 @@ def build_stale_dm(data: StaleDmInput, slack_user_id: str, now: datetime | None 
     return StaleDm(text='\n'.join(text), blocks=blocks, cold_shown=cold_shown, claims_shown=claims_shown)
 
 
-def run_stale_dm(force: bool | None = None) -> None:
+async def run_stale_dm(force: bool | None = None) -> None:
     if force is None:
         force = (os.environ.get('FORCE_STALE_DM') or '').lower() == 'true'
     if not force and not utils.is_slot_open('Wednesday', 9):
@@ -189,25 +188,24 @@ def run_stale_dm(force: bool | None = None) -> None:
     # STALE_DRY_RUN=true logs each DM and makes no writes: no Slack, no Notion stamps or releases, no schema change.
     dry_run = (os.environ.get('STALE_DRY_RUN') or '').lower() == 'true'
     # Late-tolerant gate + two DST crons ⇒ dedupe via the Job Log (DM jobs can't read DM history).
-    if not force and not dry_run and not JobLog.shared().claim_run('sponsor-stale-dm'):
+    if not force and not dry_run and not await JobLog.shared().claim_run('sponsor-stale-dm'):
         return
 
     client = Slack.shared()
     notion = SponsorNotion()
     today = utils.today_iso()
 
-    missing = notion.ensure_loss_columns(not dry_run)
+    missing = await notion.ensure_loss_columns(not dry_run)
 
     def days_ago(n: int) -> str:
         return utils.to_iso(datetime.now(timezone.utc) - timedelta(days=n))
 
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        f_stale = pool.submit(notion.query_stale_deals, today)
-        f_cold = pool.submit(
-            notion.query_cold_deals, days_ago(COLD_AFTER_DAYS), COLD_ASKED_PROP not in missing or not dry_run
-        )
-        f_claims = pool.submit(notion.query_stale_claims, days_ago(STALE_CLAIM_DAYS))
-        stale, cold, stale_claims = f_stale.result(), f_cold.result(), f_claims.result()
+    f_stale = aio.spawn(notion.query_stale_deals, today)
+    f_cold = aio.spawn(
+        notion.query_cold_deals, days_ago(COLD_AFTER_DAYS), COLD_ASKED_PROP not in missing or not dry_run
+    )
+    f_claims = aio.spawn(notion.query_stale_claims, days_ago(STALE_CLAIM_DAYS))
+    stale, cold, stale_claims = await f_stale, await f_cold, await f_claims
     release, ask = split_stale_claims(stale_claims, today)
     release_names = f" ({', '.join(d.company or 'Untitled' for d in release)})" if release else ''
     logger.info(
@@ -222,7 +220,7 @@ def run_stale_dm(force: bool | None = None) -> None:
             released.append(d)
             continue
         try:
-            notion.release_claim(d)
+            await notion.release_claim(d)
             released.append(d)
         except Exception as err:
             logger.error(f'Stale DM: could not release {d.company or d.id}', exc_info=err)
@@ -250,8 +248,8 @@ def run_stale_dm(force: bool | None = None) -> None:
         return
 
     # Build both directories once for identity resolution (email first, name fallback).
-    notion_user_by_id = {u.id: u for u in notion.list_notion_users()}
-    slack_dir = Slack.wrap(client).fetch_directory()
+    notion_user_by_id = {u.id: u for u in await notion.list_notion_users()}
+    slack_dir = await Slack.wrap(client).fetch_directory()
 
     for notion_id, deals in by_user.items():
         notion_user = notion_user_by_id.get(notion_id)
@@ -259,7 +257,7 @@ def run_stale_dm(force: bool | None = None) -> None:
             logger.warning(f'Stale DM: DRI {notion_id} not in Notion directory — skipping.')
             continue
 
-        slack_user_id = Slack.wrap(client).notion_user_to_slack_id(notion_user, slack_dir)
+        slack_user_id = await Slack.wrap(client).notion_user_to_slack_id(notion_user, slack_dir)
         if not slack_user_id:
             logger.warning(f'Stale DM: no Slack match for {notion_user.name or notion_id} — skipping.')
             continue
@@ -272,12 +270,12 @@ def run_stale_dm(force: bool | None = None) -> None:
             continue
 
         # Post straight to the user ID — Slack opens the DM (needs only chat:write).
-        client.chat_postMessage(channel=slack_user_id, text=dm.text, blocks=dm.blocks, unfurl_links=False)
+        await client.chat_postMessage(channel=slack_user_id, text=dm.text, blocks=dm.blocks, unfurl_links=False)
         # Stamp after sending: a crash before this re-asks next week, which beats never asking.
         for d in dm.cold_shown:
-            notion.stamp_cold_asked(d.id, today)
+            await notion.stamp_cold_asked(d.id, today)
         for d in dm.claims_shown:
-            notion.stamp_release_asked(d.id, today)
+            await notion.stamp_release_asked(d.id, today)
         logger.info(
             f'Stale DM: sent {notion_user.name or slack_user_id} {len(deals.overdue)} overdue + {len(dm.cold_shown)} cold + '
             f'{len(dm.claims_shown)} claim(s) asked + {len(deals.released)} released.'
@@ -287,7 +285,7 @@ def run_stale_dm(force: bool | None = None) -> None:
 if __name__ == '__main__':
     setup_logging()
     try:
-        run_stale_dm()
+        http.run(run_stale_dm())
     except Exception as err:
         logger.error('Stale DM job failed.', exc_info=err)
         sys.exit(1)

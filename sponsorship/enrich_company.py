@@ -98,7 +98,7 @@ def _first_outreach(ask: str | None) -> str:
     return f"Send first outreach{f' — {ask}' if ask else ''}"
 
 
-def enrich_company(text: str, opts: EnrichOptions | None = None) -> EnrichResult:
+async def enrich_company(text: str, opts: EnrichOptions | None = None) -> EnrichResult:
     opts = opts or EnrichOptions()
     notion = opts.notion or SponsorNotion()
     assignee_ids = opts.assignee_notion_ids
@@ -119,7 +119,7 @@ def enrich_company(text: str, opts: EnrichOptions | None = None) -> EnrichResult
     company = raw
     pre_resolved_contact: HunterContact | None = None
     if not hostname:
-        resolved = resolve_by_company(raw)
+        resolved = await resolve_by_company(raw)
         if not resolved.domain:
             raise DomainResolutionError(
                 f'Couldn\'t resolve "{raw}" to a company domain. Try `/sponsor add <website url>` instead.'
@@ -133,7 +133,7 @@ def enrich_company(text: str, opts: EnrichOptions | None = None) -> EnrichResult
     canonical = to_canonical_url(hostname)
 
     # Step 2 — dedupe by domain (guards both duplicate rows and re-spending credits).
-    existing = notion.find_bank_row_by_domain(canonical)
+    existing = await notion.find_bank_row_by_domain(canonical)
     if existing:
         logger.info(f'Skipping enrichment for {canonical} — already in Bank ({existing.url}).')
         display_company = existing.company or company
@@ -141,7 +141,7 @@ def enrich_company(text: str, opts: EnrichOptions | None = None) -> EnrichResult
         # Directed add against an existing lead: graduate it to a deal now (unless it's already a
         # deal). This is the same graduation `/sponsor claim` does.
         if assigned and not existing.has_pipeline_deal and existing.status != 'Graduated':
-            deal = notion.create_pipeline_deal(
+            deal = await notion.create_pipeline_deal(
                 PipelineDealInput(
                     bank_page_id=existing.id,
                     company=display_company,
@@ -153,7 +153,7 @@ def enrich_company(text: str, opts: EnrichOptions | None = None) -> EnrichResult
                     next_action_date_iso=utils.iso_days_from_now(FIRST_OUTREACH_DAYS),
                 )
             )
-            notion.mark_bank_claimed(existing.id, assignee_ids, 'Graduated')
+            await notion.mark_bank_claimed(existing.id, assignee_ids, 'Graduated')
             assert assignment_base is not None
             return EnrichResult(
                 deduped=True,
@@ -171,18 +171,18 @@ def enrich_company(text: str, opts: EnrichOptions | None = None) -> EnrichResult
         )
 
     # Step 3 — homepage/about text (deterministic grounding for the classifier).
-    company_text = fetch_company_text(hostname)
+    company_text = await fetch_company_text(hostname)
 
     # Step 4 — structured classification (Groq, forced schema, validated). A known ask steers
     # type/category + the value/need scores and is written verbatim as the angle.
-    classification = classify_company_fit(company, canonical, company_text, opts.known_ask)
+    classification = await classify_company_fit(company, canonical, company_text, opts.known_ask)
     if opts.known_ask:
         classification.suggested_angle = opts.known_ask
 
     # Step 4b — FSAE ties: a few more page fetches, plus one Groq call only if a page mentions FSAE.
     fsae: FsaeScan | None = None
     try:
-        fsae = scan_fsae_ties(company, hostname)
+        fsae = await scan_fsae_ties(company, hostname)
     except Exception as err:
         logger.warning(f'FSAE-ties scan failed for {canonical}; leaving row unscanned.', exc_info=err)
 
@@ -193,12 +193,12 @@ def enrich_company(text: str, opts: EnrichOptions | None = None) -> EnrichResult
         contact: HunterContact | None = HunterContact(manual[0], manual[1], 'provided', 100)
         needs_review, reason = (False, None) if manual[1] else (True, 'contact name provided but no email yet')
     else:
-        contact = pre_resolved_contact or find_contact_by_domain(hostname)
+        contact = pre_resolved_contact or await find_contact_by_domain(hostname)
         needs_review, reason = _compute_review(contact)
 
     # Step 6 — write the Bank row. A directed add with an assignee is Graduated + Claimed; a plain
     # add is Available / New.
-    page = notion.create_bank_row(
+    page = await notion.create_bank_row(
         BankRowInput(
             company=company,
             domain=canonical,
@@ -215,7 +215,7 @@ def enrich_company(text: str, opts: EnrichOptions | None = None) -> EnrichResult
     # Step 7 — directed add: open the Pipeline deal (Prospect) owned by the DRI(s).
     assignment = assignment_base
     if assigned:
-        deal = notion.create_pipeline_deal(
+        deal = await notion.create_pipeline_deal(
             PipelineDealInput(
                 bank_page_id=page.id,
                 company=company,

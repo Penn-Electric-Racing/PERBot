@@ -1,7 +1,6 @@
 import base64
 import json
 
-import httpx
 import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -13,6 +12,7 @@ from search.google_auth import (
     build_assertion,
     parse_service_account_key,
 )
+from tests.aio import FakeHTTP, response
 
 _private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 _public = _private.public_key()
@@ -41,24 +41,18 @@ def test_service_account_assertion_is_a_valid_rs256_jwt_with_the_right_claims():
     _public.verify(_b64url_decode(sig), f'{h}.{c}'.encode(), padding.PKCS1v15(), hashes.SHA256())
 
 
-def test_key_parses_from_raw_json_or_base64_and_token_is_cached_until_near_expiry():
+async def test_key_parses_from_raw_json_or_base64_and_token_is_cached_until_near_expiry():
     raw = json.dumps({'client_email': KEY.client_email, 'private_key': KEY.private_key})
     assert parse_service_account_key(raw).client_email == KEY.client_email
     assert parse_service_account_key(base64.b64encode(raw.encode()).decode()).client_email == KEY.client_email
     with pytest.raises(ValueError):
         parse_service_account_key('{"client_email":"x"}')
 
-    calls = 0
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        return httpx.Response(200, json={'access_token': f'tok{calls}', 'expires_in': 3600})
-
-    auth = ServiceAccountAuth(KEY, ['s'], http=httpx.Client(transport=httpx.MockTransport(handler)))
-    assert auth.access_token() == 'tok1'
-    assert auth.access_token() == 'tok1'
-    assert calls == 1
+    fake = FakeHTTP(lambda call: response(200, {'access_token': f'tok{len(fake.calls)}', 'expires_in': 3600}))
+    auth = ServiceAccountAuth(KEY, ['s'], request=fake)
+    assert await auth.access_token() == 'tok1'
+    assert await auth.access_token() == 'tok1'
+    assert len(fake.calls) == 1
 
 
 def f(id_, name, mime_type, parent=None, **extra):
