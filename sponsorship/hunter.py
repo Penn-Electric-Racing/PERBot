@@ -8,15 +8,22 @@ credits per enrichment. Dedupe (before this runs) prevents re-spend.
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
-from config import config, has_hunter
-from utils.logger import logger
+from core.config import config
 from sponsorship.models import HunterContact
+
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    'HUNTER_BASE', 'HUNTER_TIMEOUT_S', 'ROLE_PRIORITY', 'find_contact_by_domain',
+    'CompanyLookup', 'resolve_by_company',
+]
 
 HUNTER_BASE = 'https://api.hunter.io/v2'
 HUNTER_TIMEOUT_S = 12
@@ -41,11 +48,11 @@ def _hunter_get(path: str, params: dict[str, str]) -> Any | None:
     try:
         res = httpx.get(f'{HUNTER_BASE}/{path}', params={**params, 'api_key': config.hunter.api_key}, timeout=HUNTER_TIMEOUT_S)
         if not res.is_success:
-            logger.warn(f'Hunter {path} returned {res.status_code}: {res.text}')
+            logger.warning(f'Hunter {path} returned {res.status_code}: {res.text}')
             return None
         return res.json()
     except Exception as err:
-        logger.warn(f'Hunter {path} request failed', err)
+        logger.warning(f'Hunter {path} request failed', exc_info=err)
         return None
 
 
@@ -104,8 +111,8 @@ def _build_contact(best: dict[str, Any] | None) -> HunterContact | None:
 
 def find_contact_by_domain(hostname: str) -> HunterContact | None:
     """Find the best contact for a known domain."""
-    if not has_hunter():
-        logger.warn('HUNTER_API_KEY not set — skipping contact enrichment.')
+    if not config.has_hunter:
+        logger.warning('HUNTER_API_KEY not set — skipping contact enrichment.')
         return None
     return _build_contact(_pick_best_email(_domain_search(domain=hostname).emails))
 
@@ -120,8 +127,8 @@ class CompanyLookup:
 def resolve_by_company(name: str) -> CompanyLookup:
     """Resolve a bare company name → domain via Hunter, and return the best contact from the same
     call. Used when `/sponsor add` is given a name rather than a URL."""
-    if not has_hunter():
-        logger.warn('HUNTER_API_KEY not set — cannot resolve a company name to a domain.')
+    if not config.has_hunter:
+        logger.warning('HUNTER_API_KEY not set — cannot resolve a company name to a domain.')
         return CompanyLookup(None, None, None)
     result = _domain_search(company=name)
     return CompanyLookup(result.domain, result.organization, _build_contact(_pick_best_email(result.emails)))

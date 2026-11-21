@@ -39,7 +39,7 @@ jobs:
           # Google Shared Drive source (service account key JSON, raw or base64). Unset ⇒ Notion only.
           GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
           GITHUB_TOKEN: ${{ github.token }}
-          # Slack tokens are required by config.py at load time but unused by the indexer
+          # Slack tokens are required by core/config.py at load time but unused by the indexer
           SLACK_BOT_TOKEN: unused
           SLACK_APP_TOKEN: unused
           CURRENT_REV: REV12
@@ -48,7 +48,7 @@ jobs:
           EMBEDDINGS_PATH: ./data/embeddings.i8
           INDEX_BUILD_CACHE_PATH: ./data/build-cache.json
           INDEX_STATUS_PATH: ./data/index-status.json
-        run: python -m indexer
+        run: python -m search.indexer
 
       - name: Compress artifacts
         run: |

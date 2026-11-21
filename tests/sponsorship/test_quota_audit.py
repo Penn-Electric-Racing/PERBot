@@ -2,7 +2,8 @@ import dataclasses
 import re
 from datetime import datetime, timezone
 
-from sponsorship.jobs.quota_audit import (
+from sponsorship.models import QuotaRosterMember
+from sponsorship.quota import (
     audit_window,
     build_follow_up_gap_line,
     bulk_stamp_instants,
@@ -10,9 +11,7 @@ from sponsorship.jobs.quota_audit import (
     current_audit_window,
     follow_up_gap_deals,
 )
-from sponsorship.models import QuotaRosterMember
-
-from .helpers import deal as _deal
+from tests.sponsorship.helpers import deal as _deal
 
 
 def deal(**over):

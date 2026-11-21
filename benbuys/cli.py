@@ -8,12 +8,13 @@ from __future__ import annotations
 import dataclasses
 import sys
 
-from config import config
-from benbuys.adapters import resolve_adapter
+from benbuys.adapters.registry import resolve_adapter
 from benbuys.email import build_requisition_email, render_email
 from benbuys.mailer import create_mailer
 from benbuys.notion import PurchasingNotion
 from benbuys.prep import build_prep, format_prep
+from core.config import config
+from core.log import setup_logging
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -58,6 +59,7 @@ def main(argv: list[str] | None = None) -> None:
 
 
 if __name__ == '__main__':
+    setup_logging()
     try:
         main()
     except Exception as err:

@@ -8,16 +8,23 @@ contact data.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 
-from config import config
-from utils.logger import logger
-from sponsorship.dates import today_iso_et
-from sponsorship.groq_client import groq_json
+from core import utils
+from core.config import config
+from core.llm import LLM
 from sponsorship.homepage import fetch_company_text
 from sponsorship.models import BankLeadRow
 from sponsorship.notion import DRAFT_EMAIL_MARKER, SponsorNotion
+
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    'PERSONALIZED_MARKER', 'MAX_PARAGRAPH_CHARS', 'DraftEmailResult', 'PARAGRAPH_SYSTEM_PROMPT',
+    'MAX_ASK_CHARS', 'draft_outreach_email',
+]
 
 # Where the generated paragraph goes. If the template loses the marker, we fall back to inserting
 # after the first (intro) paragraph rather than failing.
@@ -80,7 +87,7 @@ def _write_fit_paragraph(row: BankLeadRow, company_text: str, ask: str) -> str:
         if x
     )
     page = company_text or '(homepage unavailable — use only the fit notes above, and stay general about their products)'
-    content = groq_json(PARAGRAPH_SYSTEM_PROMPT, f'Company: {row.company}\n{knowns}\n\nCompany website text:\n{page}', temperature=0.4)
+    content = LLM.shared().groq_json(PARAGRAPH_SYSTEM_PROMPT, f'Company: {row.company}\n{knowns}\n\nCompany website text:\n{page}', temperature=0.4)
 
     paragraph = ''
     try:
@@ -91,7 +98,7 @@ def _write_fit_paragraph(row: BankLeadRow, company_text: str, ask: str) -> str:
         pass  # fall through to the mechanical fallback
 
     if not paragraph:
-        logger.warn(f'Fit-paragraph generation returned nothing for {row.company}; using stored reasoning.')
+        logger.warning(f'Fit-paragraph generation returned nothing for {row.company}; using stored reasoning.')
         paragraph = ' '.join(x for x in [row.fit_reason, f'Specifically: {row.suggested_angle}' if row.suggested_angle else ''] if x)
     return paragraph[:MAX_PARAGRAPH_CHARS]
 
@@ -165,7 +172,7 @@ def draft_outreach_email(notion: SponsorNotion, row: BankLeadRow, sender_name: s
 
     filled = [_fill_placeholders(p, row, sender_name) for p in paragraphs]
 
-    title = f'{DRAFT_EMAIL_MARKER} — generated {today_iso_et()} · AI-assisted, review before sending'
+    title = f'{DRAFT_EMAIL_MARKER} — generated {utils.today_iso()} · AI-assisted, review before sending'
     block_id = notion.write_draft_email(row.id, title, filled)
     draft_url = f"{row.url}#{block_id.replace('-', '')}" if block_id else row.url
 

@@ -1,0 +1,22 @@
+# systemd unit for the PERBot Slack bot on the Lightsail instance.
+# deploy/setup.sh installs it as /etc/systemd/system/perbot.service, replacing __USER__ and __DIR__.
+#   status:  sudo systemctl status perbot
+#   logs:    journalctl -u perbot -f
+#   restart: sudo systemctl restart perbot
+[Unit]
+Description=PERBot Slack bot (Socket Mode)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__DIR__
+# .env in the repo root holds the tokens (core/config.py loads it); index files go to __DIR__/data/.
+ExecStart=__DIR__/.venv/bin/python app.py
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

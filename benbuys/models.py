@@ -8,36 +8,12 @@ Everything vendor-specific lives in a VendorAdapter (adapters/); prep/done are v
 """
 from __future__ import annotations
 
-import dataclasses
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Callable
 
+from core.purchasing import PurchasingRow
 
-@dataclass(eq=False)
-class PurchasingRow:
-    """One row of the Purchasing (PEFS) Notion database, already narrowed to what prep/done need.
-    Compared by identity (eq=False), like the JS objects it replaces."""
-
-    id: str
-    url: str
-    name: str
-    # `Cat. or model no.` exactly as typed (normalized separately).
-    part_number: str
-    quantity: float
-    unit_cost: float
-    subsystems: list[str]
-    point_of_contact: list[str]
-    order_batch: str
-    link: str
-    # `Sanitized Description (CSV)` — vendor notes with newlines and commas stripped.
-    sanitized_description: str
-    notes: str
-    # `PEFS Ready?` formula text — `✅ Ready` or `❌ Missing fields`.
-    readiness: str
-    include_in_next_order: bool
-
-    def replace(self, **changes: Any) -> 'PurchasingRow':
-        return dataclasses.replace(self, **changes)
+__all__ = ['CartLine', 'PrepWarning', 'PrepResult', 'VendorAdapter']
 
 
 @dataclass

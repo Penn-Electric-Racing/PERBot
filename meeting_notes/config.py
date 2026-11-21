@@ -7,6 +7,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+__all__ = [
+    'Subsystem', 'SUBSYSTEMS', 'NOTION_PARENT_PAGE_ID', 'SLACK_WORKSPACE_SUBDOMAIN',
+    'KICKOFF_MESSAGE', 'KICKOFF_SIGNATURE',
+]
+
 
 @dataclass
 class Subsystem:

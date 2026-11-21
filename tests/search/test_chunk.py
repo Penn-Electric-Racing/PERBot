@@ -1,6 +1,6 @@
 import re
 
-from utils.chunk import ChunkOptions, build_embed_text, chunk_markdown
+from search.chunk import ChunkOptions, build_embed_text, chunk_markdown
 
 opts = ChunkOptions(target=300, max=450, min=80)
 

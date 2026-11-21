@@ -11,6 +11,8 @@ from typing import Callable
 
 from benbuys.models import PrepResult
 
+__all__ = ['PREP_TTL_MS', 'CachedPrep', 'PrepCache']
+
 PREP_TTL_MS = 24 * 60 * 60 * 1000
 
 
@@ -20,6 +22,10 @@ class CachedPrep:
     created_at: float  # epoch ms
 
 
+def _key(slack_user_id: str, vendor_key: str) -> str:
+    return f'{slack_user_id}:{vendor_key}'
+
+
 class PrepCache:
     def __init__(self, ttl_ms: float = PREP_TTL_MS, now: Callable[[], float] = lambda: time.time() * 1000):
         self._store: dict[str, CachedPrep] = {}
@@ -27,17 +33,13 @@ class PrepCache:
         self._now = now
         self._lock = threading.Lock()
 
-    @staticmethod
-    def _key(slack_user_id: str, vendor_key: str) -> str:
-        return f'{slack_user_id}:{vendor_key}'
-
     def set(self, slack_user_id: str, vendor_key: str, prep: PrepResult) -> None:
         with self._lock:
-            self._store[self._key(slack_user_id, vendor_key)] = CachedPrep(prep, self._now())
+            self._store[_key(slack_user_id, vendor_key)] = CachedPrep(prep, self._now())
 
     def get(self, slack_user_id: str, vendor_key: str) -> CachedPrep | None:
         """None when missing or older than the TTL (expired entries are dropped)."""
-        k = self._key(slack_user_id, vendor_key)
+        k = _key(slack_user_id, vendor_key)
         with self._lock:
             hit = self._store.get(k)
             if not hit:
@@ -49,4 +51,4 @@ class PrepCache:
 
     def clear(self, slack_user_id: str, vendor_key: str) -> None:
         with self._lock:
-            self._store.pop(self._key(slack_user_id, vendor_key), None)
+            self._store.pop(_key(slack_user_id, vendor_key), None)

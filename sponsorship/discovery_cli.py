@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import sys
 
-from utils.text import js_number
+from core import utils
+from core.log import setup_logging
 from sponsorship.discovery import find_matching_prospects, scout_companies
 from sponsorship.notion import SponsorNotion
 from sponsorship.scoring import priority_score, quadrant
@@ -33,7 +34,7 @@ def main(argv: list[str]) -> int:
             return 0
         for i, m in enumerate(matches):
             print(f'{i + 1}. {m.row.company} — {m.why}')
-            print(f'   priority {js_number(priority_score(m.row.scores))} {quadrant(m.row.scores)} · {m.row.url}')
+            print(f'   priority {utils.js_number(priority_score(m.row.scores))} {quadrant(m.row.scores)} · {m.row.url}')
         print('')
         return 0
 
@@ -55,4 +56,5 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == '__main__':
+    setup_logging()
     sys.exit(main(sys.argv[1:]))

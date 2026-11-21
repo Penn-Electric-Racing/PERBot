@@ -7,13 +7,12 @@ Shared posts use plain names so nobody gets pinged; private replies use @mention
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
-from slack_bolt import App
+from core.config import config
+from race.board import BoardRow, Period, format_lap
 
-from config import config
-from utils.logger import logger
-from race.board import BoardRow, Period, fetch_board, format_lap, race_configured
+__all__ = ['ParsedRace', 'parse_race', 'USAGE', 'MEDALS', 'board_text', 'board_message']
 
 
 @dataclass
@@ -95,30 +94,3 @@ def board_message(rows: list[BoardRow], period: Period, share: bool, viewer: str
             },
         ],
     }
-
-
-def register_race_command(app: App, load: Callable[[Period], list[BoardRow]] = fetch_board) -> None:
-    # the button is a plain link; Slack still sends an action, which needs an ack
-    @app.action('race_open')
-    def _race_open(ack):
-        ack()
-
-    @app.command('/race')
-    def _race(ack, command, respond):
-        ack()
-        parsed = parse_race(command.get('text') or '')
-        if parsed.kind == 'help':
-            respond(response_type='ephemeral', text=USAGE)
-            return
-        if not race_configured():
-            respond(
-                response_type='ephemeral',
-                text=f'The time trial leaderboard isn’t connected yet (RACE_SUPABASE_URL / RACE_SUPABASE_SERVICE_KEY). You can still race at {config.race.site_url}',
-            )
-            return
-        try:
-            rows = load(parsed.period)
-            respond(**board_message(rows, parsed.period, share=parsed.share, viewer=command.get('user_id')))
-        except Exception as err:
-            logger.error('/race failed', err)
-            respond(response_type='ephemeral', text=f'✗ Couldn’t load the leaderboard: {err}')

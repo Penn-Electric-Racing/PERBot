@@ -4,21 +4,24 @@ import json
 import re
 from datetime import datetime, timezone
 
-from price_check.blocks import PRICE_ACTIONS_BLOCK_ID, decode_value
-from price_check.ledger import (
+from core import utils
+from core.notion import dashed_id
+from price_check.database import SavingsLedger, click_row_props
+from price_check.enums import Period
+from price_check.models import (
+    LedgerEvent,
     LedgerRow,
-    PriceLedger,
-    dashed_id,
-    event_props,
-    in_period,
-    new_row_props,
-    parse_ledger_row,
-    stats_text,
-    summarize,
+    PriceRow,
+    StatsQuery,
+    Summary,
+    SwapValue,
 )
-from price_check.stats import ParsedStats, parse_stats
-from price_check.swap import ClickInput, LedgerEvent, PriceRow, PriceSwapDeps, handle_price_swap
-from utils.clock import to_iso
+from price_check.views import (
+    ACTIONS_BLOCK_ID,
+    ClickInput,
+    SwapDeps,
+    SwapHandler,
+)
 
 ROW_ID = '39e560bc-c039-80aa-bbbb-0123456789ab'
 AT = datetime(2026, 10, 17, 19, 0, tzinfo=timezone.utc)
@@ -30,7 +33,7 @@ def value(**over):
 
 
 def ev(kind, **over):
-    return LedgerEvent(kind, value(**over), 'U1', AT)
+    return LedgerEvent(kind, SwapValue.from_payload(value(**over)), 'U1', AT)
 
 
 def purchasing_row(**over):
@@ -43,38 +46,38 @@ def purchasing_row(**over):
 
 def lrow(**over):
     base = dict(id='L1', name='Part ×10', outcome='Used', saved=10, potential=10, realized=False, supplier='DigiKey',
-                season='REV12', created=to_iso(AT))
+                season='REV12', created=utils.to_iso(AT))
     return LedgerRow(**{**base, **over})
 
 
 def test_use_records_the_saving_in_dollars_an_accepted_increase_goes_negative():
-    used = event_props(ev('used'), 'Ada', 'Pending')
+    used = ev('used').props('Ada', 'Pending')
     assert used['Outcome']['select']['name'] == 'Used'
     assert used['Saved $']['number'] == 38.3  # (5 − 1.17) × 10
     assert used['Direction']['select']['name'] == 'Drop'
     assert used['Used unit cost']['number'] == 1.17
     assert used['Clicked by']['rich_text'][0]['text']['content'] == 'Ada'
-    rise = event_props(ev('used', n=6.5), 'Ada', 'Pending')
+    rise = ev('used', n=6.5).props('Ada', 'Pending')
     assert rise['Saved $']['number'] == -15
     assert rise['Direction']['select']['name'] == 'Rise'
     # A switched listing is recorded as the one used.
-    assert event_props(ev('used', l='https://m.com/p', s='Mouser'), 'Ada', 'Pending')['Listing']['url'] == 'https://m.com/p'
+    assert ev('used', l='https://m.com/p', s='Mouser').props('Ada', 'Pending')['Listing']['url'] == 'https://m.com/p'
 
 
 def test_undo_and_keep_zero_the_saving_a_stale_refusal_never_overwrites_a_decision():
-    undone = event_props(ev('undone'), 'Ada', 'Used')
+    undone = ev('undone').props('Ada', 'Used')
     assert undone['Outcome']['select']['name'] == 'Undone'
     assert undone['Saved $']['number'] == 0
     assert undone['Used unit cost']['number'] is None
     assert undone['Realized']['checkbox'] is False
-    assert event_props(ev('kept'), 'Ada', 'Pending')['Outcome']['select']['name'] == 'Kept'
-    assert event_props(ev('refused'), 'Ada', 'Pending')['Outcome']['select']['name'] == 'Refused'
-    assert event_props(ev('refused'), 'Ada', 'Used') is None
-    assert event_props(ev('refused'), 'Ada', None)['Outcome']['select']['name'] == 'Refused'
+    assert ev('kept').props('Ada', 'Pending')['Outcome']['select']['name'] == 'Kept'
+    assert ev('refused').props('Ada', 'Pending')['Outcome']['select']['name'] == 'Refused'
+    assert ev('refused').props('Ada', 'Used') is None
+    assert ev('refused').props('Ada', None)['Outcome']['select']['name'] == 'Refused'
 
 
 def test_a_row_perbot_creates_itself_carries_the_alert_and_the_purchasing_row():
-    p = new_row_props(value(r=ROW_ID.replace('-', ''), l='https://m.com/p'), purchasing_row())
+    p = click_row_props(SwapValue.from_payload(value(r=ROW_ID.replace('-', ''), l='https://m.com/p')), purchasing_row())
     assert p['Name']['title'][0]['text']['content'] == '5V regulator ×10'
     assert p['Row ID']['rich_text'][0]['text']['content'] == ROW_ID  # dashed, so lookups match
     assert p['Potential $']['number'] == 38.3
@@ -85,7 +88,7 @@ def test_a_row_perbot_creates_itself_carries_the_alert_and_the_purchasing_row():
 
 
 def test_summary_splits_savings_realized_increases_and_drops_left_on_the_table():
-    s = summarize([
+    s = Summary.of([
         lrow(name='A', saved=38.3, realized=True),
         lrow(name='B', saved=12),
         lrow(name='C', saved=-15),
@@ -99,7 +102,7 @@ def test_summary_splits_savings_realized_increases_and_drops_left_on_the_table()
     assert [s.increases, s.increases_count] == [15, 1]
     assert [s.on_table, s.on_table_count] == [10, 2]
     assert [r.name for r in s.top] == ['A', 'B']
-    text = stats_text(s, 'season', 'REV12', 'https://notion.so/ledger')
+    text = s.text(Period('season'), 'REV12', 'https://notion.so/ledger')
     assert re.search('Price check savings: REV12 season', text)
     assert re.search(r'\*\$50\.30 saved\* on 2 accepted price drops \(\$38\.30 realized: 1 order placed at the new price\)', text)
     assert re.search(r'\$15\.00 of price increases caught before ordering \(1 row\)', text)
@@ -107,19 +110,19 @@ def test_summary_splits_savings_realized_increases_and_drops_left_on_the_table()
     assert re.search(r'\$10\.00 still on the table: 2 price drops not taken', text)
     assert re.search(r'1\. A: \$38\.30 \(DigiKey\)', text)
     assert re.search(r'<https://notion\.so/ledger\|Open the ledger in Notion>', text)
-    assert re.search('No price alerts this week', stats_text(summarize([]), 'week', 'REV12', ''))
+    assert re.search('No price alerts this week', Summary.of([]).text(Period('week'), 'REV12', ''))
 
 
 def test_periods_and_the_pricecheck_arguments():
     now = datetime(2026, 10, 20, tzinfo=timezone.utc)
-    assert in_period(lrow(), 'week', 'REV12', now) is True
-    assert in_period(lrow(created='2026-10-01T00:00:00Z'), 'week', 'REV12', now) is False
-    assert in_period(lrow(season='REV11'), 'season', 'REV12', now) is False
-    assert in_period(lrow(season='REV11'), 'all', 'REV12', now) is True
-    assert parse_stats('') == ParsedStats('stats', 'season', False)
-    assert parse_stats('week share') == ParsedStats('stats', 'week', True)
-    assert parse_stats('all') == ParsedStats('stats', 'all', False)
-    assert parse_stats('help').kind == 'help'
+    assert lrow().in_period('week', 'REV12', now) is True
+    assert lrow(created='2026-10-01T00:00:00Z').in_period('week', 'REV12', now) is False
+    assert lrow(season='REV11').in_period('season', 'REV12', now) is False
+    assert lrow(season='REV11').in_period('all', 'REV12', now) is True
+    assert StatsQuery.parse('') == StatsQuery(False, Period.SEASON, False)
+    assert StatsQuery.parse('week share') == StatsQuery(False, Period.WEEK, True)
+    assert StatsQuery.parse('all') == StatsQuery(False, Period.ALL, False)
+    assert StatsQuery.parse('help').help is True
 
 
 def test_clicks_hand_the_handler_a_ledger_event():
@@ -128,7 +131,7 @@ def test_clicks_hand_the_handler_a_ledger_event():
     def write(_id, patch):
         state['row'] = dataclasses.replace(state['row'], unit_cost=patch.unit_cost)
 
-    deps = PriceSwapDeps(
+    deps = SwapDeps(
         fetch_row=lambda _id: dataclasses.replace(state['row']),
         write_row=write,
         display_name=lambda _u: 'Ada',
@@ -136,22 +139,22 @@ def test_clicks_hand_the_handler_a_ledger_event():
     )
     existing = [
         {'type': 'section', 'text': {'type': 'mrkdwn', 'text': 'alert'}},
-        {'type': 'actions', 'block_id': PRICE_ACTIONS_BLOCK_ID, 'elements': []},
+        {'type': 'actions', 'block_id': ACTIONS_BLOCK_ID, 'elements': []},
     ]
 
     def click(action_id, v):
-        return handle_price_swap(deps, ClickInput(action_id, json.dumps(v), 'U1', existing))
+        return SwapHandler(deps).handle(ClickInput(action_id, json.dumps(v), 'U1', existing))
 
     assert click('price_swap_keep', value(n=None)).ledger.kind == 'kept'
     used = click('price_swap_use:0', value())
     assert used.ledger.kind == 'used'
-    assert used.ledger.value['n'] == 1.17
+    assert used.ledger.value.new == 1.17
     assert click('price_swap_use:0', value()).ledger.kind == 'used'  # already at the price
     assert click('price_swap_undo', value(t=int(AT.timestamp()))).ledger.kind == 'undone'
     state['row'] = dataclasses.replace(state['row'], unit_cost=3)
     assert click('price_swap_use:0', value()).ledger.kind == 'refused'
     assert click('price_swap_undo', value(t=int(AT.timestamp()))).ledger is None
-    assert decode_value(json.dumps(value(x=1)))['x'] == 1
+    assert SwapValue.from_json(json.dumps(value(x=1))).test is True
 
 
 class _FakeNotion:
@@ -171,7 +174,7 @@ class _FakeNotion:
         class Pages:
             def create(self, parent, properties):
                 fake.calls.append('create')
-                page = {'id': f'L{len(fake.store) + 1}', 'created_time': to_iso(AT), 'properties': fake._stored(properties)}
+                page = {'id': f'L{len(fake.store) + 1}', 'created_time': utils.to_iso(AT), 'properties': fake._stored(properties)}
                 fake.store.append(page)
                 return page
 
@@ -209,7 +212,7 @@ class _FakeNotion:
 
 def test_record_updates_the_listeners_row_creates_one_when_missing_skips_test_alerts():
     fake = _FakeNotion()
-    ledger = PriceLedger('ds', fake)
+    ledger = SavingsLedger(fake, 'ds')
 
     def fetch_row(_id):
         return purchasing_row()
@@ -219,20 +222,20 @@ def test_record_updates_the_listeners_row_creates_one_when_missing_skips_test_al
 
     # No row yet (alert from before the ledger): created, then the click applied.
     assert ledger.record(ev('used'), 'Ada', fetch_row) == 'new → used'
-    r = parse_ledger_row(fake.store[0])
+    r = LedgerRow.from_page(fake.store[0])
     assert [r.outcome, r.saved, r.name] == ['Used', 38.3, '5V regulator ×10']
 
     # Same alert again: found, not duplicated. A late stale refusal leaves Used alone.
     assert ledger.record(ev('refused'), 'Ada', fetch_row) == 'kept Used'
     assert ledger.record(ev('undone'), 'Bo', fetch_row) == 'Used → undone'
     assert len(fake.store) == 1
-    assert parse_ledger_row(fake.store[0]).outcome == 'Undone'
-    assert PriceLedger('', fake).record(ev('used'), 'Ada', fetch_row) == 'ledger off'
+    assert LedgerRow.from_page(fake.store[0]).outcome == 'Undone'
+    assert SavingsLedger(fake, '').record(ev('used'), 'Ada', fetch_row) == 'ledger off'
 
 
 def test_the_sweep_marks_a_used_row_realized_only_once_ordered_at_the_used_price():
     fake = _FakeNotion()
-    ledger = PriceLedger('ds', fake)
+    ledger = SavingsLedger(fake, 'ds')
     ledger.record(ev('used'), 'Ada', lambda _id: purchasing_row())
     state = {'row': purchasing_row(unit_cost=1.17)}
 
@@ -244,5 +247,5 @@ def test_the_sweep_marks_a_used_row_realized_only_once_ordered_at_the_used_price
     assert ledger.sweep_realized(fetch_row, AT) == 0  # ordered, but at another price
     state['row'] = purchasing_row(unit_cost=1.17, exported=True)
     assert ledger.sweep_realized(fetch_row, AT) == 1
-    assert parse_ledger_row(fake.store[0]).realized is True
+    assert LedgerRow.from_page(fake.store[0]).realized is True
     assert ledger.sweep_realized(fetch_row, AT) == 0  # already marked

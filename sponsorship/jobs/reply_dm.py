@@ -11,16 +11,18 @@ Run: `python -m sponsorship.jobs.reply_dm`
 """
 from __future__ import annotations
 
+import logging
 import sys
 
-from utils.logger import logger
-from sponsorship.identity import fetch_slack_directory, notion_user_to_slack_id
+from core.log import setup_logging
+from core.slack import Slack
 from sponsorship.notion import SponsorNotion
-from sponsorship.jobs.shared import make_slack_client
+
+logger = logging.getLogger(__name__)
 
 
 def run_reply_dm() -> None:
-    client = make_slack_client()
+    client = Slack.shared()
     notion = SponsorNotion()
 
     deals = notion.query_reply_pending()
@@ -29,7 +31,7 @@ def run_reply_dm() -> None:
         return
 
     notion_users_by_id = {u.id: u for u in notion.list_notion_users()}
-    slack_dir = fetch_slack_directory(client)
+    slack_dir = Slack.wrap(client).fetch_directory()
 
     for deal in deals:
         resolved = 0
@@ -39,9 +41,9 @@ def run_reply_dm() -> None:
             user = notion_users_by_id.get(notion_id)
             if not user:
                 continue
-            slack_user_id = notion_user_to_slack_id(client, user, slack_dir)
+            slack_user_id = Slack.wrap(client).notion_user_to_slack_id(user, slack_dir)
             if not slack_user_id:
-                logger.warn(f'Reply DM: no Slack match for DRI {user.name or notion_id} on {deal.company}.')
+                logger.warning(f'Reply DM: no Slack match for DRI {user.name or notion_id} on {deal.company}.')
                 continue
             resolved += 1
             try:
@@ -54,23 +56,24 @@ def run_reply_dm() -> None:
                 client.chat_postMessage(channel=slack_user_id, text=text, unfurl_links=False)
                 sent += 1
             except Exception as err:
-                logger.error(f'Reply DM: failed to DM DRI for {deal.company}', err)
+                logger.error(f'Reply DM: failed to DM DRI for {deal.company}', exc_info=err)
 
         # Clear the flag when we sent at least one DM, or when there was no one to DM at all (so it
         # can't loop). Leave it set only when DRIs resolved but every send failed.
         if sent > 0 or resolved == 0:
             notion.clear_reply_pending(deal.id)
             if sent == 0:
-                logger.warn(f'Reply DM: {deal.company} had no reachable DRI — flag cleared, no DM sent.')
+                logger.warning(f'Reply DM: {deal.company} had no reachable DRI — flag cleared, no DM sent.')
             else:
                 logger.info(f'Reply DM: notified {sent} DRI(s) for {deal.company}.')
         else:
-            logger.warn(f'Reply DM: all DMs failed for {deal.company} — leaving flag set to retry.')
+            logger.warning(f'Reply DM: all DMs failed for {deal.company} — leaving flag set to retry.')
 
 
 if __name__ == '__main__':
+    setup_logging()
     try:
         run_reply_dm()
     except Exception as err:
-        logger.error('Reply DM job failed.', err)
+        logger.error('Reply DM job failed.', exc_info=err)
         sys.exit(1)

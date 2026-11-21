@@ -1,4 +1,5 @@
 """`/sponsor` parsing — the pieces most likely to drift in a port (regexes, number formatting)."""
+from core.slack import unwrap_links
 from sponsorship.models import PipelineRow
 from sponsorship.slack import (
     HEATMAP_AS_OF,
@@ -11,7 +12,6 @@ from sponsorship.slack import (
     parse_score,
     parse_stage,
     parse_won,
-    unwrap_slack_links,
 )
 
 
@@ -22,7 +22,7 @@ def test_heatmap_text_links_page_and_says_how_old():
 
 
 def test_unwrap_slack_links():
-    assert unwrap_slack_links('<mailto:a@b.co|a@b.co> <https://x.com|x.com>') == 'a@b.co https://x.com'
+    assert unwrap_links('<mailto:a@b.co|a@b.co> <https://x.com|x.com>') == 'a@b.co https://x.com'
 
 
 def test_parse_add_structured_form():

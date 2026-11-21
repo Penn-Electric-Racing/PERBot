@@ -8,33 +8,78 @@ paragraph, the draft is never auto-sent, and a human reviews it first.
 from __future__ import annotations
 
 import dataclasses
+import logging
 import math
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Callable, NamedTuple
+from typing import Any, Callable
 
-from slack_bolt import App
 from slack_sdk import WebClient
 
-from config import config
-from utils.clock import to_iso
-from utils.logger import logger
-from utils.text import js_number, round2
-from sponsorship.dates import iso_days_from_now_et, today_iso_et
-from sponsorship.deal_blocks import DealButtonValue, deal_list_blocks, loss_reason_buttons
+from core import utils
+from core.config import config
+from core.slack import (
+    EMAIL_RE,
+    MENTION_RE,
+    ResolvedPeople,
+    Slack,
+    extract_plain_handles,
+    index_notion_users,
+    unwrap_links,
+)
+from sponsorship.deal_blocks import (
+    DealButtonValue,
+    deal_list_blocks,
+    loss_reason_buttons,
+)
 from sponsorship.discovery import find_matching_prospects, scout_companies
 from sponsorship.domain import extract_hostname, looks_like_domain
 from sponsorship.email_draft import draft_outreach_email
-from sponsorship.enrich_company import DomainResolutionError, EnrichOptions, enrich_company
-from sponsorship.identity import index_notion_users, resolve_slack_handles, slack_user_to_notion_id
-from sponsorship.jobs.quota_audit import compute_quota_results, current_audit_window, format_quota_standing
-from sponsorship.jobs.win_post import announce_won_now, fmt_usd, total_raised
+from sponsorship.enrich_company import (
+    DomainResolutionError,
+    EnrichOptions,
+    enrich_company,
+)
 from sponsorship.match import NameMatch, pick_by_name, pick_live_deal
-from sponsorship.models import CATEGORIES, STAGES, BankLeadRow, Category, EnrichResult, PipelineDealInput, PipelineRow, Stage, WonKind
+from sponsorship.models import (
+    CATEGORIES,
+    STAGES,
+    BankLeadRow,
+    Category,
+    EnrichResult,
+    PipelineDealInput,
+    PipelineRow,
+    Stage,
+    WonKind,
+)
 from sponsorship.next_actions import FIRST_OUTREACH_ACTION
 from sponsorship.notion import SponsorNotion
-from sponsorship.scoring import SponsorScores, fit_score, impact_score, priority_score, quadrant, rank_key
+from sponsorship.quota import (
+    compute_quota_results,
+    current_audit_window,
+    format_quota_standing,
+)
+from sponsorship.scoring import (
+    SponsorScores,
+    fit_score,
+    impact_score,
+    priority_score,
+    quadrant,
+    rank_key,
+)
+from sponsorship.wins import announce_won_now, fmt_usd, total_raised
+
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    'USAGE', 'HEATMAP_URL', 'HEATMAP_AS_OF', 'heatmap_text', 'ParsedAdd', 'FIELD_BOUNDARY',
+    'parse_add', 'resolve_assignees', 'resolve_single_bank_row', 'resolve_single_deal',
+    'EMAIL_SLACK_PREVIEW_CHARS', 'parse_email_arg', 'parse_log', 'SCORE_ALIASES',
+    'SCORE_PAIR_RE', 'parse_score', 'SCORE_LABELS', 'RANK_LIMIT', 'WON_KIND_RE', 'ParsedWon',
+    'parse_won', 'parse_stage', 'LeaderboardRow', 'compute_leaderboard', 'MEDALS',
+    'LEADERBOARD_LIMIT', 'handle_command',
+]
 
 notion = SponsorNotion()
 
@@ -95,27 +140,7 @@ def _parallel(*fns: Callable[[], Any]) -> list[Any]:
 
 # --- Parsing ------------------------------------------------------------------
 
-# Slack encodes mentions in command text as `<@U012ABC>` or `<@U012ABC|handle>`.
-MENTION_RE = re.compile(r'<@([A-Z0-9]+)(?:\|[^>]+)?>')
-EMAIL_RE = re.compile(r'[^\s<>]+@[^\s<>]+\.[^\s<>]+')
-
-
-def unwrap_slack_links(text: str) -> str:
-    """Slack auto-links URLs/emails in slash-command text — strip the `<…|…>` wrappers."""
-    text = re.sub(r'<mailto:([^|>]+)(?:\|[^>]*)?>', r'\1', text, flags=re.I)
-    return re.sub(r'<(https?://[^|>]+)(?:\|[^>]*)?>', r'\1', text, flags=re.I)
-
-
-# A plain-text "@handle" (NOT a real Slack mention) — anchored to whitespace/start so it never
-# matches the "@" inside an email. Real mentions are `<@U…>` (see MENTION_RE).
-PLAIN_HANDLE_RE = re.compile(r'(^|\s)@([a-z0-9._-]+)', re.I)
-
-
-def extract_plain_handles(text: str) -> tuple[list[str], str]:
-    """Pull out plain-text @handles (typed, not picked from the menu) and remove them → (handles, cleaned)."""
-    handles = [m.group(2) for m in PLAIN_HANDLE_RE.finditer(text)]
-    cleaned = re.sub(r'\s+', ' ', PLAIN_HANDLE_RE.sub(r'\1', text)).strip()
-    return handles, cleaned
+MENTION_RE, EMAIL_RE = MENTION_RE, EMAIL_RE
 
 
 def _take_mentions(text: str) -> tuple[list[str], str]:
@@ -162,7 +187,7 @@ def parse_add(arg: str) -> ParsedAdd:
     `for <ask>`, and `contact <is|:> <name>` may appear anywhere; the company is whatever leads
     before the first metadata boundary."""
     # 1. Real Slack mentions anywhere → assignees (DRI).
-    assignee_slack_ids, work = _take_mentions(unwrap_slack_links(arg))
+    assignee_slack_ids, work = _take_mentions(unwrap_links(arg))
 
     # 2. Plain-text @handles (typed, not real mentions) → reported + removed.
     plain_handles, work = extract_plain_handles(work)
@@ -222,7 +247,7 @@ def _format_add_result(result: EnrichResult) -> str:
         meta = (
             'provided by you'
             if ct.verification_status == 'provided'
-            else f'{ct.verification_status}, confidence {js_number(ct.confidence)}'
+            else f'{ct.verification_status}, confidence {utils.js_number(ct.confidence)}'
         )
         contact_line = f"{ct.name or '(no name)'} <{ct.email or 'no email'}> — {meta}"
 
@@ -233,7 +258,7 @@ def _format_add_result(result: EnrichResult) -> str:
         f'✅ Added *{result.company}* to the Prospect Bank. <{result.bank_page_url}|Open row>',
         f"• *Type:* {c.type}   *Channel:* {c.channel}   *Category:* {', '.join(c.categories)}",
         f'• *Scores (AI):* market {c.market_fit}/3 · value {c.value_band}/3 · need {c.category_need}/3  →  '
-        f'*Priority so far:* {js_number(priority_score(seeded))}',
+        f'*Priority so far:* {utils.js_number(priority_score(seeded))}',
         '• _Set *Contact strength* + *Sponsors other teams* (0–3) in Notion to finish the score._',
         f'• *Why:* {c.fit_reason}',
     ]
@@ -258,34 +283,9 @@ def _format_add_result(result: EnrichResult) -> str:
     return '\n'.join(lines)
 
 
-class ResolvedAssignees(NamedTuple):
-    notion_ids: list[str]
-    labels: list[str]
-    unresolved: list[str]
-
-
-def resolve_assignees(client: WebClient, slack_ids: list[str], plain_handles: list[str] | None = None) -> ResolvedAssignees:
-    """Resolve assignees → Notion user IDs. Takes real-mention Slack IDs AND plain-text @handles
-    (Slack sends blue-chip mentions as plain text unless the command escapes links); handles are
-    looked up in the Slack directory first. Email-first, name fallback."""
-    handle_ids, handle_unresolved = resolve_slack_handles(client, plain_handles or [])
-    all_slack_ids = list(dict.fromkeys([*slack_ids, *handle_ids]))
-
-    notion_ids: list[str] = []
-    labels: list[str] = []
-    unresolved = [f'@{h}' for h in handle_unresolved]
-    if not all_slack_ids:
-        return ResolvedAssignees(notion_ids, labels, unresolved)
-
-    index = index_notion_users(notion.list_notion_users())
-    for slack_id in all_slack_ids:
-        notion_id = slack_user_to_notion_id(client, slack_id, index)
-        if notion_id:
-            notion_ids.append(notion_id)
-            labels.append(f'<@{slack_id}>')
-        else:
-            unresolved.append(f'<@{slack_id}>')
-    return ResolvedAssignees(notion_ids, labels, unresolved)
+def resolve_assignees(client: WebClient, slack_ids: list[str], plain_handles: list[str] | None = None) -> ResolvedPeople:
+    """Assignees (mentions + typed @handles) → Notion user IDs, email first, name fallback."""
+    return Slack.wrap(client).resolve_people(slack_ids, plain_handles, notion.list_notion_users)
 
 
 def _handle_add(client: WebClient, respond: Respond, arg: str) -> None:
@@ -317,7 +317,7 @@ def _handle_add(client: WebClient, respond: Respond, arg: str) -> None:
     except DomainResolutionError as err:
         _eph(respond, f'✗ {err}')
     except Exception as err:
-        logger.error('/sponsor add failed', err)
+        logger.error('/sponsor add failed', exc_info=err)
         _eph(respond, '✗ Enrichment failed. Check the PERBot logs and try again.')
 
 
@@ -332,7 +332,7 @@ def _format_deal_line(row: PipelineRow) -> str:
 
 
 def _handle_me(client: WebClient, respond: Respond, slack_user_id: str) -> None:
-    notion_id = slack_user_to_notion_id(client, slack_user_id, index_notion_users(notion.list_notion_users()))
+    notion_id = Slack.wrap(client).slack_user_to_notion_id(slack_user_id, index_notion_users(notion.list_notion_users()))
     if not notion_id:
         _eph(
             respond,
@@ -365,13 +365,13 @@ def _handle_quota(client: WebClient, respond: Respond, slack_user_id: str) -> No
     quota = config.sponsorship.weekly_quota
     members, deals, notion_users = _parallel(
         notion.query_quota_roster,
-        lambda: notion.query_deals_edited_since(to_iso(window.start)),
+        lambda: notion.query_deals_edited_since(utils.to_iso(window.start)),
         notion.list_notion_users,
     )
     if not members:
         _eph(respond, 'The Ops Quota Roster has no active members — nothing to check.')
         return
-    caller_notion_id = slack_user_to_notion_id(client, slack_user_id, index_notion_users(notion_users))
+    caller_notion_id = Slack.wrap(client).slack_user_to_notion_id(slack_user_id, index_notion_users(notion_users))
     results = compute_quota_results(members, deals, window, quota)
     _eph(respond, format_quota_standing(results, window, quota, caller_notion_id))
 
@@ -421,7 +421,7 @@ def _ambiguous_bank_text(query: str, rows: list[BankLeadRow], subcommand: str) -
 def resolve_single_bank_row(respond: Respond, raw_query: str, subcommand: str) -> BankLeadRow | None:
     """Find the single Bank prospect for `raw_query` (a name or a domain). Responds itself and
     returns None on zero or ambiguous matches; `subcommand` goes into the retry hint."""
-    query = unwrap_slack_links(raw_query).strip()
+    query = unwrap_links(raw_query).strip()
     match = _lookup_bank_rows(query)
     if match.kind == 'one':
         return match.row
@@ -444,7 +444,7 @@ def resolve_single_deal(respond: Respond, raw_query: str, subcommand: str) -> Pi
     the Bank row's `Bank source` link, so a deal still resolves when its title differs from what was
     typed. When the company is only in the Bank, the reply says how to claim it instead of "check
     the name". Responds itself and returns None unless exactly one deal is found."""
-    query = unwrap_slack_links(raw_query).strip()
+    query = unwrap_links(raw_query).strip()
 
     def reply(text: str) -> None:
         _eph(respond, text)
@@ -490,7 +490,7 @@ EMAIL_SLACK_PREVIEW_CHARS = 3400
 
 def parse_email_arg(arg: str) -> tuple[str, str]:
     """Parse "Edgerton Gear for machining our planetary gears" → (company, inline ask)."""
-    text = unwrap_slack_links(arg).strip()
+    text = unwrap_links(arg).strip()
     m = re.search(r'\s+for\s+', text, re.I)
     if not m:
         return _leading_company(text), ''
@@ -519,7 +519,7 @@ def _handle_email(client: WebClient, respond: Respond, caller_slack_id: str, arg
         user = info.get('user') or {}
         sender_name = (user.get('profile') or {}).get('real_name') or user.get('real_name') or ''
     except Exception as err:
-        logger.warn('/sponsor email: users.info failed; leaving the [NAME] placeholder', err)
+        logger.warning('/sponsor email: users.info failed; leaving the [NAME] placeholder', exc_info=err)
 
     result = draft_outreach_email(notion, row, sender_name, ask)
 
@@ -553,7 +553,7 @@ def parse_log(arg: str) -> tuple[str, str] | None:
 
 
 def _handle_ask(respond: Respond, arg: str) -> None:
-    parsed = parse_log(unwrap_slack_links(arg))
+    parsed = parse_log(unwrap_links(arg))
     if not parsed:
         _eph(
             respond,
@@ -635,8 +635,8 @@ def _handle_score(respond: Respond, arg: str) -> None:
     _eph(
         respond,
         f'✅ Scored *{row.company}* — set {set_str}.\n'
-        f'• *Fit:* {js_number(fit_score(merged))}/9 · *Impact:* {js_number(impact_score(merged))}/6  →  '
-        f'*Priority:* {js_number(priority_score(merged))} {quadrant(merged)}  <{row.url}|Open row>',
+        f'• *Fit:* {utils.js_number(fit_score(merged))}/9 · *Impact:* {utils.js_number(impact_score(merged))}/6  →  '
+        f'*Priority:* {utils.js_number(priority_score(merged))} {quadrant(merged)}  <{row.url}|Open row>',
     )
 
 
@@ -675,8 +675,8 @@ def _handle_rank(respond: Respond, arg: str) -> None:
         provisional = ' _(unscored)_' if r.scores.contact_strength is None or r.scores.sponsors_other_teams is None else ''
         fsae = '🏁 ' if r.fsae_ties else ''
         lines.append(
-            f"{i + 1}. {fsae}<{r.url}|{r.company or 'Untitled'}> — *{js_number(priority_score(r.scores))}* {quadrant(r.scores)}  ·  "
-            f'fit {js_number(fit_score(r.scores))}/9 · impact {js_number(impact_score(r.scores))}/6{provisional}'
+            f"{i + 1}. {fsae}<{r.url}|{r.company or 'Untitled'}> — *{utils.js_number(priority_score(r.scores))}* {quadrant(r.scores)}  ·  "
+            f'fit {utils.js_number(fit_score(r.scores))}/9 · impact {utils.js_number(impact_score(r.scores))}/6{provisional}'
         )
     if any(r.fsae_ties for r in ranked):
         lines.append(
@@ -723,7 +723,7 @@ def _handle_find(respond: Respond, arg: str) -> None:
         return
 
     lines = [
-        f'{i + 1}. <{m.row.url}|{m.row.company}> — {m.why} _(priority {js_number(priority_score(m.row.scores))} {quadrant(m.row.scores)})_'
+        f'{i + 1}. <{m.row.url}|{m.row.company}> — {m.why} _(priority {utils.js_number(priority_score(m.row.scores))} {quadrant(m.row.scores)})_'
         for i, m in enumerate(matches)
     ]
     _eph(
@@ -800,7 +800,7 @@ def _handle_log(respond: Respond, arg: str) -> None:
     if not deal:
         return
 
-    notion.log_touch(deal, note, today_iso_et())
+    notion.log_touch(deal, note, utils.today_iso())
     _eph(respond, f'✅ Logged a touch on <{deal.url}|{deal.company}> and stamped *Last contact* = today.')
 
 
@@ -861,7 +861,7 @@ def parse_won(arg: str) -> ParsedWon | None:
         company = _leading_company(pct.group(1))
         percent = float(pct.group(2))
         base = _dollars(pct.group(3), pct.group(4))
-        amount_usd = round2(percent / 100 * base) if math.isfinite(base) else math.nan
+        amount_usd = utils.round2(percent / 100 * base) if math.isfinite(base) else math.nan
         if company and amount_usd > 0:
             kind, note = _extract_won_kind((pct.group(5) or '').strip())
             # A computed discount is, by definition, a valued discount unless told otherwise.
@@ -870,7 +870,7 @@ def parse_won(arg: str) -> ParsedWon | None:
                 amount_usd=amount_usd,
                 note=note,
                 kind=kind or 'Valued discount',
-                computed=f'{js_number(percent)}% of {fmt_usd(base)}',
+                computed=f'{utils.js_number(percent)}% of {fmt_usd(base)}',
             )
 
     # Plain amount form.
@@ -900,7 +900,7 @@ def _handle_won(client: WebClient, respond: Respond, arg: str) -> None:
     if not deal:
         return
 
-    notion.mark_won(deal, parsed.amount_usd, parsed.note, today_iso_et(), parsed.kind)
+    notion.mark_won(deal, parsed.amount_usd, parsed.note, utils.today_iso(), parsed.kind)
 
     # Post to #operations immediately. Same claim as the hourly job → no double-post.
     announced_suffix = ''
@@ -908,7 +908,7 @@ def _handle_won(client: WebClient, respond: Respond, arg: str) -> None:
         if announce_won_now(client, notion, deal, parsed.amount_usd, parsed.kind, parsed.note):
             announced_suffix = f' and posted it to #{config.sponsorship.win_post_channel}'
     except Exception as err:
-        logger.error('/sponsor won: announcement failed (deal still marked Won)', err)
+        logger.error('/sponsor won: announcement failed (deal still marked Won)', exc_info=err)
 
     computed_note = f' _({parsed.computed})_' if parsed.computed else ''
     kind_note = f' — {parsed.kind.lower()}' if parsed.kind else ''
@@ -947,7 +947,7 @@ def _handle_stage(respond: Respond, user_id: str, arg: str) -> None:
     if not deal:
         return
 
-    notion.set_stage(deal, stage, today_iso_et())
+    notion.set_stage(deal, stage, utils.today_iso())
     tip = ' _(tip: use `/sponsor won <company> <amount>` to record the $ and post the win)_' if stage == 'Won' else ''
     text = f'✅ Moved <{deal.url}|{deal.company}> to *{stage}*.{tip}'
     if stage == 'Lost' and not deal.loss_reason:
@@ -1045,7 +1045,7 @@ def _handle_leaderboard(respond: Respond) -> None:
 
 def _parse_claim(arg: str) -> tuple[str, list[str], list[str]]:
     """→ (company, assignee slack ids, plain handles)."""
-    assignee_slack_ids, without_mentions = _take_mentions(unwrap_slack_links(arg))
+    assignee_slack_ids, without_mentions = _take_mentions(unwrap_links(arg))
     plain_handles, cleaned = extract_plain_handles(without_mentions)
     return _leading_company(cleaned), assignee_slack_ids, plain_handles
 
@@ -1094,7 +1094,7 @@ def _handle_claim(client: WebClient, respond: Respond, caller_slack_id: str, arg
             categories=bank.categories,
             contact=bank.contact,
             next_action=FIRST_OUTREACH_ACTION,
-            next_action_date_iso=iso_days_from_now_et(7),
+            next_action_date_iso=utils.iso_days_from_now(7),
         )
     )
     notion.mark_bank_claimed(bank.id, assignees.notion_ids, 'Graduated')
@@ -1109,70 +1109,69 @@ def _handle_claim(client: WebClient, respond: Respond, caller_slack_id: str, arg
 # --- Registration -------------------------------------------------------------
 
 
-def register_sponsor_commands(app: App) -> None:
-    @app.command('/sponsor')
-    def _sponsor(ack, command, respond, client):
-        parts = (command.get('text') or '').strip().split()
-        subcommand = (parts[0] if parts else '').lower()
-        arg = ' '.join(parts[1:])
-        user_id = command['user_id']
+def handle_command(ack, command, respond, client) -> None:  # noqa: ANN001
+    """`/sponsor <subcommand> ...`: dispatch to the handler for each subcommand."""
+    parts = (command.get('text') or '').strip().split()
+    subcommand = (parts[0] if parts else '').lower()
+    arg = ' '.join(parts[1:])
+    user_id = command['user_id']
 
-        try:
-            if subcommand == 'add':
-                # Enrichment is slow (fetch + LLM + Hunter); ack fast, then post via response_url.
-                ack(response_type='ephemeral', text=f":hourglass_flowing_sand: Researching *{arg or '…'}*")
-                _handle_add(client, respond, arg)
-            elif subcommand == 'claim':
-                ack()
-                _handle_claim(client, respond, user_id, arg)
-            elif subcommand == 'ask':
-                ack()
-                _handle_ask(respond, arg)
-            elif subcommand in ('email', 'draft'):
-                # Drafting is slow (template + homepage fetch + LLM + Notion writes) — ack fast, then
-                # deliver via response_url (same pattern as add).
-                ack(response_type='ephemeral', text=f":hourglass_flowing_sand: Drafting outreach for *{arg or '…'}*")
-                _handle_email(client, respond, user_id, arg)
-            elif subcommand == 'log':
-                ack()
-                _handle_log(respond, arg)
-            elif subcommand == 'won':
-                ack()
-                _handle_won(client, respond, arg)
-            elif subcommand == 'stage':
-                ack()
-                _handle_stage(respond, user_id, arg)
-            elif subcommand == 'score':
-                ack()
-                _handle_score(respond, arg)
-            elif subcommand == 'rank':
-                ack()
-                _handle_rank(respond, arg)
-            elif subcommand == 'find':
-                # One LLM pass over the whole unclaimed Bank — ack fast, respond via response_url.
-                ack(response_type='ephemeral', text=f":mag: Searching the Bank for *{arg or '…'}*")
-                _handle_find(respond, arg)
-            elif subcommand in ('scout', 'discover'):
-                # Slowest command (generate + N homepage fetches + verify) — can take a minute.
-                ack(
-                    response_type='ephemeral',
-                    text=f":compass: Scouting new companies for *{arg or '…'}* — this can take a minute.",
-                )
-                _handle_scout(respond, arg)
-            elif subcommand in ('leaderboard', 'board', 'top'):
-                ack()
-                _handle_leaderboard(respond)
-            elif subcommand == 'quota':
-                # Three Notion queries — ack fast, respond via response_url.
-                ack(response_type='ephemeral', text=':clipboard: Checking this week’s quota…')
-                _handle_quota(client, respond, user_id)
-            elif subcommand == 'me':
-                ack()
-                _handle_me(client, respond, user_id)
-            elif subcommand == 'heatmap':
-                ack(response_type='ephemeral', text=heatmap_text())
-            else:
-                ack(response_type='ephemeral', text=USAGE)
-        except Exception as err:
-            logger.error(f'/sponsor {subcommand} failed', err)
-            _eph(respond, '✗ Something went wrong. Check the PERBot logs.')
+    try:
+        if subcommand == 'add':
+            # Enrichment is slow (fetch + LLM + Hunter); ack fast, then post via response_url.
+            ack(response_type='ephemeral', text=f":hourglass_flowing_sand: Researching *{arg or '…'}*")
+            _handle_add(client, respond, arg)
+        elif subcommand == 'claim':
+            ack()
+            _handle_claim(client, respond, user_id, arg)
+        elif subcommand == 'ask':
+            ack()
+            _handle_ask(respond, arg)
+        elif subcommand in ('email', 'draft'):
+            # Drafting is slow (template + homepage fetch + LLM + Notion writes) — ack fast, then
+            # deliver via response_url (same pattern as add).
+            ack(response_type='ephemeral', text=f":hourglass_flowing_sand: Drafting outreach for *{arg or '…'}*")
+            _handle_email(client, respond, user_id, arg)
+        elif subcommand == 'log':
+            ack()
+            _handle_log(respond, arg)
+        elif subcommand == 'won':
+            ack()
+            _handle_won(client, respond, arg)
+        elif subcommand == 'stage':
+            ack()
+            _handle_stage(respond, user_id, arg)
+        elif subcommand == 'score':
+            ack()
+            _handle_score(respond, arg)
+        elif subcommand == 'rank':
+            ack()
+            _handle_rank(respond, arg)
+        elif subcommand == 'find':
+            # One LLM pass over the whole unclaimed Bank — ack fast, respond via response_url.
+            ack(response_type='ephemeral', text=f":mag: Searching the Bank for *{arg or '…'}*")
+            _handle_find(respond, arg)
+        elif subcommand in ('scout', 'discover'):
+            # Slowest command (generate + N homepage fetches + verify) — can take a minute.
+            ack(
+                response_type='ephemeral',
+                text=f":compass: Scouting new companies for *{arg or '…'}* — this can take a minute.",
+            )
+            _handle_scout(respond, arg)
+        elif subcommand in ('leaderboard', 'board', 'top'):
+            ack()
+            _handle_leaderboard(respond)
+        elif subcommand == 'quota':
+            # Three Notion queries — ack fast, respond via response_url.
+            ack(response_type='ephemeral', text=':clipboard: Checking this week’s quota…')
+            _handle_quota(client, respond, user_id)
+        elif subcommand == 'me':
+            ack()
+            _handle_me(client, respond, user_id)
+        elif subcommand == 'heatmap':
+            ack(response_type='ephemeral', text=heatmap_text())
+        else:
+            ack(response_type='ephemeral', text=USAGE)
+    except Exception as err:
+        logger.error(f'/sponsor {subcommand} failed', exc_info=err)
+        _eph(respond, '✗ Something went wrong. Check the PERBot logs.')

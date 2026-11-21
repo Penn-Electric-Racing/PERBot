@@ -14,8 +14,7 @@ from sponsorship.deal_blocks import (
 )
 from sponsorship.jobs.stale_dm import StaleDmInput, build_stale_dm
 from sponsorship.models import LOSS_REASONS
-
-from .helpers import deal as _deal
+from tests.sponsorship.helpers import deal as _deal
 
 VALUE = DealButtonValue('p1', 'U1')
 

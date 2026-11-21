@@ -1,7 +1,13 @@
 import re
 from datetime import datetime, timezone
 
-from sponsorship.deal_blocks import DEAL_ACTION_IDS, DealButtonValue, buttons_for, deal_blocks, finalize_deal_blocks
+from sponsorship.deal_blocks import (
+    DEAL_ACTION_IDS,
+    DealButtonValue,
+    buttons_for,
+    deal_blocks,
+    finalize_deal_blocks,
+)
 from sponsorship.jobs.stale_dm import StaleDmInput, build_stale_dm, split_stale_claims
 from sponsorship.next_actions import (
     NextActionChange,
@@ -10,8 +16,7 @@ from sponsorship.next_actions import (
     next_action_after_touch,
     next_action_for_stage,
 )
-
-from .helpers import deal as _deal
+from tests.sponsorship.helpers import deal as _deal
 
 TODAY = '2026-10-22'
 

@@ -6,9 +6,18 @@ import sys
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from core.log import setup_logging
 from meeting_notes.config import SUBSYSTEMS
-from meeting_notes.notion_writer import SubsystemContent, create_meeting_notes_page, find_existing_meeting_page_for_today
-from meeting_notes.parse_updates import EMPTY_UPDATE, ProcessedMessage, parse_subsystem_updates
+from meeting_notes.notion_writer import (
+    SubsystemContent,
+    create_meeting_notes_page,
+    find_existing_meeting_page_for_today,
+)
+from meeting_notes.parse_updates import (
+    EMPTY_UPDATE,
+    ProcessedMessage,
+    parse_subsystem_updates,
+)
 from meeting_notes.slack_helpers import (
     find_most_recent_bot_thread,
     get_channel_id,
@@ -93,6 +102,7 @@ def _monday_midnight_et_unix() -> int:
 
 
 if __name__ == '__main__':
+    setup_logging()
     try:
         main()
     except Exception as err:

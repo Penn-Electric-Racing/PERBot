@@ -5,6 +5,7 @@ ambiguous stays a plain name. Rebuilt every 6 hours; a failure leaves names unme
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -12,8 +13,11 @@ from typing import TYPE_CHECKING
 
 from slack_sdk import WebClient
 
-from sponsorship.identity import fetch_slack_directory, notion_user_to_slack_id
-from utils.logger import logger
+from core.slack import Slack
+
+logger = logging.getLogger(__name__)
+
+__all__ = ['People', 'TTL_S', 'people_map']
 
 if TYPE_CHECKING:
     from arrivals.notion import ArrivalsNotion
@@ -29,14 +33,14 @@ _lock = threading.Lock()
 def _build(client: WebClient, notion: 'ArrivalsNotion') -> People:
     with ThreadPoolExecutor(max_workers=2) as pool:
         users_f = pool.submit(notion.list_users)
-        dir_f = pool.submit(fetch_slack_directory, client)
+        dir_f = pool.submit(Slack.wrap(client).fetch_directory)
         users, slack_dir = users_f.result(), dir_f.result()
     people: People = {}
     for user in users:
         if not user.name or user.name in people:
             continue
         try:
-            slack_id = notion_user_to_slack_id(client, user, slack_dir)
+            slack_id = Slack.wrap(client).notion_user_to_slack_id(user, slack_dir)
         except Exception:
             slack_id = None
         if slack_id:
@@ -53,7 +57,7 @@ def people_map(client: WebClient, notion: 'ArrivalsNotion') -> People:
         try:
             people = _build(client, notion)
         except Exception as err:
-            logger.warn('Arrivals: could not map requesters to Slack; replies will use plain names', err)
+            logger.warning('Arrivals: could not map requesters to Slack; replies will use plain names', exc_info=err)
             _cached = None
             return {}
         _cached = (time.time(), people)

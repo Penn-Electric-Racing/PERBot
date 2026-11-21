@@ -24,6 +24,13 @@ from sponsorship.discovery import chat_json
 from sponsorship.domain import extract_hostname
 from sponsorship.homepage import fetch_html, strip_html
 
+__all__ = [
+    'FSAE_PATTERN', 'TEAM_PAGE_HINT', 'FALLBACK_PATHS', 'MAX_LINKED_PAGES', 'SNIPPET_RADIUS',
+    'MAX_SNIPPETS', 'FsaePerson', 'FsaeCompanyMention', 'FsaeScan', 'Snippet',
+    'find_team_page_links', 'extract_snippets', 'verify_labels', 'LABEL_PROMPT',
+    'scan_fsae_ties', 'format_fsae_evidence',
+]
+
 # FSAE terms. Excludes "Formula E"/"Formula 1" (pro series, not student history).
 FSAE_PATTERN = re.compile(r'\b(?:formula[\s-]*sae|fsae|formula[\s-]+student|formula[\s-]+hybrid|sae[\s-]+formula)\b', re.I)
 

@@ -1,4 +1,9 @@
-from utils.notion_text import clean_notion_markdown, extract_doc_date, extract_rev_number, is_template_placeholder
+from search.notion_text import (
+    clean_notion_markdown,
+    extract_doc_date,
+    extract_rev_number,
+    is_template_placeholder,
+)
 
 S3 = (
     'https://prod-files-secure.s3.us-west-2.amazonaws.com/69f38b25/abc/Screenshot.png?X-Amz-Algorithm=AWS4-HMAC-SHA256'

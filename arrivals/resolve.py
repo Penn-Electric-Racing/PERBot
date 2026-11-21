@@ -18,9 +18,19 @@ from datetime import datetime
 from typing import AbstractSet, Callable
 
 from arrivals.match import match_slip
-from arrivals.models import ArrivalRow, Extraction, OpenOrder, Resolution, Scan, SlipMatch
-from arrivals.orders import eligible_rows, group_orders, is_stale, order_key, orders_for_vendor, rank_orders
+from arrivals.models import Extraction, OpenOrder, Resolution, Scan, SlipMatch
+from arrivals.orders import (
+    eligible_rows,
+    group_orders,
+    is_stale,
+    order_key,
+    orders_for_vendor,
+    rank_orders,
+)
 from arrivals.pick import Pick, pick_orders
+from core.purchasing import PurchasingRow
+
+__all__ = ['Picker', 'resolve_package', 'resolve_scan']
 
 Picker = Callable[[Extraction, list[OpenOrder], str], list[Pick]]
 
@@ -37,7 +47,7 @@ def _pick_to_match(pick: Pick) -> SlipMatch:
 
 def resolve_package(
     pkg: Extraction,
-    rows: list[ArrivalRow],
+    rows: list[PurchasingRow],
     as_of: datetime,
     message_text: str,
     picker: Picker = pick_orders,
@@ -85,7 +95,7 @@ def resolve_package(
 
 def resolve_scan(
     scan: Scan,
-    open_rows: list[ArrivalRow],
+    open_rows: list[PurchasingRow],
     as_of: datetime,
     message_text: str,
     picker: Picker | None = None,

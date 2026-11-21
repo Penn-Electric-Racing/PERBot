@@ -15,18 +15,31 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
 import re
 from dataclasses import dataclass, field
 
-from utils.logger import logger
+from core import utils
 from sponsorship.classify import classify_company_fit
-from sponsorship.dates import iso_days_from_now_et
 from sponsorship.domain import extract_hostname, looks_like_domain, to_canonical_url
 from sponsorship.fsae_ties import FsaeScan, scan_fsae_ties
 from sponsorship.homepage import fetch_company_text
 from sponsorship.hunter import find_contact_by_domain, resolve_by_company
-from sponsorship.models import AssignmentInfo, BankRowInput, EnrichResult, HunterContact, PipelineDealInput
+from sponsorship.models import (
+    AssignmentInfo,
+    BankRowInput,
+    EnrichResult,
+    HunterContact,
+    PipelineDealInput,
+)
 from sponsorship.notion import SponsorNotion
+
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    'FIRST_OUTREACH_DAYS', 'EnrichOptions', 'DomainResolutionError', 'OK_STATUSES',
+    'MIN_CONFIDENCE', 'enrich_company',
+]
 
 # Days out to seed a newly-assigned deal's first next-action (feeds the stale DM).
 FIRST_OUTREACH_DAYS = 7
@@ -137,7 +150,7 @@ def enrich_company(text: str, opts: EnrichOptions | None = None) -> EnrichResult
                     categories=existing.categories,
                     contact=existing.contact,
                     next_action=_first_outreach(opts.known_ask),
-                    next_action_date_iso=iso_days_from_now_et(FIRST_OUTREACH_DAYS),
+                    next_action_date_iso=utils.iso_days_from_now(FIRST_OUTREACH_DAYS),
                 )
             )
             notion.mark_bank_claimed(existing.id, assignee_ids, 'Graduated')
@@ -171,7 +184,7 @@ def enrich_company(text: str, opts: EnrichOptions | None = None) -> EnrichResult
     try:
         fsae = scan_fsae_ties(company, hostname)
     except Exception as err:
-        logger.warn(f'FSAE-ties scan failed for {canonical}; leaving row unscanned.', err)
+        logger.warning(f'FSAE-ties scan failed for {canonical}; leaving row unscanned.', exc_info=err)
 
     # Step 5 — contact. A requester-provided contact is authoritative (not LLM-invented), so it
     # replaces the Hunter lookup; otherwise fall back to Hunter.
@@ -211,7 +224,7 @@ def enrich_company(text: str, opts: EnrichOptions | None = None) -> EnrichResult
                 categories=classification.categories,
                 contact=contact,
                 next_action=_first_outreach(opts.known_ask),
-                next_action_date_iso=iso_days_from_now_et(FIRST_OUTREACH_DAYS),
+                next_action_date_iso=utils.iso_days_from_now(FIRST_OUTREACH_DAYS),
             )
         )
         assert assignment_base is not None

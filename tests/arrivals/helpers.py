@@ -1,26 +1,19 @@
-import dataclasses
+from arrivals.models import Extraction, SlipLine
+from core.purchasing import PurchasingRow
+from tests.benbuys.helpers import row as purchasing_row
 
-from arrivals.models import ArrivalRow, Extraction, SlipLine
+ARRIVAL_DEFAULTS = dict(
+    vendor='DigiKey',
+    run_id='',
+    arrived='No',
+    exported=True,
+    submitted_at='2026-09-20',
+    ordered_at='2026-09-28T15:00:00.000Z',
+)
 
-from ..benbuys.helpers import row as purchasing_row
 
-_ARRIVAL_FIELDS = {f.name for f in dataclasses.fields(ArrivalRow)} - {f.name for f in dataclasses.fields(purchasing_row('x'))}
-
-
-def row(part_number: str, **o) -> ArrivalRow:
-    base_overrides = {k: v for k, v in o.items() if k not in _ARRIVAL_FIELDS}
-    base = purchasing_row(part_number, **base_overrides)
-    fields = {f.name: getattr(base, f.name) for f in dataclasses.fields(base)}
-    arrival = dict(
-        vendor='DigiKey',
-        run_id='',
-        arrived='No',
-        exported=True,
-        submitted_at='2026-09-20',
-        ordered_at='2026-09-28T15:00:00.000Z',
-    )
-    arrival.update({k: v for k, v in o.items() if k in _ARRIVAL_FIELDS})
-    return ArrivalRow(**fields, **arrival)
+def row(part_number: str, **o) -> PurchasingRow:
+    return purchasing_row(part_number, **{**ARRIVAL_DEFAULTS, **o})
 
 
 def line(pn: str, qty=1, **o) -> SlipLine:

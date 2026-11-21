@@ -1,9 +1,16 @@
-from arrivals.blocks import decode_value, encode_value, lead_time_line, package_key, settle_blocks, target_ids, these_value
+from arrivals.blocks import (
+    decode_value,
+    encode_value,
+    lead_time_line,
+    package_key,
+    settle_blocks,
+    target_ids,
+    these_value,
+)
 from arrivals.extract import parse_scan
 from arrivals.match import match_slip, part_codes, vendor_key
 from arrivals.models import OrderNumber
-
-from .helpers import BASE, line, pkg, row
+from tests.arrivals.helpers import BASE, line, pkg, row
 
 
 def test_vendor_key_spellings_collapse_unaliased_vendors_key_on_their_first_word():

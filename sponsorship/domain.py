@@ -8,6 +8,8 @@ from __future__ import annotations
 import re
 from urllib.parse import urlsplit
 
+__all__ = ['extract_hostname', 'looks_like_domain', 'to_canonical_url']
+
 
 def extract_hostname(text: str) -> str | None:
     """Strip protocol, path, port, and a leading www. → bare lowercase hostname, or None."""

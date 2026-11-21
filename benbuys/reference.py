@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import re
 
-from benbuys.models import PurchasingRow
+from core.purchasing import PurchasingRow
+
+__all__ = ['MIN_REFERENCE_SIGNAL', 'clean_reference_text', 'truncate_at_word', 'truncate_reference']
 
 # Minimum useful reference length; below this the part number is more informative.
 MIN_REFERENCE_SIGNAL = 8

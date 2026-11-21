@@ -10,14 +10,17 @@ Notion and the bot follows.
 """
 from __future__ import annotations
 
-from config import config
-from utils.text import js_number
-from benbuys.models import CartLine, PurchasingRow, VendorAdapter
+from benbuys.models import CartLine, VendorAdapter
 from benbuys.reference import truncate_reference
+from core import utils
+from core.config import config
+from core.purchasing import PurchasingRow
+
+__all__ = ['digikey_adapter']
 
 
 def _format_cart_lines(lines: list[CartLine]) -> str:
-    return '\n'.join(f'{js_number(l.quantity)}, {l.part_number}, {l.reference}' for l in lines)
+    return '\n'.join(f'{utils.js_number(l.quantity)}, {l.part_number}, {l.reference}' for l in lines)
 
 
 def _reference_field(part_number: str, rows: list[PurchasingRow]) -> str:

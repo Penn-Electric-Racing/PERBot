@@ -6,8 +6,14 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from utils.text import js_number, round2
-from benbuys.models import CartLine, PrepResult, PrepWarning, PurchasingRow, VendorAdapter
+from benbuys.models import CartLine, PrepResult, PrepWarning, VendorAdapter
+from core import utils
+from core.purchasing import PurchasingRow
+
+__all__ = [
+    'normalize_part_number', 'aggregate_rows', 'HIGH_VALUE_LINE_USD', 'warnings_for',
+    'build_prep', 'money', 'PrepBlocks', 'format_prep',
+]
 
 
 def normalize_part_number(raw: str) -> str:
@@ -27,7 +33,7 @@ def aggregate_rows(rows: list[PurchasingRow], adapter: VendorAdapter) -> list[Ca
             part_number=pn,
             quantity=sum(r.quantity for r in group),
             reference=adapter.reference_field(pn, group),
-            line_total=round2(sum(r.quantity * r.unit_cost for r in group)),
+            line_total=utils.round2(sum(r.quantity * r.unit_cost for r in group)),
             rows=group,
         )
         for pn, group in by_part.items()
@@ -76,7 +82,7 @@ def build_prep(adapter: VendorAdapter, ready: list[PurchasingRow], not_ready: li
         rows=rows,
         not_ready=not_ready,
         warnings=warnings_for(lines, adapter),
-        estimated_total=round2(sum(r.quantity * r.unit_cost for r in rows)),
+        estimated_total=utils.round2(sum(r.quantity * r.unit_cost for r in rows)),
         cherry_picked=bool(cherry),
     )
 
@@ -110,7 +116,7 @@ def format_prep(adapter: VendorAdapter, prep: PrepResult, approval_threshold: fl
         'Services location: leave blank',
     ])
 
-    t = js_number(approval_threshold)
+    t = utils.js_number(approval_threshold)
     approval = (
         f'likely APPROVAL REQUIRED (>${t}; BEN total decides)'
         if prep.estimated_total > approval_threshold

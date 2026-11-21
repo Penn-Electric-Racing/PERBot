@@ -20,17 +20,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from slack_sdk import WebClient
-
-from config import config
-from sponsorship.jobs.shared import resolve_channel_id
 from arrivals.blocks import Reply
 from arrivals.extract import SlipImage
-from arrivals.models import ArrivalRow
 from arrivals.notion import ArrivalsNotion
 from arrivals.people import people_map
-from arrivals.pipeline import DeliveryMessage, DeliveryResult, is_image, load_images, parent_text, process_delivery, with_names
+from arrivals.pipeline import (
+    DeliveryMessage,
+    DeliveryResult,
+    is_image,
+    load_images,
+    parent_text,
+    process_delivery,
+    with_names,
+)
 from arrivals.slack import already_answered, handle_photo, is_photo_post
+from core.config import config
+from core.log import setup_logging
+from core.purchasing import PurchasingRow
+from core.slack import Slack
 
 TYPES = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp'}
 
@@ -93,7 +100,7 @@ def _summarize(label: str, result: DeliveryResult, seconds: float) -> None:
     print('')
 
 
-def try_local(args: list[str], open_rows: list[ArrivalRow]) -> None:
+def try_local(args: list[str], open_rows: list[PurchasingRow]) -> None:
     text = _flag(args, '--text') or ''
     each = '--each' in args
     targets = [a for a in args if a != '--each']
@@ -113,10 +120,10 @@ def try_local(args: list[str], open_rows: list[ArrivalRow]) -> None:
         _summarize(' + '.join(f.name for f in group), process_delivery(msg, open_rows), time.time() - started)
 
 
-def backtest(args: list[str], open_rows: list[ArrivalRow]) -> None:
+def backtest(args: list[str], open_rows: list[PurchasingRow]) -> None:
     limit = int(_flag(args, '--limit') or 50)
-    client = WebClient(token=config.slack.bot_token)
-    channel = resolve_channel_id(client, config.arrivals.channel or 'packages')
+    client = Slack.shared()
+    channel = Slack.wrap(client).resolve_channel_id(config.arrivals.channel or 'packages')
     if not channel:
         raise RuntimeError('ARRIVALS_CHANNEL not found')
 
@@ -179,8 +186,8 @@ def post_missed(args: list[str]) -> None:
     if not m:
         raise RuntimeError('Usage: python -m arrivals.cli post <message ts or permalink> [--force | --replace]')
     message_ts = f'{m.group(1)}.{m.group(2)}'
-    client = WebClient(token=config.slack.bot_token)
-    channel = resolve_channel_id(client, config.arrivals.channel or 'packages')
+    client = Slack.shared()
+    channel = Slack.wrap(client).resolve_channel_id(config.arrivals.channel or 'packages')
     if not channel:
         raise RuntimeError('ARRIVALS_CHANNEL not found')
 
@@ -250,6 +257,7 @@ def main(argv: list[str] | None = None) -> None:
 
 
 if __name__ == '__main__':
+    setup_logging()
     try:
         main()
     except Exception as err:

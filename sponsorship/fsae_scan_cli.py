@@ -13,7 +13,8 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-from sponsorship.dates import today_iso_et
+from core import utils
+from core.log import setup_logging
 from sponsorship.domain import extract_hostname
 from sponsorship.fsae_ties import FsaeScan, format_fsae_evidence, scan_fsae_ties
 from sponsorship.models import BankLeadRow
@@ -53,7 +54,7 @@ def main(argv: list[str]) -> int:
         todo = todo[: args.limit]
     print(f"{len(live)} live Bank rows; scanning {len(todo)}{' (dry run)' if args.dry_run else ''}.")
 
-    today = today_iso_et()
+    today = utils.today_iso()
     results: list[_Result] = []
     lock = threading.Lock()
 
@@ -116,4 +117,5 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == '__main__':
+    setup_logging()
     sys.exit(main(sys.argv[1:]))

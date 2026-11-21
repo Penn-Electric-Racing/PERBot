@@ -17,8 +17,13 @@ from __future__ import annotations
 import re
 from urllib.parse import urlparse
 
-from benbuys.prep import normalize_part_number
-from arrivals.models import ArrivalRow, Extraction, LineMatch, MatchConfidence, SlipLine, SlipMatch
+from arrivals.models import Extraction, LineMatch, MatchConfidence, SlipLine, SlipMatch
+from core.purchasing import PurchasingRow, normalize_part_number
+
+__all__ = [
+    'VENDOR_ALIASES', 'VENDOR_NAMES', 'vendor_display', 'vendor_key', 'row_vendor_key',
+    'vendors_compatible', 'part_codes', 'match_slip',
+]
 
 VENDOR_ALIASES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r'^digi-?key'), 'digikey'),
@@ -63,7 +68,7 @@ def vendor_key(raw: str | None) -> str:
     return next((w for w in re.split(r'[^a-z0-9]+', lower) if w and w != 'the'), '')
 
 
-def row_vendor_key(row: ArrivalRow | None) -> str:
+def row_vendor_key(row: PurchasingRow | None) -> str:
     """The row's vendor from its Vendor text, else its product link's domain."""
     if row is None:
         return ''
@@ -102,7 +107,7 @@ def part_codes(*texts: str | None) -> dict[str, None]:
     return codes
 
 
-def _line_matches_row(line: SlipLine, row: ArrivalRow) -> bool:
+def _line_matches_row(line: SlipLine, row: PurchasingRow) -> bool:
     row_pn = normalize_part_number(row.part_number)
     if row_pn:
         for pn in (line.vendor_part_number, line.manufacturer_part_number):
@@ -117,7 +122,7 @@ def _line_matches_row(line: SlipLine, row: ArrivalRow) -> bool:
     return any(code in row_codes for code in part_codes(line.vendor_part_number, line.manufacturer_part_number, line.description))
 
 
-def _order_time(row: ArrivalRow) -> str:
+def _order_time(row: PurchasingRow) -> str:
     return row.ordered_at or row.submitted_at or '9999'
 
 
@@ -126,7 +131,7 @@ def _shipped_here(line: SlipLine) -> bool:
     return line.quantity_shipped is None or line.quantity_shipped > 0
 
 
-def match_slip(extraction: Extraction, open_rows: list[ArrivalRow]) -> SlipMatch:
+def match_slip(extraction: Extraction, open_rows: list[PurchasingRow]) -> SlipMatch:
     slip_vendor = vendor_key(extraction.vendor)
     pool = [r for r in open_rows if vendors_compatible(slip_vendor, row_vendor_key(r))]
     lines = [l for l in extraction.lines if _shipped_here(l)]

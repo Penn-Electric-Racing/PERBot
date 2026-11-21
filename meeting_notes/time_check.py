@@ -12,6 +12,8 @@ import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+__all__ = ['assert_expected_et_hour_range', 'assert_expected_et_hour']
+
 
 def assert_expected_et_hour_range(min_hour: int, max_hour: int) -> None:
     if os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch':

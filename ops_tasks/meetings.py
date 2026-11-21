@@ -10,7 +10,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sponsorship.dates import iso_add_days, weekday_utc
+from core import utils
+
+__all__ = ['OpsMeeting', 'saturday_on_or_after', 'pick_meeting']
 
 
 @dataclass
@@ -23,7 +25,7 @@ class OpsMeeting:
 def saturday_on_or_after(iso: str) -> str:
     """The Saturday on or after `iso` (YYYY-MM-DD); `iso` itself when it is a Saturday."""
     day = iso[:10]
-    return iso_add_days(day, (6 - weekday_utc(day) + 7) % 7)
+    return utils.iso_add_days(day, (6 - utils.weekday_utc(day) + 7) % 7)
 
 
 def pick_meeting(meetings: list[OpsMeeting], anchor_iso: str) -> OpsMeeting | None:

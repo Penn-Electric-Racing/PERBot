@@ -5,11 +5,15 @@ classifier still runs on the company name + domain.
 """
 from __future__ import annotations
 
+import logging
 import re
 
 import httpx
 
-from utils.logger import logger
+logger = logging.getLogger(__name__)
+
+__all__ = ['MAX_TEXT_CHARS', 'FETCH_TIMEOUT_S', 'strip_html', 'fetch_html', 'fetch_company_text']
+
 
 MAX_TEXT_CHARS = 6000
 FETCH_TIMEOUT_S = 12
@@ -43,7 +47,7 @@ def fetch_html(url: str) -> str:
             return ''
         return res.text
     except Exception as err:
-        logger.warn(f'Homepage fetch failed for {url}', err)
+        logger.warning(f'Homepage fetch failed for {url}', exc_info=err)
         return ''
 
 

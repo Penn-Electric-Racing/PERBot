@@ -14,19 +14,21 @@ Run: `python -m ops_tasks.digest`
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import sys
 
-from sponsorship.dates import today_iso_et
-from sponsorship.identity import fetch_slack_directory, notion_user_to_slack_id
-from sponsorship.jobs.shared import make_slack_client
-from utils.logger import logger
-from utils.schedule import claim_job_run, is_slot_open_et
+from core import utils
+from core.job_log import JobLog
+from core.log import setup_logging
+from core.slack import Slack
 from ops_tasks.blocks import build_digest_blocks, digest_footer, digest_header
 from ops_tasks.format import carried_weeks, is_overdue, sort_tasks, task_line  # noqa: F401  (re-exported)
 from ops_tasks.meetings import pick_meeting
 from ops_tasks.notion import OpsTask, OpsTaskOwner, OpsTasksNotion
+
+logger = logging.getLogger(__name__)
 
 # Seed rows created so Notion would show every member's group; skipped until renamed.
 PLACEHOLDER_RE = re.compile(r'^rename me', re.I)
@@ -59,7 +61,7 @@ def link_orphan_tasks(notion: OpsTasksNotion, tasks: list[OpsTask], dry_run: boo
             task.week = meeting.date
             linked += 1
         except Exception as err:
-            logger.warn(f'Ops digest: could not link "{task.title}" to meeting {meeting.date}.', err)
+            logger.warning(f'Ops digest: could not link "{task.title}" to meeting {meeting.date}.', exc_info=err)
     logger.info(
         f"Ops digest: linked {linked}/{len(orphans)} unlinked task(s) to their meeting page{' (dry run)' if dry_run else ''}."
     )
@@ -74,25 +76,25 @@ def build_digest(tasks: list[OpsTask]) -> str:
 def run_ops_digest(force: bool | None = None) -> None:
     if force is None:
         force = (os.environ.get('FORCE_OPS_DIGEST') or '').lower() == 'true'
-    if not force and not is_slot_open_et('Sunday', 10):
+    if not force and not utils.is_slot_open('Sunday', 10):
         logger.info('Ops digest: not Sunday ≥10:00 ET and not forced — skipping.')
         return
     dry_run = (os.environ.get('OPS_DIGEST_DRY_RUN') or '').lower() == 'true'
     # Late-tolerant gate + two DST crons ⇒ dedupe via the Job Log (DM jobs can't read DM history).
-    if not force and not dry_run and not claim_job_run('ops-tasks-digest'):
+    if not force and not dry_run and not JobLog.shared().claim_run('ops-tasks-digest'):
         return
 
     notion = OpsTasksNotion()
     open_tasks = notion.query_open_tasks()
     real = [t for t in open_tasks if not is_placeholder(t)]
-    logger.info(f'Ops digest ({today_iso_et()}): {len(open_tasks)} open rows, {len(open_tasks) - len(real)} placeholders skipped.')
+    logger.info(f'Ops digest ({utils.today_iso()}): {len(open_tasks)} open rows, {len(open_tasks) - len(real)} placeholders skipped.')
     link_orphan_tasks(notion, real, dry_run)
 
     # One list per owner; a co-owned task appears in every owner's DM.
     by_owner: dict[str, tuple[OpsTaskOwner, list[OpsTask]]] = {}
     for task in real:
         if not task.owners:
-            logger.warn(f'Ops digest: "{task.title}" has no Owner — nobody to DM.')
+            logger.warning(f'Ops digest: "{task.title}" has no Owner — nobody to DM.')
             continue
         for owner in task.owners:
             by_owner.setdefault(owner.id, (owner, []))[1].append(task)
@@ -100,28 +102,29 @@ def run_ops_digest(force: bool | None = None) -> None:
         logger.info('Ops digest: nobody has open tasks — nothing to send.')
         return
 
-    client = make_slack_client()
-    slack_dir = fetch_slack_directory(client)
+    client = Slack.shared()
+    slack_dir = Slack.wrap(client).fetch_directory()
 
     for owner, tasks in by_owner.values():
-        slack_user_id = notion_user_to_slack_id(client, owner, slack_dir)
+        slack_user_id = Slack.wrap(client).notion_user_to_slack_id(owner, slack_dir)
         label = owner.name or owner.email or owner.id
         if not slack_user_id:
-            logger.warn(f'Ops digest: no Slack match for {label} — skipping {len(tasks)} task(s).')
+            logger.warning(f'Ops digest: no Slack match for {label} — skipping {len(tasks)} task(s).')
             continue
         text = build_digest(tasks)
         if dry_run:
             logger.info(f'Ops digest (dry run) → {label} ({slack_user_id}):\n{text}')
             continue
-        # Blocks carry the Done / In progress / Push buttons (handled by ops_tasks/actions.py);
+        # Blocks carry the Done / In progress / Push buttons (handled by ops_tasks/views.py);
         # `text` is the notification/fallback copy.
         client.chat_postMessage(channel=slack_user_id, text=text, blocks=build_digest_blocks(tasks, slack_user_id), unfurl_links=False)
         logger.info(f'Ops digest: sent {len(tasks)} task(s) to {label}.')
 
 
 if __name__ == '__main__':
+    setup_logging()
     try:
         run_ops_digest()
     except Exception as err:
-        logger.error('Ops digest job failed.', err)
+        logger.error('Ops digest job failed.', exc_info=err)
         sys.exit(1)

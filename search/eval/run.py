@@ -12,10 +12,11 @@ import re
 import sys
 from pathlib import Path
 
-from config import config
-from services.index_store import assemble_index, read_index_files
-from services.llm import embed_query
-from services.search import parse_query, rank_pages, search_index
+from core.config import config
+from core.log import setup_logging
+from search.engine import parse_query, rank_pages, search_index
+from search.index_store import assemble_index, read_index_files
+from search.llm import embed_query
 
 JUNK = re.compile(r'X-Amz|<empty-block|\{color=|<columns>|prod-files-secure')
 
@@ -82,6 +83,7 @@ def main(argv: list[str] | None = None) -> None:
 
 
 if __name__ == '__main__':
+    setup_logging()
     try:
         main()
     except Exception as err:

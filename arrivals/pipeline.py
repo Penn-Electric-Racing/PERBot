@@ -12,11 +12,18 @@ from typing import AbstractSet, Any
 import httpx
 from slack_sdk import WebClient
 
-from config import config
-from arrivals.blocks import People, Reply, ReplyContext, build_reply
+from arrivals.blocks import Reply, ReplyContext, build_reply
 from arrivals.extract import ScanContext, SlipImage, scan_photos
-from arrivals.models import ArrivalRow, Resolution, Scan
+from arrivals.models import Resolution, Scan
+from arrivals.people import People
 from arrivals.resolve import Picker, resolve_scan
+from core.config import config
+from core.purchasing import PurchasingRow
+
+__all__ = [
+    'DIRECT_TYPES', 'MAX_IMAGES', 'DeliveryMessage', 'DeliveryResult', 'process_delivery',
+    'resolution_key', 'is_image', 'load_images', 'slack_name', 'with_names', 'parent_text',
+]
 
 # OpenAI accepts these directly; anything else (HEIC from iPhones) goes via Slack's JPEG thumbnail.
 DIRECT_TYPES = {'image/jpeg', 'image/png', 'image/webp', 'image/gif'}
@@ -50,7 +57,7 @@ class DeliveryResult:
     reply: Reply | None
 
 
-def process_delivery(msg: DeliveryMessage, open_rows: list[ArrivalRow], picker: Picker | None = None) -> DeliveryResult:
+def process_delivery(msg: DeliveryMessage, open_rows: list[PurchasingRow], picker: Picker | None = None) -> DeliveryResult:
     scan = scan_photos(msg.images, ScanContext(text=msg.text, parent_text=msg.parent_text))
     as_of = datetime.fromtimestamp(float(msg.ts), tz=timezone.utc)
     message_text = '\n'.join(x for x in (msg.parent_text, msg.text) if x)

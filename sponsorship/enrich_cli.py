@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import sys
 
-from utils.text import js_number
+from core import utils
+from core.log import setup_logging
 from sponsorship.enrich_company import DomainResolutionError, enrich_company
 
 
@@ -37,7 +38,7 @@ def main(argv: list[str]) -> int:
     assert c is not None
     contact = (
         f"{result.contact.name or '(no name)'} <{result.contact.email}> "
-        f'— {result.contact.verification_status}, confidence {js_number(result.contact.confidence)}'
+        f'— {result.contact.verification_status}, confidence {utils.js_number(result.contact.confidence)}'
         if result.contact
         else '(none found)'
     )
@@ -68,4 +69,5 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == '__main__':
+    setup_logging()
     sys.exit(main(sys.argv[1:]))

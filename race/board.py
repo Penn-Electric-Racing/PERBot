@@ -10,8 +10,10 @@ from typing import Any, Literal, TypedDict
 
 import httpx
 
-from config import config
-from utils.clock import to_iso
+from core import utils
+from core.config import config
+
+__all__ = ['BoardRow', 'Period', 'WEEK_MS', 'race_configured', 'fetch_board', 'format_lap']
 
 
 class BoardRow(TypedDict):
@@ -35,7 +37,7 @@ def race_configured() -> bool:
 
 def fetch_board(period: Period, limit: int = 10, now_ms: float | None = None, http: Any = None) -> list[BoardRow]:
     now = time.time() * 1000 if now_ms is None else now_ms
-    since = to_iso(datetime.fromtimestamp((now - WEEK_MS) / 1000, tz=timezone.utc)) if period == 'week' else None
+    since = utils.to_iso(datetime.fromtimestamp((now - WEEK_MS) / 1000, tz=timezone.utc)) if period == 'week' else None
     client = http or httpx
     res = client.post(
         f"{config.race.supabase_url.rstrip('/')}/rest/v1/rpc/bot_leaderboard",

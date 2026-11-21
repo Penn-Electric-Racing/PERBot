@@ -17,8 +17,14 @@ from typing import Any
 
 from openai import OpenAI
 
-from config import config, has_openai
 from arrivals.models import Extraction, OrderNumber, Scan, SlipLine
+from core.config import config
+from core.llm import LLM
+
+__all__ = [
+    'SlipImage', 'ScanContext', 'ORDER_KINDS', 'SCENES', 'LINE_SCHEMA', 'PACKAGE_SCHEMA',
+    'PROMPT', 'GENERIC_HINT', 'PACKAGING', 'is_specific_hint', 'parse_scan', 'scan_photos',
+]
 
 
 @dataclass
@@ -118,16 +124,10 @@ If the Slack message names items that can't be tied to a specific package in the
 
 Do not transcribe prices, totals, or account numbers."""
 
-_client: OpenAI | None = None
-
-
 def _openai() -> OpenAI:
-    global _client
-    if not has_openai():
+    if not config.has_openai:
         raise RuntimeError('OPENAI_API_KEY is not configured; package arrivals need it to read photos.')
-    if _client is None:
-        _client = OpenAI(api_key=config.openai.api_key)
-    return _client
+    return LLM.shared().openai
 
 
 def _str(v: Any) -> str | None:

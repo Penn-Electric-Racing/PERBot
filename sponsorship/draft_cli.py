@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys
 
+from core.log import setup_logging
 from sponsorship.email_draft import draft_outreach_email
 from sponsorship.notion import SponsorNotion
 
@@ -64,4 +65,5 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == '__main__':
+    setup_logging()
     sys.exit(main(sys.argv[1:]))

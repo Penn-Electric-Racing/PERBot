@@ -1,7 +1,7 @@
 import numpy as np
 
-from services.index_store import assemble_index
-from services.search import parse_query, rank_pages
+from search.engine import parse_query, rank_pages
+from search.index_store import assemble_index
 
 
 def page(id_, title, path, **extra):

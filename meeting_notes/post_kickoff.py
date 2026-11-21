@@ -6,8 +6,12 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from core.log import setup_logging
 from meeting_notes.config import KICKOFF_MESSAGE, SUBSYSTEMS
-from meeting_notes.slack_helpers import find_most_recent_bot_thread, post_kickoff_message
+from meeting_notes.slack_helpers import (
+    find_most_recent_bot_thread,
+    post_kickoff_message,
+)
 from meeting_notes.time_check import assert_expected_et_hour_range
 
 
@@ -47,6 +51,7 @@ def main() -> None:
 
 
 if __name__ == '__main__':
+    setup_logging()
     try:
         main()
     except Exception as err:

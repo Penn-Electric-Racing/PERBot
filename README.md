@@ -24,23 +24,78 @@ PERBot/
   .env                        # your tokens (copy .env.example)
   requirements.txt            # dependencies: pip install -r requirements.txt
   pyproject.toml              # project metadata + pytest config
-  render.yaml                 # Render background-worker blueprint
-  app.py                      # Slack bot entrypoint (Socket Mode): python app.py
-  config.py                   # environment variable loading
-  indexer.py                  # Notion/Drive crawler + index builder: python indexer.py
-  models.py                   # shared types
-  services/
+  deploy/                     # Lightsail setup, systemd unit, SSH deploy script
+  app.py                      # Slack bot entrypoint (Socket Mode): PERBot adds each Feature, routes @mentions
+  core/                       # what every feature shares; features import from here, never from each other
+    config.py                 # config: every setting, from the environment / .env
+    feature.py ui.py bolt.py  # Feature (@command/@event/@shortcut/@modal/@task), View (@button), Bolt adapter
+    blocks.py database.py abc.py  # Block Kit builders, Database[Model] + Properties, NotionModel
+    notion.py                 # Notion: the API client (Notion.shared()); collect, plain_text, dashed_id, ...
+    slack.py                  # Slack: the client (Slack.shared()), directory; match_by_name, unwrap_links, ...
+    llm.py                    # LLM: OpenAI + Groq clients (LLM.shared())
+    job_log.py                # JobLog: once-only records in the ⚙️ Job Log (cron dedup, alerts, queue)
+    purchasing.py             # Purchasing (PEFS) database: PurchasingRow, Purchasing.rows / row
+    utils.py log.py           # helper functions (text, timestamps, Eastern time); setup_logging()
+  search/                     # doc search: /dt, /reindex, /indexstatus, @PERBot docs answers
+    feature.py                # Search: the commands + the index load/refresh task
+    bot.py                    # IndexManager (load / hot-swap / reindex) + DocSearch (the answers)
+    indexer.py                # Notion/Drive crawler + index builder: python -m search.indexer
+    engine.py                 # hybrid BM25 + vector ranking and filters
     index_store.py            # reads/writes the index + int8 embeddings
     index_downloader.py       # pulls the nightly index from the GitHub release
-    llm.py                    # OpenAI embeddings/answers, Groq classify/rerank
-    notion.py                 # Notion API crawler / markdown fetcher
-    search.py                 # hybrid BM25 + vector ranking and filters
+    llm.py                    # embeddings, answers, classify/rerank
+    notion.py drive.py        # Notion / Google Drive crawlers
     slack_format.py           # Slack block formatting
-  sponsorship/                # /sponsor, deal buttons, sponsorship jobs + CLIs
-  ops_tasks/ benbuys/ arrivals/ price_check/ race/ meeting_notes/ sources/ search/
-  utils/                      # chunking, logging, text, scheduling helpers
+  sponsorship/                # /sponsor (feature.py), deal buttons + modals (views.py), jobs + CLIs
+  price_check/                # price-check worker, alert buttons, /pricecheck
+    scrapers/                 # part search: web search, Mouser/DigiKey, LLM page reading
+  ops_tasks/                  # /assign, its modal + message shortcut, the digest buttons (views.py)
+  arrivals/                   # delivery photos → package cards (views.py), the nudge sweep task
+  benbuys/ race/ anon/        # /benbuys, /race, /anon (each a feature.py)
+  meeting_notes/              # GitHub Actions jobs only
   tests/                      # pytest suite
 ```
+
+Code layout: each feature is a folder that imports only from `core/` (and itself). Its
+`feature.py` is a `Feature` holding the Slack listeners, its `views.py` holds the `View`s for its
+buttons, and `app.py` only does `PERBot.add_feature(...)` for each.
+
+| Piece | Where |
+|---|---|
+| `Feature` with `@command` / `@event` / `@shortcut` / `@modal` / `@task` methods; `PERBot.add_feature(...)` | `core/feature.py` |
+| `View` with `@button(action_id or regex)` callbacks that receive an `Interaction`, plus `@modal` | `core/ui.py` |
+| Block Kit builders (`Section`, `Actions`, `Button`, `Confirm`, ...) | `core/blocks.py` |
+| `NotionModel.from_page(page, db)`: models built from payloads that keep their database | `core/abc.py` |
+| `Database[Model]` (`query`, `get`, `create`, `update`), `Properties(page)` readers, `*_value()` writers | `core/database.py` |
+| Plain helper functions: `utils.price`, `utils.escape`, `utils.to_iso`, `utils.is_slot_open`, ... | `core/utils.py` |
+| `Choice` / `SelectOption` enums (they compare equal to plain strings) | `core/enums.py` |
+| `PERBotError` → `ConfigError`, `NotionError`, `SlackError`, `ScraperError` | `core/errors.py` |
+| TypedDicts for raw payloads | `core/types/` |
+
+A feature has `feature.py` and, as it needs them, `views.py`, `models.py`, `types.py`, `enums.py`,
+`database.py` and its own CLIs (`price_check/` has the full set).
+
+Imports are direct: a name is imported from the module that defines it
+(`from core.notion import Notion`, `from price_check.feature import PriceCheck`), never through a
+package. Each package's `__init__.py` is its map: a docstring listing its modules, `from .module
+import *` for each library module, and an `__all__`. A module run with `python -m` holds only its
+CLI (`main()`); its shared code lives in a library module next to it (`check.py` → `checker.py`,
+`jobs/quota_audit.py` → `quota.py`, `llm_scraper.py` → `llm_reader.py`), so the package never
+imports the module it's about to run.
+
+Where code goes:
+
+| What it is | Where it goes |
+|---|---|
+| a stateless helper | a module function (`core/utils.py`, or the feature module it serves) |
+| something about one kind of data | a method or property on that data's class (`listing.flags`, `value.saved`) |
+| a way to build an object | a classmethod (`from_page`, `from_json`, `ClickKind.from_action_id`) |
+| state (a client, a database, a lock, config) | a class with `__init__` |
+| a CLI | a `main()` function in the module |
+
+So no classes of only `@staticmethod`s: a raw payload is a TypedDict in `types.py`, and the model
+that wraps it (`SwapValue`, `Listing`, `LedgerRow`) lives in `models.py`. Bolt injects listener arguments by parameter name, so bound methods
+are registered through `core.bolt.listener(...)`; `Feature` and `View` do this for you.
 
 ## Exactly where to paste your tokens
 
@@ -97,30 +152,158 @@ OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 - `OPENAI_EMBEDDING_MODEL` = model used for semantic search embeddings
 
 
-## Cloud deployment (recommended: Render background worker)
+## Deployment (AWS Lightsail over SSH)
 
-Because PERBot uses Slack **Socket Mode**, it does **not** need a public Slack request URL. The cleanest cloud deployment is a **background worker** that maintains the outbound WebSocket connection to Slack. Render background workers are a good fit for this pattern. Slack’s Socket Mode docs explain that Socket Mode uses a WebSocket connection instead of a public HTTP Request URL, and Render’s worker docs describe long-running processes that do not receive inbound traffic.
+PERBot uses Slack **Socket Mode**: it holds an outbound WebSocket to Slack, so the server needs no
+public URL, open ports or load balancer. It runs as a `systemd` service on a Lightsail Ubuntu instance.
+The scheduled jobs (nightly index, sponsorship DMs, digests) keep running in GitHub Actions.
 
-### Included deployment files
-- `render.yaml` — Render worker blueprint (`pip install -r requirements.txt`, then `python app.py`)
+### Files
+- `deploy/setup.sh` — one-time setup on the instance: Python venv, dependencies, swap, systemd service
+- `deploy/perbot.service` — the systemd unit (runs `.venv/bin/python app.py`, restarts on crash and at boot)
+- `deploy/deploy.sh` — run from your laptop: pulls the pushed branch on the server, installs, restarts
 
-### How to deploy on Render
-1. Push this project to a GitHub repo.
-2. In Render, create a new service from that repo.
-3. Render should detect `render.yaml`; if not, choose **Background Worker** manually.
-4. Add these environment variables in Render:
-   - `SLACK_BOT_TOKEN`
-   - `SLACK_APP_TOKEN`
-   - `NOTION_TOKEN`
-   - `OPENAI_API_KEY` (recommended)
-5. Deploy.
+### Instance
+Ubuntu 24.04, **2 GB RAM or more**: the bot keeps the search index and embeddings in memory, and
+`/reindex` runs the indexer alongside it. `setup.sh` also adds a 2 GB swap file. No inbound firewall
+rules are needed beyond SSH (22).
 
-### Important cloud behavior
+### First-time setup
+```bash
+ssh -i ~/.ssh/LightsailDefaultKey.pem ubuntu@<instance-ip>
+git clone https://github.com/Penn-Electric-Racing/PERBot.git ~/PERBot
+cd ~/PERBot && git checkout python
+bash deploy/setup.sh
+nano .env                      # fill in the tokens (see .env.example)
+sudo systemctl restart perbot
+journalctl -u perbot -f        # watch it connect
+```
+If the repo is private, clone with a GitHub deploy key or a token.
+
+### Deploying updates
+Push your commits, then from your laptop:
+```bash
+PERBOT_HOST=ubuntu@<instance-ip> PERBOT_KEY=~/.ssh/LightsailDefaultKey.pem bash deploy/deploy.sh
+```
+It resets the server's checkout to `origin/python`, installs dependencies, restarts the service and
+prints the last log lines if it fails to start. Only pushed commits are deployed.
+
+### On the server
+| Task | Command |
+| --- | --- |
+| Status | `sudo systemctl status perbot` |
+| Live logs | `journalctl -u perbot -f` |
+| Restart / stop | `sudo systemctl restart perbot` / `sudo systemctl stop perbot` |
+| Change a token | edit `~/PERBot/.env`, then restart |
+
+Run only **one** copy of the bot per Slack app: a second Socket Mode connection (for example your
+laptop) splits events with the server.
+
+### Index behavior
 - The nightly GitHub Action (`build-index.yml`) builds the index and uploads it to the `notion-index-latest` release; the bot downloads it at startup and hot-swaps a newer one every `INDEX_REFRESH_MINUTES`.
 - If no index can be downloaded and `AUTO_BOOTSTRAP_ON_MISSING_INDEX=true`, the bot runs the indexer itself in a child process.
+- Index files live in `~/PERBot/data/` on the server.
 
-### If you later add Notion webhooks
-Socket Mode removes the need for a public Slack endpoint, but **Notion webhooks still require a public HTTP endpoint**. For the current MVP, the included worker setup skips webhooks and relies on startup/manual reindexing instead.
+### Notion webhooks
+Socket Mode removes the need for a public Slack endpoint, but **Notion webhooks require a public HTTPS endpoint**, so PERBot doesn't use them: the index refreshes nightly and on `/reindex`, and the [price check](#price-check) polls Notion.
+
+## Price check
+
+Watches the Purchasing (PEFS) Notion database and, when a new row's price has moved, DMs the row's
+Point of contact on Slack. Rows can come from anywhere: typed into Notion, imported, or another app.
+Each new row is re-priced at its quantity (web search, Mouser/DigiKey APIs and an LLM reading the
+product pages) and compared with the `Unit cost` in Notion. This used to be the separate
+`PER-Purchasing` repo. It now runs **inside the bot** on a background thread when
+`PRICE_CHECK_ENABLED=true`. It's all in `price_check/` and uses the shared clients in `core/` (`Notion`, `Slack`, `JobLog`,
+`PurchasingRow`, `config.price_check`):
+
+| File | What it does |
+|---|---|
+| `feature.py` | `PriceCheck`: `/pricecheck`, the alert buttons, and the worker / Realized-sweep tasks |
+| `worker.py` | the background loop: poll Notion, rate-limit, back off (`Worker`) |
+| `checker.py` | `PriceFinder` (search a row), `Checker` (re-price a row, DM the alert) |
+| `check.py` | the manual CLI: `python -m price_check.check` |
+| `database.py` | `PurchasingPrices`, `CheckQueue` (⚙️ Job Log), `SavingsLedger` (💸 Price Check Savings) |
+| `models.py` | `Finding`, `PriceRow`, `Notes`, `LedgerEvent`, `LedgerRow`, `Summary`, `StatsQuery` |
+| `views.py` | `PriceAlert` (the DM), `SwapHandler` (what a click does), `PriceAlertView` (the buttons) |
+| `enums.py`, `types.py` | `CheckStatus`, `Outcome`, ...; the button value and listing payloads |
+| `cli.py` | DM yourself a test alert |
+| `scrapers/` | the part search ([`price_check/scrapers/README.md`](price_check/scrapers/README.md)) |
+
+```
+every 2 min: Purchasing rows edited since the last look (open, complete, settled)
+  → queue in the ⚙️ Job Log (once per row, ever)
+  → worker: search + Mouser/DigiKey + LLM → price at Quant.
+  → price moved past the threshold → Slack DM to the Point of contact (with Use / Keep buttons)
+  → button click → PriceAlertView (price_check/views.py) updates Unit cost, logs 💸 Price Check Savings
+```
+
+### How it works
+1. **Poll:** every `PRICE_CHECK_POLL_SECONDS` (120) the bot asks Notion for this season's open,
+   complete rows edited since the last poll. A row edited within the last
+   `PRICE_CHECK_SETTLE_SECONDS` (60), plus a minute because Notion rounds edit times, is left for
+   the next poll, so a row typed in field by field is checked once it's done.
+2. **Queue:** new rows are queued in the ⚙️ Job Log as `price-check-queue <page id>`. That entry stays
+   forever (as `price-check-done` once checked), so a row is queued once, however often it's edited.
+3. **Check:** one worker checks the queue one row at a time, at most 20 an hour
+   (`PRICE_CHECK_MAX_PER_HOUR`). If search or the LLM is failing (quota, outage), the row stays
+   queued and the worker backs off 10 min, 20 min, … up to 6 h.
+
+The queue lives in Notion, so a restart loses nothing. The first poll after startup looks back
+`PRICE_CHECK_LOOKBACK_HOURS` (default a week), which covers rows added while the bot was down.
+
+**Which rows:** this season's (`BENBUYS_SEASON`) rows with `Exported?` unchecked and a
+`Cat. or model no.`, `Quant.` and `Unit cost`.
+
+**The check:** the row's `Link to product webpage` is read first and the manufacturer part number
+shown there is searched (`Cat. or model no.` is only the fallback, since it's often a description).
+The price at that link is used if it could be read, else the best-ranked option. Pack rows ("Sold in
+packs of N" in the notes) are compared per unit. It alerts when the unit price moved at least
+`PRICE_CHECK_THRESHOLD_PCT` (10) and the order total at least `PRICE_CHECK_MIN_DELTA_USD` (0).
+
+**Who gets it:** Notion person → Slack user by email, then an unambiguous name match. No match →
+`PRICE_CHECK_CHANNEL` if set, else the log. Each alert is claimed once in the Job Log as
+`price-alert <row id> <unit cost> x<quant>`, so a row alerts again only after its `Unit cost` or
+`Quant.` changes. Each alert sent is also logged as a Pending row in 💸 Price Check Savings.
+
+### Turning it on
+1. In `~/PERBot/.env`: `PRICE_CHECK_ENABLED=true` and `SERPER_API_KEY` (or `BRAVE_API_KEY`). It reads
+   product pages with OpenAI on the bot's `OPENAI_API_KEY`. Optionally the Mouser/DigiKey keys and
+   `PRICE_CHECK_CHANNEL`.
+2. The Slack app needs `users:read` and `users:read.email` on top of `chat:write`, to find people.
+3. `sudo systemctl restart perbot`. The log shows `price check: polling Purchasing every 120s …`, or
+   `price check: not started: …` with the reason (a missing key never stops the bot).
+
+Run it on one machine only: a laptop running `app.py` with it enabled would search the same rows (the
+Job Log still stops double DMs).
+
+### Settings
+| Variable | Default | What it does |
+|---|---|---|
+| `PRICE_CHECK_ENABLED` | `false` | Run the price check in the bot |
+| `SERPER_API_KEY` / `BRAVE_API_KEY` | one required | Web search (DuckDuckGo blocks cloud servers) |
+| `OPENAI_API_KEY` | required (the bot's) | OpenAI reads the product pages |
+| `PRICE_CHECK_MODEL` | `gpt-5-mini` | OpenAI model for the price check |
+| `MOUSER_API_KEY`, `DIGIKEY_CLIENT_ID` + `DIGIKEY_CLIENT_SECRET` | optional | Exact distributor prices and stock |
+| `PRICE_CHECK_THRESHOLD_PCT` | `10` | Alert when the unit price moved at least this much (%) |
+| `PRICE_CHECK_MIN_DELTA_USD` | `0` | …and the order total moved at least this much ($) |
+| `PRICE_CHECK_CHANNEL` | none | Post here when the Point of contact has no Slack match |
+| `PRICE_CHECK_POLL_SECONDS` | `120` | How often to look for new rows |
+| `PRICE_CHECK_SETTLE_SECONDS` | `60` | Wait this long after a row's last edit |
+| `PRICE_CHECK_MAX_PER_HOUR` | `20` | Rows checked per hour at most |
+| `PRICE_CHECK_LOOKBACK_HOURS` | `168` | On startup, catch up on rows edited this recently |
+| `PRICE_CHECK_POOL` | `15` | Search results read per row |
+| `BENBUYS_SEASON`, `BENBUYS_PURCHASING_DS_ID`, `NOTION_JOB_LOG_DS_ID`, `PRICE_CHECK_LEDGER_DS_ID` | as the bot | Which season and databases |
+
+### Manual commands
+```bash
+python -m price_check.check --queue --dry-run -v       # one pass: new rows + queue, nothing written
+python -m price_check.check --enqueue <notion page url> # queue a row by hand
+python -m price_check.check --row <notion page url>     # check one row now
+python -m price_check.check --all --dry-run -v         # every open row, print alerts only
+python -m price_check.scrapers.llm_scraper "LM7805" -q 50       # the part search on its own
+python -m price_check.cli <row url> <price> --to <Slack user id> # DM yourself a test alert's buttons
+```
 
 ## Install
 
@@ -136,7 +319,7 @@ The bot downloads the nightly index from the GitHub release on startup, so you o
 to build one locally:
 
 ```bash
-python indexer.py
+python -m search.indexer
 ```
 
 This finds every Notion page shared with your integration (plus Google Drive when configured),
@@ -170,7 +353,8 @@ Run these from the repo root. Each GitHub Actions workflow runs one of them:
 | Meeting notes kickoff / generate | `python -m meeting_notes.post_kickoff` / `generate_notes` |
 
 Local tools: `sponsorship.enrich_cli`, `draft_cli`, `discovery_cli`, `fsae_scan_cli`,
-`fix_next_actions_cli`, `benbuys.cli`, `arrivals.cli`, `price_check.cli`,
+`fix_next_actions_cli`, `benbuys.cli`, `arrivals.cli`, `price_check.cli`, `price_check.check`,
+`price_check.scrapers.llm_scraper` / `regex_scraper`,
 `search.eval.run`, and `scripts/convert_legacy_index.py`.
 
 ## How to use PERBot in Slack
@@ -239,12 +423,10 @@ What it adds:
 - embedding checkpoints are saved every few batches
 - the indexer runs in a child process so the bot stays responsive
 
-Recommended Render env vars:
+Recommended server `.env` settings:
 
 ```env
 AUTO_BOOTSTRAP_ON_MISSING_INDEX=true
-INDEX_PATH=/YOUR-DISK-MOUNT-PATH/index.json
-INDEX_STATUS_PATH=/YOUR-DISK-MOUNT-PATH/index-status.json
 SAVE_CHECKPOINT_EVERY_BATCHES=10
 SLACK_REINDEX_ALLOWED_USER_IDS=U12345678
 ```

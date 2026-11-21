@@ -7,8 +7,7 @@ import pytest
 
 from benbuys.email import build_requisition_email, render_email
 from benbuys.mailer import GmailApiMailer, WebhookMailer, to_rfc822
-
-from .helpers import test_adapter
+from tests.benbuys.helpers import test_adapter
 
 BASE = dict(from_addr='electric@engineering.upenn.edu', cc=['oat@engineering.upenn.edu', 'arjunsh@sas.upenn.edu'], approval_threshold=500)
 

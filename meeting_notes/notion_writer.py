@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -8,14 +7,16 @@ from functools import lru_cache
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from notion_api import NotionClient
+from core.notion import Notion
 from meeting_notes.config import NOTION_PARENT_PAGE_ID
 from meeting_notes.parse_updates import ParsedUpdate
 
+__all__ = ['SubsystemContent', 'create_meeting_notes_page', 'find_existing_meeting_page_for_today']
+
 
 @lru_cache(maxsize=1)
-def _notion() -> NotionClient:
-    return NotionClient(auth=os.environ.get('NOTION_API_KEY') or os.environ.get('NOTION_TOKEN') or '')
+def _notion() -> Notion:
+    return Notion.shared()
 
 
 @dataclass

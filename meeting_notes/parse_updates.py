@@ -18,6 +18,11 @@ from dataclasses import dataclass, field, fields
 
 import httpx
 
+__all__ = [
+    'GROQ_API_URL', 'GROQ_MODEL', 'SECTION_KEYS', 'ParsedUpdate', 'EMPTY_UPDATE',
+    'ProcessedMessage', 'HEADER_MAP', 'detect_header', 'parse_subsystem_updates',
+]
+
 GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions'
 # Read from GROQ_MODEL directly (like GROQ_API_KEY below) to keep this GitHub Actions entrypoint
 # decoupled from the app config, which requires Slack/Notion env vars this job doesn't have.

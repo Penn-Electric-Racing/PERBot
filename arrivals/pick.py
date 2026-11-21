@@ -11,18 +11,24 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from openai import OpenAI
+from arrivals.models import Extraction, OpenOrder
+from core import utils
+from core.config import config
+from core.llm import LLM
+from core.purchasing import PurchasingRow
 
-from config import config, has_openai
-from utils.text import js_number
-from arrivals.models import ArrivalRow, Extraction, OpenOrder
+__all__ = [
+    'Pick', 'MAX_ORDERS', 'MAX_PICKS', 'MAX_ITEMS', 'PickPrompt', 'build_pick_prompt',
+    'PICK_SCHEMA', 'parse_picks', 'stem', 'VENDOR_WORDS', 'STOP', 'terms', 'is_generic',
+    'ground_picks', 'pick_orders',
+]
 
 
 @dataclass(eq=False)
 class Pick:
     order: OpenOrder
     # The rows the evidence points at (all of the order's rows when it can't tell).
-    rows: list[ArrivalRow]
+    rows: list[PurchasingRow]
     confidence: Literal['high', 'medium']
     evidence: str
 
@@ -37,16 +43,16 @@ class PickPrompt:
     prompt: str
     orders: dict[str, OpenOrder]
     # Row handle → (order handle, row).
-    rows: dict[str, tuple[str, ArrivalRow]]
+    rows: dict[str, tuple[str, PurchasingRow]]
 
 
-def _item_name(row: ArrivalRow) -> str:
+def _item_name(row: PurchasingRow) -> str:
     return re.sub(r'\s+', ' ', row.name or row.part_number)[:70]
 
 
 def build_pick_prompt(pkg: Extraction, orders: list[OpenOrder], message_text: str) -> PickPrompt:
     order_map: dict[str, OpenOrder] = {}
-    row_map: dict[str, tuple[str, ArrivalRow]] = {}
+    row_map: dict[str, tuple[str, PurchasingRow]] = {}
     r = 0
     blocks = []
     for i, o in enumerate(orders[:MAX_ORDERS]):
@@ -57,7 +63,7 @@ def build_pick_prompt(pkg: Extraction, orders: list[OpenOrder], message_text: st
             r += 1
             rh = f'R{r}'
             row_map[rh] = (handle, row)
-            items.append(f'    {rh}: {_item_name(row)} [{row.part_number[:40]}] ×{js_number(row.quantity)}')
+            items.append(f'    {rh}: {_item_name(row)} [{row.part_number[:40]}] ×{utils.js_number(row.quantity)}')
         more = f'\n    …and {len(o.rows) - MAX_ITEMS} more items' if len(o.rows) > MAX_ITEMS else ''
         date = o.date[:10] if o.date else 'no date'
         blocks.append(
@@ -133,7 +139,7 @@ def parse_picks(raw: Any, built: PickPrompt) -> list[Pick]:
         order = built.orders.get(handle)
         if not order or any(x.order is order for x in picks):
             continue
-        rows: list[ArrivalRow] = []
+        rows: list[PurchasingRow] = []
         for h in p.get('rows') if isinstance(p.get('rows'), list) else []:
             hit = built.rows.get(str(h).strip())
             if hit and hit[0] == handle and not any(r is hit[1] for r in rows):
@@ -183,7 +189,7 @@ def terms(*texts: str | None) -> dict[str, None]:
     return out
 
 
-def is_generic(row: ArrivalRow) -> bool:
+def is_generic(row: PurchasingRow) -> bool:
     """A row that says nothing beyond its vendor and generic words ("JLCPCB Boards", "Mouser order"):
     it can't tell one of that vendor's orders from another, so a card never pre-ticks it on a guess."""
     vendor = terms(row.vendor, VENDOR_WORDS)
@@ -213,10 +219,10 @@ def ground_picks(picks: list[Pick], pkg: Extraction) -> list[Pick]:
     any_terms = {**drop(terms(*pkg.item_hints)), **slip}
     codes = {c.upper() for l in pkg.lines for c in (l.vendor_part_number, l.manufacturer_part_number) if c}
 
-    def row_terms(r: ArrivalRow) -> dict[str, None]:
+    def row_terms(r: PurchasingRow) -> dict[str, None]:
         return terms(r.name, r.part_number, r.sanitized_description)
 
-    def shares(row: ArrivalRow, evidence: dict[str, None]) -> bool:
+    def shares(row: PurchasingRow, evidence: dict[str, None]) -> bool:
         if row.part_number.strip().upper() in codes:
             return True
         return any(t in evidence for t in row_terms(row))
@@ -239,17 +245,13 @@ def ground_picks(picks: list[Pick], pkg: Extraction) -> list[Pick]:
     return out
 
 
-_client: OpenAI | None = None
 
 
 def pick_orders(pkg: Extraction, orders: list[OpenOrder], message_text: str) -> list[Pick]:
-    global _client
-    if not has_openai() or not orders:
+    if not config.has_openai or not orders:
         return []
-    if _client is None:
-        _client = OpenAI(api_key=config.openai.api_key)
     built = build_pick_prompt(pkg, orders, message_text)
-    response = _client.responses.create(
+    response = LLM.shared().openai.responses.create(
         model=config.openai.response_model,
         reasoning={'effort': 'low'},
         input=built.prompt,

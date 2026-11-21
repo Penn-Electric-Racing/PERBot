@@ -1,8 +1,9 @@
 import itertools
 
-from benbuys.models import PurchasingRow, VendorAdapter
+from benbuys.models import VendorAdapter
 from benbuys.reference import truncate_reference
-from utils.text import js_number
+from core import utils
+from core.purchasing import PurchasingRow
 
 # A DigiKey-shaped adapter that doesn't touch config.
 test_adapter = VendorAdapter(
@@ -15,7 +16,7 @@ test_adapter = VendorAdapter(
     operator_slack_ids=['U_OPERATOR'],
     signature_name='Katherine Shen',
     email_to=['purchasing@engineering.upenn.edu'],
-    format_cart_lines=lambda lines: '\n'.join(f'{js_number(l.quantity)}, {l.part_number}, {l.reference}' for l in lines),
+    format_cart_lines=lambda lines: '\n'.join(f'{utils.js_number(l.quantity)}, {l.part_number}, {l.reference}' for l in lines),
     reference_field=lambda pn, rows: truncate_reference(pn, rows, 35),
     part_number_warning=lambda pn: None if pn.endswith('-ND') else 'may be a manufacturer part number — DigiKey may pick different packaging',
 )

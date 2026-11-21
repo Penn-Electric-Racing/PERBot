@@ -1,7 +1,15 @@
 import re
 from types import SimpleNamespace as NS
 
-from sponsorship.fsae_ties import FsaePerson, FsaeScan, Snippet, extract_snippets, find_team_page_links, format_fsae_evidence, verify_labels
+from sponsorship.fsae_ties import (
+    FsaePerson,
+    FsaeScan,
+    Snippet,
+    extract_snippets,
+    find_team_page_links,
+    format_fsae_evidence,
+    verify_labels,
+)
 from sponsorship.scoring import SponsorScores, rank_key
 
 BIO = (

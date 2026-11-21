@@ -17,6 +17,8 @@ from typing import Any
 
 from benbuys.models import VendorAdapter
 
+__all__ = ['mcmaster_adapter']
+
 
 def _not_built(*_args: Any) -> str:
     raise NotImplementedError('McMaster adapter is not built yet — see benbuys/adapters/mcmaster.py')

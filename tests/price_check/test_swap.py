@@ -3,27 +3,17 @@ import json
 import re
 from datetime import datetime, timezone
 
-from price_check.blocks import (
-    PRICE_ACTIONS_BLOCK_ID,
-    PRICE_RESULT_BLOCK_ID,
-    PRICE_UNDO_ACTION_ID,
-    action_kind,
-    decode_value,
-    money,
-    replace_actions,
-)
-from price_check.swap import (
-    UNSET,
+from core import utils
+from price_check.enums import ClickKind
+from price_check.models import UNSET, Notes, PriceRow, SwapPlan, SwapValue, TextRun
+from price_check.views import (
+    ACTIONS_BLOCK_ID,
+    RESULT_BLOCK_ID,
+    UNDO_ACTION_ID,
     ClickInput,
-    Plan,
-    PriceRow,
-    PriceSwapDeps,
-    TextRun,
-    append_line,
-    drop_last_line,
-    handle_price_swap,
-    plan_swap,
-    read_text_runs,
+    SwapDeps,
+    SwapHandler,
+    replace_actions,
 )
 
 ROW_ID = '39e560bc-c039-80aa-bbbb-0123456789ab'
@@ -43,19 +33,19 @@ def plain(runs):
 
 
 def test_action_kind_use_keep_undo_with_optional_index_nothing_else():
-    assert action_kind('price_swap_use:0') == 'use'
-    assert action_kind('price_swap_use:12') == 'use'
-    assert action_kind('price_swap_keep') == 'keep'
-    assert action_kind(PRICE_UNDO_ACTION_ID) == 'undo'
-    assert action_kind('price_swap_use_0') is None
-    assert action_kind('ops_task_done') is None
+    assert ClickKind.from_action_id('price_swap_use:0') == 'use'
+    assert ClickKind.from_action_id('price_swap_use:12') == 'use'
+    assert ClickKind.from_action_id('price_swap_keep') == 'keep'
+    assert ClickKind.from_action_id(UNDO_ACTION_ID) == 'undo'
+    assert ClickKind.from_action_id('price_swap_use_0') is None
+    assert ClickKind.from_action_id('ops_task_done') is None
 
 
 def test_decode_value_accepts_the_contract_rejects_malformed_payloads():
     ok = {'v': 1, 'r': ROW_ID, 'q': 10, 'o': 50, 'n': 0.68, 's': 'DigiKey', 'l': 'https://mouser.com/x', 'ol': ''}
-    assert decode_value(json.dumps(ok)) == ok
+    assert SwapValue.from_json(json.dumps(ok)).to_payload() == ok
     bare = {'v': 1, 'r': ROW_ID.replace('-', ''), 'q': 1, 'o': 2}
-    assert decode_value(json.dumps(bare)) == bare
+    assert SwapValue.from_json(json.dumps(bare)).to_payload() == bare
     for bad in [
         'not json',
         None,
@@ -68,78 +58,74 @@ def test_decode_value_accepts_the_contract_rejects_malformed_payloads():
         {**ok, 'ol': 'ftp://x'},
     ]:
         raw = json.dumps(bad) if isinstance(bad, dict) else bad
-        assert decode_value(raw) is None, bad
+        assert SwapValue.from_json(raw) is None, bad
 
 
 def test_money_matches_price_check_py():
-    assert money(50) == '50.00'
-    assert money(1234.5) == '1,234.50'
-    assert money(0.68) == '0.68'
-    assert money(0.5) == '0.50'
-    assert money(0.0425) == '0.0425'
-    assert money(0.02) == '0.02'
+    assert utils.price(50) == '50.00'
+    assert utils.price(1234.5) == '1,234.50'
+    assert utils.price(0.68) == '0.68'
+    assert utils.price(0.5) == '0.50'
+    assert utils.price(0.0425) == '0.0425'
+    assert utils.price(0.02) == '0.02'
 
 
 def test_replace_actions_swaps_the_buttons_in_place_drops_an_earlier_outcome_keeps_the_alert():
     alert = {'type': 'section', 'block_id': 'alert', 'text': {'type': 'mrkdwn', 'text': 'Price dropped'}}
     footer = {'type': 'context', 'block_id': 'footer', 'elements': []}
-    buttons = {'type': 'actions', 'block_id': PRICE_ACTIONS_BLOCK_ID, 'elements': []}
-    outcome = {'type': 'section', 'block_id': PRICE_RESULT_BLOCK_ID, 'text': {'type': 'mrkdwn', 'text': 'old'}}
-    fresh = [{'type': 'section', 'block_id': PRICE_RESULT_BLOCK_ID, 'text': {'type': 'mrkdwn', 'text': 'new'}}]
+    buttons = {'type': 'actions', 'block_id': ACTIONS_BLOCK_ID, 'elements': []}
+    outcome = {'type': 'section', 'block_id': RESULT_BLOCK_ID, 'text': {'type': 'mrkdwn', 'text': 'old'}}
+    fresh = [{'type': 'section', 'block_id': RESULT_BLOCK_ID, 'text': {'type': 'mrkdwn', 'text': 'new'}}]
     assert replace_actions([alert, buttons, footer], fresh) == [alert, *fresh, footer]
     assert replace_actions([alert, outcome, buttons, footer], fresh) == [alert, *fresh, footer]
     assert replace_actions([alert], fresh) == [alert, *fresh]
 
 
 def test_plan_swap_use_writes_only_while_the_row_still_reads_what_the_alert_saw():
-    assert plan_swap('use', value(), row()) == Plan('write', unit_cost=0.68)
-    assert plan_swap('use', value(), row(unit_cost=0.68)) == Plan('already')
-    assert re.search(r'now \$42\.00', plan_swap('use', value(), row(unit_cost=42)).reason)
-    assert re.search('now blank', plan_swap('use', value(), row(unit_cost=None)).reason)
-    assert re.search(r'Quant\.\* changed .*now 12', plan_swap('use', value(), row(quantity=12)).reason)
-    assert re.search('already ordered', plan_swap('use', value(), row(exported=True)).reason)
-    assert re.search('deleted', plan_swap('use', value(), row(deleted=True)).reason)
+    assert row().plan_swap('use', SwapValue.from_payload(value())) == SwapPlan('write', unit_cost=0.68)
+    assert row(unit_cost=0.68).plan_swap('use', SwapValue.from_payload(value())) == SwapPlan('already')
+    assert re.search(r'now \$42\.00', row(unit_cost=42).plan_swap('use', SwapValue.from_payload(value())).reason)
+    assert re.search('now blank', row(unit_cost=None).plan_swap('use', SwapValue.from_payload(value())).reason)
+    assert re.search(r'Quant\.\* changed .*now 12', row(quantity=12).plan_swap('use', SwapValue.from_payload(value())).reason)
+    assert re.search('already ordered', row(exported=True).plan_swap('use', SwapValue.from_payload(value())).reason)
+    assert re.search('deleted', row(deleted=True).plan_swap('use', SwapValue.from_payload(value())).reason)
 
 
 def test_plan_swap_switching_listings_writes_the_link_too_undo_puts_the_old_one_back_or_clears_it():
     v = value(s='Mouser', n=0.55, l='https://www.mouser.com/p/2', ol='https://www.digikey.com/p/1')
-    assert plan_swap('use', v, row()) == Plan('write', unit_cost=0.55, link='https://www.mouser.com/p/2')
+    assert row().plan_swap('use', SwapValue.from_payload(v)) == SwapPlan('write', unit_cost=0.55, link='https://www.mouser.com/p/2')
     # Price written but link not yet → still a write (finishes the job).
-    assert plan_swap('use', v, row(unit_cost=0.55)) == Plan('write', unit_cost=0.55, link='https://www.mouser.com/p/2')
-    assert plan_swap('use', v, row(unit_cost=0.55, link='https://www.mouser.com/p/2/')) == Plan('already')
-    assert plan_swap('undo', v, row(unit_cost=0.55, link='https://www.mouser.com/p/2')) == Plan(
-        'write', unit_cost=50, link='https://www.digikey.com/p/1'
-    )
-    assert plan_swap('undo', {**v, 'ol': ''}, row(unit_cost=0.55, link='https://www.mouser.com/p/2')) == Plan(
-        'write', unit_cost=50, link=None
-    )
+    assert row(unit_cost=0.55).plan_swap('use', SwapValue.from_payload(v)) == SwapPlan('write', unit_cost=0.55, link='https://www.mouser.com/p/2')
+    assert row(unit_cost=0.55, link='https://www.mouser.com/p/2/').plan_swap('use', SwapValue.from_payload(v)) == SwapPlan('already')
+    assert row(unit_cost=0.55, link='https://www.mouser.com/p/2').plan_swap('undo', SwapValue.from_payload(v)) == SwapPlan('write', unit_cost=50, link='https://www.digikey.com/p/1')
+    assert row(unit_cost=0.55, link='https://www.mouser.com/p/2').plan_swap('undo', SwapValue.from_payload({**v, 'ol': ''})) == SwapPlan('write', unit_cost=50, link=None)
 
 
 def test_plan_swap_undo_only_from_the_written_price():
-    assert plan_swap('undo', value(), row(unit_cost=0.68)) == Plan('write', unit_cost=50)
-    assert plan_swap('undo', value(), row(unit_cost=50)) == Plan('already')
-    assert plan_swap('undo', value(), row(unit_cost=0.7)).kind == 'refuse'
+    assert row(unit_cost=0.68).plan_swap('undo', SwapValue.from_payload(value())) == SwapPlan('write', unit_cost=50)
+    assert row(unit_cost=50).plan_swap('undo', SwapValue.from_payload(value())) == SwapPlan('already')
+    assert row(unit_cost=0.7).plan_swap('undo', SwapValue.from_payload(value())).kind == 'refuse'
 
 
 def test_notes_append_adds_a_line_drop_last_line_removes_exactly_it_and_keeps_formatting():
     bold = {'bold': True, 'italic': False, 'strikethrough': False, 'underline': False, 'code': False, 'color': 'default'}
     runs = [TextRun('Sold in packs of ', None), TextRun('10', None, bold)]
-    added = append_line(runs, 'PERBot price check: Unit cost $50.00 → $0.68 via Slack')
+    added = Notes(runs).append_line('PERBot price check: Unit cost $50.00 → $0.68 via Slack')
     assert plain(added) == 'Sold in packs of 10\nPERBot price check: Unit cost $50.00 → $0.68 via Slack'
-    assert drop_last_line(added, 'PERBot price check: Unit cost $50.00 → $0.68') == runs
-    assert plain(append_line([], 'only line')) == 'only line'
-    assert drop_last_line([TextRun('PERBot price check: x', None)], 'PERBot price check:') == []
-    assert drop_last_line([TextRun('edited after\nby hand', None)], 'PERBot price check:') is None
-    assert append_line([TextRun('x', None) for _ in range(100)], 'y') is None
+    assert Notes(added).drop_last_line('PERBot price check: Unit cost $50.00 → $0.68') == runs
+    assert plain(Notes([]).append_line('only line')) == 'only line'
+    assert Notes([TextRun('PERBot price check: x', None)]).drop_last_line('PERBot price check:') == []
+    assert Notes([TextRun('edited after\nby hand', None)]).drop_last_line('PERBot price check:') is None
+    assert Notes([TextRun('x', None) for _ in range(100)]).append_line('y') is None
 
 
 def test_read_text_runs_plain_text_only():
-    assert read_text_runs({'rich_text': [{'type': 'text', 'text': {'content': 'a', 'link': {'url': 'https://x.y'}}}]}) == [
+    assert Notes.read({'rich_text': [{'type': 'text', 'text': {'content': 'a', 'link': {'url': 'https://x.y'}}}]}) == [
         TextRun('a', 'https://x.y')
     ]
-    assert read_text_runs({'rich_text': []}) == []
-    assert read_text_runs(None) == []
-    assert read_text_runs({'rich_text': [{'type': 'mention', 'mention': {}}]}) is None
+    assert Notes.read({'rich_text': []}) == []
+    assert Notes.read(None) == []
+    assert Notes.read({'rich_text': [{'type': 'mention', 'mention': {}}]}) is None
 
 
 # ---------------------------------------------------------------- handler, Notion faked
@@ -149,7 +135,7 @@ class FakeNotion:
     def __init__(self, start: PriceRow):
         self.row = dataclasses.replace(start)
         self.writes = []
-        self.deps = PriceSwapDeps(
+        self.deps = SwapDeps(
             fetch_row=lambda _id: dataclasses.replace(self.row),
             write_row=self._write,
             display_name=lambda _u: 'Arjun Sharma',
@@ -169,7 +155,7 @@ class FakeNotion:
 def message():
     return [
         {'type': 'section', 'block_id': 'alert', 'text': {'type': 'mrkdwn', 'text': 'Price dropped on TEST'}},
-        {'type': 'actions', 'block_id': PRICE_ACTIONS_BLOCK_ID, 'elements': []},
+        {'type': 'actions', 'block_id': ACTIONS_BLOCK_ID, 'elements': []},
     ]
 
 
@@ -179,34 +165,34 @@ def click(action_id, v, existing='default'):
 
 def test_use_writes_leaves_an_audit_line_and_offers_undo_undo_restores_both():
     notion = FakeNotion(row(notes=[TextRun('Sold in packs of 10', None)]))
-    used = handle_price_swap(notion.deps, click('price_swap_use:0', value()))
+    used = SwapHandler(notion.deps).handle(click('price_swap_use:0', value()))
     assert notion.row.unit_cost == 0.68
     assert plain(notion.row.notes) == (
         'Sold in packs of 10\nPERBot price check: Unit cost $50.00 → $0.68 (DigiKey) via Slack, Arjun Sharma, 2026-10-17'
     )
     assert re.search(r'<@U123> set Unit cost to \$0\.68 \(DigiKey\) · was \$50\.00 · 12:31 PM', used.text or '')
-    undo_button = next(b for b in used.blocks if b.get('block_id') == PRICE_ACTIONS_BLOCK_ID)['elements'][0]
-    assert undo_button['action_id'] == PRICE_UNDO_ACTION_ID
+    undo_button = next(b for b in used.blocks if b.get('block_id') == ACTIONS_BLOCK_ID)['elements'][0]
+    assert undo_button['action_id'] == UNDO_ACTION_ID
     assert used.blocks[0]['block_id'] == 'alert'
 
-    undone = handle_price_swap(notion.deps, ClickInput(PRICE_UNDO_ACTION_ID, undo_button['value'], 'U123', used.blocks))
+    undone = SwapHandler(notion.deps).handle(ClickInput(UNDO_ACTION_ID, undo_button['value'], 'U123', used.blocks))
     assert notion.row.unit_cost == 50
     assert plain(notion.row.notes) == 'Sold in packs of 10'
     assert re.search(r'undid it: Unit cost is back to \$50\.00', undone.text or '')
-    assert not any(b.get('block_id') == PRICE_ACTIONS_BLOCK_ID for b in undone.blocks), 'no buttons after Undo'
+    assert not any(b.get('block_id') == ACTIONS_BLOCK_ID for b in undone.blocks), 'no buttons after Undo'
 
 
 def test_a_second_use_click_reports_never_writes_again():
     notion = FakeNotion(row())
-    handle_price_swap(notion.deps, click('price_swap_use:0', value()))
-    again = handle_price_swap(notion.deps, click('price_swap_use:0', value()))
+    SwapHandler(notion.deps).handle(click('price_swap_use:0', value()))
+    again = SwapHandler(notion.deps).handle(click('price_swap_use:0', value()))
     assert len(notion.writes) == 1
     assert re.search(r'already \$0\.68', again.text or '')
 
 
 def test_a_row_edited_since_the_alert_is_refused_and_left_alone():
     notion = FakeNotion(row(unit_cost=45))
-    res = handle_price_swap(notion.deps, click('price_swap_use:0', value()))
+    res = SwapHandler(notion.deps).handle(click('price_swap_use:0', value()))
     assert not notion.writes
     assert re.search(r'⚠️ Unit cost is now \$45\.00', res.text or '')
 
@@ -215,22 +201,22 @@ def test_keep_writes_nothing_notes_with_mentions_are_left_untouched():
     kept = FakeNotion(row())
     v = value()
     del v['n'], v['s']
-    res = handle_price_swap(kept.deps, click('price_swap_keep', v))
+    res = SwapHandler(kept.deps).handle(click('price_swap_keep', v))
     assert not kept.writes
     assert re.search(r'kept \$50\.00', res.text or '')
 
     mentions = FakeNotion(row(notes=None))
-    handle_price_swap(mentions.deps, click('price_swap_use:0', value()))
+    SwapHandler(mentions.deps).handle(click('price_swap_use:0', value()))
     assert mentions.writes[0].notes is UNSET
     assert mentions.row.unit_cost == 0.68
 
 
 def test_bad_value_expired_undo_no_message_blocks_ephemeral_reply():
     notion = FakeNotion(row())
-    assert re.search('out of date', handle_price_swap(notion.deps, ClickInput('price_swap_use:0', '{oops', 'U123', message())).whisper or '')
+    assert re.search('out of date', SwapHandler(notion.deps).handle(ClickInput('price_swap_use:0', '{oops', 'U123', message())).whisper or '')
     old = int(datetime(2026, 10, 15, tzinfo=timezone.utc).timestamp())
-    assert re.search('Too late', handle_price_swap(notion.deps, click(PRICE_UNDO_ACTION_ID, value(t=old))).whisper or '')
-    no_blocks = handle_price_swap(notion.deps, click('price_swap_use:0', value(), existing=None))
+    assert re.search('Too late', SwapHandler(notion.deps).handle(click(UNDO_ACTION_ID, value(t=old))).whisper or '')
+    no_blocks = SwapHandler(notion.deps).handle(click('price_swap_use:0', value(), existing=None))
     assert no_blocks.blocks is None
     assert re.search(r'set Unit cost to \$0\.68', no_blocks.whisper or '')
     assert len(notion.writes) == 1

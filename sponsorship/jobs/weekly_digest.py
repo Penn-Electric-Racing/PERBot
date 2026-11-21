@@ -4,30 +4,31 @@ their own numbers, and their upcoming next actions. Members with no deals get no
 valid, same as the stale DM).
 
 Idempotency (same as the stale DM): the gate is "Saturday, 9am ET or later" because GitHub cron
-fires hours late here (utils/schedule.py), and the ⚙️ Job Log claim makes the second DST trigger
+fires hours late here (core.utils.is_slot_open), and the ⚙️ Job Log claim makes the second DST trigger
 (or any stray fire) a no-op. DMs post straight to the user ID.
 
 Run: `python -m sponsorship.jobs.weekly_digest`
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from config import config
-from utils.logger import logger
-from utils.schedule import claim_job_run, is_slot_open_et
-from utils.text import js_round
-from sponsorship.dates import days_until
+from core import utils
+from core.config import config
+from core.job_log import JobLog
+from core.log import setup_logging
+from core.slack import Slack
 from sponsorship.deal_blocks import deal_list_blocks
-from sponsorship.identity import fetch_slack_directory, notion_user_to_slack_id
 from sponsorship.models import PipelineRow
 from sponsorship.notion import SponsorNotion
-from sponsorship.jobs.shared import make_slack_client
-from sponsorship.jobs.win_post import fmt_usd, total_raised
+from sponsorship.wins import fmt_usd, total_raised
+
+logger = logging.getLogger(__name__)
 
 _WON_DATE_RE = re.compile(r'^(\d{4}-\d{2}-\d{2}): WON\b', re.M)
 
@@ -48,7 +49,7 @@ def won_within_days(deals: list[PipelineRow], days: int) -> list[PipelineRow]:
         iso = won_date_iso(d)
         if not iso:
             continue
-        age = -days_until(iso)  # past dates → positive age
+        age = -utils.days_until(iso)  # past dates → positive age
         if 0 <= age <= days:
             out.append(d)
     return out
@@ -67,7 +68,7 @@ def _next_action_line(deal: PipelineRow) -> str:
     action = deal.next_action or 'no next action set'
     if not deal.next_action_date:
         return f"• <{deal.url}|{deal.company or 'Untitled'}> — {action}"
-    overdue = ' ⚠️ overdue' if days_until(deal.next_action_date) < 0 else ''
+    overdue = ' ⚠️ overdue' if utils.days_until(deal.next_action_date) < 0 else ''
     return f"• <{deal.url}|{deal.company or 'Untitled'}> — {action} (due {deal.next_action_date}{overdue})"
 
 
@@ -78,15 +79,15 @@ def _plural(n: int, word: str) -> str:
 def run_weekly_digest(force: bool | None = None) -> None:
     if force is None:
         force = (os.environ.get('FORCE_DIGEST') or '').lower() == 'true'
-    if not force and not is_slot_open_et('Saturday', 9):
+    if not force and not utils.is_slot_open('Saturday', 9):
         logger.info('Weekly digest: not Saturday ≥9:00 ET and not forced — skipping.')
         return
     # Late-tolerant gate + two DST crons ⇒ dedupe via the Job Log (DM jobs can't read DM history).
     dry_run = (os.environ.get('DIGEST_DRY_RUN') or '').lower() == 'true'
-    if not force and not dry_run and not claim_job_run('sponsor-weekly-digest'):
+    if not force and not dry_run and not JobLog.shared().claim_run('sponsor-weekly-digest'):
         return
 
-    client = make_slack_client()
+    client = Slack.shared()
     notion = SponsorNotion()
 
     with ThreadPoolExecutor(max_workers=3) as pool:
@@ -98,7 +99,7 @@ def run_weekly_digest(force: bool | None = None) -> None:
     won = [d for d in deals if d.stage == 'Won']
     total = total_raised(won)
     goal = config.sponsorship.semester_goal_usd
-    pct = js_round(total / goal * 100) if goal > 0 else 0
+    pct = utils.js_round(total / goal * 100) if goal > 0 else 0
     week_wins = won_within_days(deals, 7)
     available = sum(1 for p in prospects if p.status == 'Available')
 
@@ -121,16 +122,16 @@ def run_weekly_digest(force: bool | None = None) -> None:
         team_lines.append(f":tada: Won this week: {' · '.join(_win_line(d) for d in week_wins)}")
 
     notion_user_by_id = {u.id: u for u in notion_users}
-    slack_dir = fetch_slack_directory(client)
+    slack_dir = Slack.wrap(client).fetch_directory()
 
     for notion_id, user_deals in by_user.items():
         notion_user = notion_user_by_id.get(notion_id)
         if not notion_user:
-            logger.warn(f'Weekly digest: DRI {notion_id} not in Notion directory — skipping.')
+            logger.warning(f'Weekly digest: DRI {notion_id} not in Notion directory — skipping.')
             continue
-        slack_user_id = notion_user_to_slack_id(client, notion_user, slack_dir)
+        slack_user_id = Slack.wrap(client).notion_user_to_slack_id(notion_user, slack_dir)
         if not slack_user_id:
-            logger.warn(f'Weekly digest: no Slack match for {notion_user.name or notion_id} — skipping.')
+            logger.warning(f'Weekly digest: no Slack match for {notion_user.name or notion_id} — skipping.')
             continue
 
         my_won = [d for d in user_deals if d.stage == 'Won']
@@ -172,8 +173,9 @@ def run_weekly_digest(force: bool | None = None) -> None:
 
 
 if __name__ == '__main__':
+    setup_logging()
     try:
         run_weekly_digest()
     except Exception as err:
-        logger.error('Weekly digest job failed.', err)
+        logger.error('Weekly digest job failed.', exc_info=err)
         sys.exit(1)

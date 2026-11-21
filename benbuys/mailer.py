@@ -10,14 +10,18 @@ is given, so a half-configured deploy can never mark rows ordered silently.
 from __future__ import annotations
 
 import base64
+import logging
 import re
 from typing import Any, Protocol
 
 import httpx
 
-from config import config
-from utils.logger import logger
 from benbuys.email import RequisitionEmail
+from core.config import config
+
+logger = logging.getLogger(__name__)
+
+__all__ = ['Mailer', 'to_rfc822', 'GmailApiMailer', 'WebhookMailer', 'create_mailer']
 
 
 class Mailer(Protocol):

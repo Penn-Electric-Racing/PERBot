@@ -9,8 +9,16 @@ import json
 import math
 from typing import Any
 
-from sponsorship.groq_client import groq_json
-from sponsorship.models import CATEGORIES, CHANNELS, SPONSOR_TYPES, Category, CompanyClassification
+from core.llm import LLM
+from sponsorship.models import (
+    CATEGORIES,
+    CHANNELS,
+    SPONSOR_TYPES,
+    Category,
+    CompanyClassification,
+)
+
+__all__ = ['SYSTEM_PROMPT', 'classify_company_fit']
 
 
 def _clamp_enum(value: Any, allowed: tuple[str, ...], fallback: str) -> str:
@@ -67,7 +75,7 @@ def classify_company_fit(company: str, domain: str, company_text: str, known_ask
         if known_ask
         else ''
     )
-    content = groq_json(SYSTEM_PROMPT, f'Company: {company}\nDomain: {domain}\n\nCompany website text:\n{company_text}{ask_hint}')
+    content = LLM.shared().groq_json(SYSTEM_PROMPT, f'Company: {company}\nDomain: {domain}\n\nCompany website text:\n{company_text}{ask_hint}')
     try:
         raw = json.loads(content)
     except ValueError:

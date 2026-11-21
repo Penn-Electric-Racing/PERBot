@@ -9,6 +9,8 @@ import json
 import os
 import sys
 
+from core.log import setup_logging
+
 
 def main(argv: list[str]) -> int:
     if not argv:
@@ -37,4 +39,5 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == '__main__':
+    setup_logging()
     sys.exit(main(sys.argv[1:]))

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import math
 import re
 import socket
@@ -23,12 +24,21 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from config import config
-from utils.logger import logger
+from core.config import config
+from core.llm import LLM
 from sponsorship.domain import extract_hostname
-from sponsorship.groq_client import get_sponsor_groq_client
 from sponsorship.homepage import fetch_company_text
 from sponsorship.models import BankLeadRow
+
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    'RATE_LIMIT_RETRIES', 'DEFAULT_WAIT_S', 'chat_json', 'ProspectMatch', 'FIND_LIMIT',
+    'SHORTLIST_LIMIT', 'FIND_REASON_CHARS', 'SHORTLIST_BUDGET_CHARS', 'SHORTLIST_SYSTEM_PROMPT',
+    'RANK_SYSTEM_PROMPT', 'read_roster_numbers', 'find_matching_prospects', 'ScoutVerdict',
+    'ScoutCandidate', 'ScoutResult', 'SCOUT_ASK_LIMIT', 'FETCH_CONCURRENCY', 'SNIPPET_CHARS',
+    'KNOWN_DOMAINS_IN_PROMPT', 'SCOUT_SYSTEM_PROMPT', 'VERIFY_SYSTEM_PROMPT', 'scout_companies',
+]
 
 
 def _parse_json(content: str | None) -> dict[str, Any]:
@@ -55,7 +65,7 @@ def _suggested_wait_s(err: Exception) -> float | None:
 
 def chat_json(system: str, user: str) -> dict[str, Any]:
     """One forced-JSON Groq chat call, retrying rate limits on the free-tier TPM window."""
-    groq = get_sponsor_groq_client()
+    groq = LLM.shared().groq
     attempt = 0
     while True:
         try:
@@ -71,7 +81,7 @@ def chat_json(system: str, user: str) -> dict[str, Any]:
             status = getattr(err, 'status_code', None)
             if status in (429, 413) and attempt < RATE_LIMIT_RETRIES:
                 wait = _suggested_wait_s(err) or DEFAULT_WAIT_S
-                logger.warn(f'Groq rate-limited ({status}); retrying in {round(wait)}s')
+                logger.warning(f'Groq rate-limited ({status}); retrying in {round(wait)}s')
                 time.sleep(wait)
                 attempt += 1
                 continue
@@ -148,7 +158,7 @@ def find_matching_prospects(need: str, rows: list[BankLeadRow]) -> list[Prospect
     # budget (name-only still shortlists decently).
     roster = '\n'.join(f"{i + 1}. {r.company} [{'/'.join(r.categories)}]" for i, r in enumerate(rows))
     if len(roster) > SHORTLIST_BUDGET_CHARS:
-        logger.warn(f'Shortlist roster over budget ({len(roster)} chars) — falling back to name-only lines.')
+        logger.warning(f'Shortlist roster over budget ({len(roster)} chars) — falling back to name-only lines.')
         roster = '\n'.join(f'{i + 1}. {r.company}' for i, r in enumerate(rows))
     shortlist_raw = chat_json(SHORTLIST_SYSTEM_PROMPT, f'Team need: {need}\n\nRoster:\n{roster}')
     shortlist = read_roster_numbers(shortlist_raw.get('shortlist'), SHORTLIST_LIMIT, len(rows))

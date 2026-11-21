@@ -11,40 +11,23 @@ every package they bring in (10/19), which buries the @s that matter.
 """
 from __future__ import annotations
 
-import dataclasses
+import logging
 import threading
 from dataclasses import dataclass
 from typing import Any
 
-from benbuys.notion import parse_purchasing_row
-from config import config
-from notion_api import NotionClient
-from sponsorship.models import NotionUser
-from utils.logger import logger
-from arrivals.models import ArrivalRow
+from core.config import config
+from core.notion import Notion, NotionUser
+from core.purchasing import PurchasingRow
+
+logger = logging.getLogger(__name__)
+
+__all__ = ['ARRIVED_YES', 'OPTIONAL_COLUMNS', 'ArrivalWrite', 'ArrivalsNotion']
 
 ARRIVED_YES = 'Yes'
 OPTIONAL_COLUMNS = ('Arrived at', 'Received by', 'Arrival photo')
 
 
-def _text(prop: Any) -> str:
-    prop = prop or {}
-    items = prop.get('rich_text') if prop.get('rich_text') is not None else prop.get('title') or []
-    return ''.join((t or {}).get('plain_text') or '' for t in items).strip()
-
-
-def parse_arrival_row(page: Any) -> ArrivalRow:
-    p = (page or {}).get('properties') or {}
-    base = parse_purchasing_row(page)
-    return ArrivalRow(
-        **{f.name: getattr(base, f.name) for f in dataclasses.fields(base)},
-        vendor=_text(p.get('Vendor')),
-        run_id=_text(p.get('Run ID')),
-        arrived=((p.get('Arrived?') or {}).get('status') or {}).get('name') or '',
-        exported=bool((p.get('Exported?') or {}).get('checkbox')),
-        submitted_at=((p.get('Submitted at') or {}).get('date') or {}).get('start'),
-        ordered_at=((p.get('Last Email Update') or {}).get('date') or {}).get('start'),
-    )
 
 
 @dataclass
@@ -59,25 +42,25 @@ class ArrivalWrite:
 
 class ArrivalsNotion:
     def __init__(self, token: str | None = None, data_source_id: str | None = None):
-        self.client = NotionClient(auth=token or config.notion.token, notion_version=config.notion.api_version)
+        self.client = Notion(token, config.notion.api_version) if token else Notion.shared()
         self.data_source_id = data_source_id or config.benbuys.purchasing_data_source_id
         # Column name → Notion property type.
         self._columns: dict[str, str] | None = None
         self._columns_lock = threading.Lock()
 
-    def _query_all(self, filter: Any) -> list[ArrivalRow]:
-        rows: list[ArrivalRow] = []
+    def _query_all(self, filter: Any) -> list[PurchasingRow]:
+        rows: list[PurchasingRow] = []
         cursor: str | None = None
         while True:
             response = self.client.data_sources.query(
                 data_source_id=self.data_source_id, filter=filter, page_size=100, start_cursor=cursor
             )
-            rows.extend(parse_arrival_row(page) for page in response.get('results') or [])
+            rows.extend(PurchasingRow.from_page(page) for page in response.get('results') or [])
             cursor = response.get('next_cursor') if response.get('has_more') else None
             if not cursor:
                 return rows
 
-    def open_rows(self) -> list[ArrivalRow]:
+    def open_rows(self) -> list[PurchasingRow]:
         """This season's rows that haven't arrived — the candidates a slip can match."""
         return self._query_all(
             {
@@ -88,12 +71,12 @@ class ArrivalsNotion:
             }
         )
 
-    def rows_for_run(self, run_id: str) -> list[ArrivalRow]:
+    def rows_for_run(self, run_id: str) -> list[PurchasingRow]:
         """Every row of one order (any arrival state), for "all arrived" at click time."""
         return self._query_all({'property': 'Run ID', 'rich_text': {'equals': run_id}})
 
-    def fetch_row(self, page_id: str) -> ArrivalRow:
-        return parse_arrival_row(self.client.pages.retrieve(page_id))
+    def fetch_row(self, page_id: str) -> PurchasingRow:
+        return PurchasingRow.from_page(self.client.pages.retrieve(page_id))
 
     def _existing_columns(self) -> dict[str, str]:
         with self._columns_lock:
@@ -103,7 +86,7 @@ class ArrivalsNotion:
                 names = {k: str((v or {}).get('type') or '') for k, v in (ds.get('properties') or {}).items()}
                 missing = [c for c in OPTIONAL_COLUMNS if c not in names]
                 if missing:
-                    logger.warn(f"Arrivals: Purchasing DB has no {' / '.join(missing)} column yet; writing Arrived? only for those.")
+                    logger.warning(f"Arrivals: Purchasing DB has no {' / '.join(missing)} column yet; writing Arrived? only for those.")
                 self._columns = names
             return self._columns
 
@@ -136,14 +119,4 @@ class ArrivalsNotion:
 
     def list_users(self) -> list[NotionUser]:
         """Workspace people (for Slack poster → Notion `Received by`)."""
-        users: list[NotionUser] = []
-        cursor: str | None = None
-        while True:
-            response = self.client.users.list(start_cursor=cursor, page_size=100)
-            for user in response.get('results') or []:
-                if user.get('type') == 'bot' or not user.get('id'):
-                    continue
-                users.append(NotionUser(user['id'], user.get('name') or '', (user.get('person') or {}).get('email')))
-            cursor = response.get('next_cursor') if response.get('has_more') else None
-            if not cursor:
-                return users
+        return Notion.list_users(self.client)

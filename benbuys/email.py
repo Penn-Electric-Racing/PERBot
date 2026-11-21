@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from benbuys.models import VendorAdapter
 from benbuys.prep import money
 
+__all__ = ['RequisitionEmail', 'build_requisition_email', 'render_email']
+
 
 @dataclass
 class RequisitionEmail:

@@ -10,8 +10,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from sponsorship.dates import iso_add_days
+from core import utils
 from sponsorship.models import PipelineRow, Stage
+
+__all__ = [
+    'FIRST_OUTREACH_ACTION', 'FOLLOW_UP_ACTION', 'CHECK_REPLY_ACTION', 'FOLLOW_UP_DAYS',
+    'COLD_AFTER_DAYS', 'is_auto_next_action', 'NextActionChange', 'next_action_for_stage',
+    'next_action_after_touch', 'backfill_next_action', 'next_action_properties',
+]
 
 FIRST_OUTREACH_ACTION = 'Send first outreach'
 FOLLOW_UP_ACTION = 'Follow up if no reply'
@@ -57,7 +63,7 @@ def next_action_for_stage(row: PipelineRow, stage: Stage, today_iso: str) -> Nex
     if not is_auto_next_action(row.next_action):
         return None
     if stage == 'Contacted':
-        return NextActionChange(f'{FOLLOW_UP_ACTION}{_ask_suffix(row.next_action)}', iso_add_days(today_iso, FOLLOW_UP_DAYS))
+        return NextActionChange(f'{FOLLOW_UP_ACTION}{_ask_suffix(row.next_action)}', utils.iso_add_days(today_iso, FOLLOW_UP_DAYS))
     if stage == 'Prospect':
         return None
     if not row.next_action and not row.next_action_date:
@@ -69,7 +75,7 @@ def next_action_after_touch(row: PipelineRow, today_iso: str) -> NextActionChang
     """A follow-up was logged on a Contacted deal: the next one comes due a week later."""
     if row.stage != 'Contacted' or not is_auto_next_action(row.next_action):
         return None
-    return NextActionChange(f'{FOLLOW_UP_ACTION}{_ask_suffix(row.next_action)}', iso_add_days(today_iso, FOLLOW_UP_DAYS))
+    return NextActionChange(f'{FOLLOW_UP_ACTION}{_ask_suffix(row.next_action)}', utils.iso_add_days(today_iso, FOLLOW_UP_DAYS))
 
 
 def backfill_next_action(row: PipelineRow, today_iso: str) -> NextActionChange | None:
@@ -83,10 +89,10 @@ def backfill_next_action(row: PipelineRow, today_iso: str) -> NextActionChange |
         return None
     if row.stage == 'Contacted':
         contacted_day = (row.contacted_at or '')[:10] or (row.last_contact or '')[:10] or None
-        if contacted_day and contacted_day > iso_add_days(today_iso, -COLD_AFTER_DAYS):
+        if contacted_day and contacted_day > utils.iso_add_days(today_iso, -COLD_AFTER_DAYS):
             lc = (row.last_contact or '')[:10]
             last = lc if lc and lc > contacted_day else contacted_day
-            return NextActionChange(f'{FOLLOW_UP_ACTION}{_ask_suffix(row.next_action)}', iso_add_days(last, FOLLOW_UP_DAYS))
+            return NextActionChange(f'{FOLLOW_UP_ACTION}{_ask_suffix(row.next_action)}', utils.iso_add_days(last, FOLLOW_UP_DAYS))
     return NextActionChange('', None)
 
 

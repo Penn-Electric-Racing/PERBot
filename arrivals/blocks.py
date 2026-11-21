@@ -32,11 +32,23 @@ from datetime import datetime
 from typing import Any, TypedDict
 from zoneinfo import ZoneInfo
 
-from utils.clock import parse_iso
-from utils.text import js_number
 from arrivals.match import vendor_display, vendor_key, vendors_compatible
-from arrivals.models import ArrivalRow, Extraction, OpenOrder, Resolution, Scan, SlipMatch
+from arrivals.models import Extraction, OpenOrder, Resolution, Scan, SlipMatch
+from arrivals.people import People
 from arrivals.pick import is_generic
+from core import utils
+from core.purchasing import PurchasingRow
+
+__all__ = [
+    'ARRIVAL_ACTION_IDS', 'ARRIVAL_ACTION_RE', 'CARD_BLOCK_RE', 'ACTIONS_BLOCK_PREFIX',
+    'CHOICE_BLOCK_PREFIX', 'MAX_VALUE_CHARS', 'MAX_LISTED', 'MAX_PACKAGES', 'MAX_OPTIONS',
+    'MAX_ALTERNATIVES', 'CARD_LISTED', 'ET', 'Block', 'ArrivalButtonValue', 'compact',
+    'encode_value', 'decode_value', 'target_ids', 'these_value', 'order_value', 'who',
+    'short_date', 'item_line', 'row_detail', 'CardInput', 'order_card', 'match_card',
+    'ASK_AGAIN', 'guess_card', 'Reply', 'ReplyContext', 'text_names_vendor', 'SLIP_PLEASE',
+    'build_reply', 'lead_time_line', 'settle_blocks', 'package_key', 'card_index', 'is_card',
+    'replace_card', 'settle_card', 'arrival_dm', 'reminder_dm',
+]
 
 ARRIVAL_ACTION_IDS = {
     'these': 'arrival_these',
@@ -95,7 +107,6 @@ class ArrivalButtonValue(TypedDict, total=False):
 
 
 # Notion person name → Slack user id (see people.py).
-People = dict[str, str]
 
 
 def compact(id_: str) -> str:
@@ -165,7 +176,7 @@ def these_value(match: SlipMatch, base: dict[str, str]) -> ArrivalButtonValue:
 
 
 def order_value(
-    rows: list[ArrivalRow], run_id: str | None, base: dict[str, str], extras: list[ArrivalRow] | None = None
+    rows: list[PurchasingRow], run_id: str | None, base: dict[str, str], extras: list[PurchasingRow] | None = None
 ) -> ArrivalButtonValue:
     """A whole order: by Run ID when it has one (rows re-read at click time), else its row ids."""
     extra_ids = [compact(r.id) for r in extras or []]
@@ -204,7 +215,7 @@ def who(requesters: list[str], people: People | None = None, max_n: int = 4) -> 
     return shown[0] if len(shown) == 1 else f"{', '.join(shown[:-1])} and {shown[-1]}"
 
 
-def _order_phrase(rows: list[ArrivalRow], vendor: str, date: str | None, people: People | None) -> str:
+def _order_phrase(rows: list[PurchasingRow], vendor: str, date: str | None, people: People | None) -> str:
     """"<@Mike>'s *DigiKey* order from *Oct 5*" / "the *DigiKey* order from *Oct 5*"."""
     whom = who([n for r in rows for n in r.point_of_contact], people)
     owner = f"{whom}'s" if whom else 'the'
@@ -213,7 +224,7 @@ def _order_phrase(rows: list[ArrivalRow], vendor: str, date: str | None, people:
 
 def _parse_when(iso: str) -> datetime | None:
     try:
-        return parse_iso(f'{iso}T12:00:00Z' if len(iso) == 10 else iso)
+        return utils.parse_iso(f'{iso}T12:00:00Z' if len(iso) == 10 else iso)
     except ValueError:
         return None
 
@@ -238,7 +249,7 @@ def _clean(s: str, max_len: int) -> str:
     return full if len(full) <= max_len else re.sub(r'[\s,;(]+\S*$', '', full[:max_len]) + '…'
 
 
-def _shown_code(row: ArrivalRow) -> str | None:
+def _shown_code(row: PurchasingRow) -> str | None:
     """A catalog number worth showing next to the name — what's printed on the bag ("SN74LVC245APWR"), not free text."""
     pn = row.part_number.strip()
     if not pn or len(pn) > 30 or re.search(r'\s', pn) or not re.search(r'\d', pn):
@@ -246,7 +257,7 @@ def _shown_code(row: ArrivalRow) -> str | None:
     return None if row.name and pn.upper() in row.name.upper() else _clean(pn, 30)
 
 
-def _product_url(row: ArrivalRow) -> str | None:
+def _product_url(row: PurchasingRow) -> str | None:
     """The row's product page, safe inside `<url|text>`; None when missing, not http(s), or absurdly long."""
     url = (row.link or '').strip()
     if not re.fullmatch(r'https?://\S+', url, re.I) or len(url) > 500:
@@ -256,7 +267,7 @@ def _product_url(row: ArrivalRow) -> str | None:
     return url.replace('|', '%7C').replace('>', '%3E').replace('<', '%3C')
 
 
-def _product_label(row: ArrivalRow) -> str:
+def _product_label(row: PurchasingRow) -> str:
     """"Mouser ↗" — the vendor's name for the product link (the link's host when the vendor is blank)."""
     m = re.match(r'^https?://(?:www\.)?([^/:]+)', row.link or '', re.I)
     parts = (m.group(1) if m else '').split('.')
@@ -264,17 +275,17 @@ def _product_label(row: ArrivalRow) -> str:
     return f"{_clean(vendor_display(row.vendor) or vendor_display(host) or 'Product page', 24)} ↗"
 
 
-def _product_link(row: ArrivalRow) -> str:
+def _product_link(row: PurchasingRow) -> str:
     """"<product|Mouser ↗>", or "" without a product link."""
     url = _product_url(row)
     return f'<{url}|{_product_label(row)}>' if url else ''
 
 
-def _qty(row: ArrivalRow) -> str:
-    return f' ×{js_number(row.quantity)}' if row.quantity > 0 else ''
+def _qty(row: PurchasingRow) -> str:
+    return f' ×{utils.js_number(row.quantity)}' if row.quantity > 0 else ''
 
 
-def item_line(row: ArrivalRow, max_len: int = 60) -> str:
+def item_line(row: PurchasingRow, max_len: int = 60) -> str:
     """"• <notion|Bus Transceivers Single 8-bit…> `SN74LVC245APWR` ×2 · <product|Mouser ↗>" — the name
     links to the Purchasing row."""
     name = _clean(row.name or row.part_number, max_len) or 'item'
@@ -300,7 +311,7 @@ def _plural(n: int, word: str) -> str:
     return f"{n} {word}{'' if n == 1 else 's'}"
 
 
-def _option(row: ArrivalRow) -> Block:
+def _option(row: PurchasingRow) -> Block:
     """A checkbox: "Bus Transceivers Single… `74LVC1T45GW` ×3" (Slack caps it at 75). No links — they don't click there."""
     qty = _qty(row)
     code = _shown_code(row)
@@ -310,7 +321,7 @@ def _option(row: ArrivalRow) -> Block:
     return {'text': {'type': 'mrkdwn', 'text': text}, 'value': compact(row.id)}
 
 
-def row_detail(row: ArrivalRow) -> str | None:
+def row_detail(row: PurchasingRow) -> str | None:
     """What a generic row ("JLCPCB Boards") actually holds: its sanitized description (the text that
     goes to the vendor, so nothing internal), never anything that looks like a price. None when
     there's nothing beyond the name."""
@@ -320,7 +331,7 @@ def row_detail(row: ArrivalRow) -> str | None:
     return text
 
 
-def _link_line(row: ArrivalRow) -> str | None:
+def _link_line(row: PurchasingRow) -> str | None:
     """"`74LVC1T45GW,125`  <notion|Notion> · <product|Mouser ↗>" — one line per checkbox, in the same order."""
     code = _shown_code(row)
     what = f'`{code}`' if code else (_clean(row.name or row.part_number, 32) or 'item')
@@ -362,14 +373,14 @@ def _other_orders(alternatives: list[OpenOrder], vendor: str) -> Block | None:
 class CardInput:
     headline: str
     # The order's open rows — what "all arrived" means.
-    rows: list[ArrivalRow]
+    rows: list[PurchasingRow]
     # Pre-ticked: the rows this box shows.
-    checked: list[ArrivalRow]
+    checked: list[PurchasingRow]
     key: str | None
     run_id: str | None
     vendor: str
     # Matched rows from outside the order (ticked too).
-    extras: list[ArrivalRow] = field(default_factory=list)
+    extras: list[PurchasingRow] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     # What the guess rests on and why people are tagged — its own line under the items.
     why: list[str] = field(default_factory=list)
@@ -385,7 +396,7 @@ def order_card(index: int, card: CardInput, base: dict[str, str]) -> list[Block]
         return f'arrival_{part}:{index}'
 
     extras = card.extras
-    by_id: dict[str, ArrivalRow] = {}
+    by_id: dict[str, PurchasingRow] = {}
     for r in [*card.checked, *extras]:
         by_id[r.id] = r
     ticked = list(by_id.values())
@@ -400,7 +411,7 @@ def order_card(index: int, card: CardInput, base: dict[str, str]) -> list[Block]
     elements: list[Block | None] = []
 
     if len(all_rows) <= MAX_OPTIONS:
-        shown: list[ArrivalRow] | None = all_rows
+        shown: list[PurchasingRow] | None = all_rows
     elif ticked and len(ticked) <= MAX_OPTIONS:
         shown = ticked
     else:
@@ -474,7 +485,7 @@ def order_card(index: int, card: CardInput, base: dict[str, str]) -> list[Block]
     return blocks
 
 
-def _vendor_name(rows: list[ArrivalRow], hint: str | None) -> str:
+def _vendor_name(rows: list[PurchasingRow], hint: str | None) -> str:
     # The label's spelling when it agrees with Notion ("Eurotech Distributors" over "eurotech direct");
     # Notion's when the label names someone else (a UPS Store re-ship, a fulfiller).
     row_vendor = next((r.vendor for r in rows if r.vendor), '')
@@ -483,7 +494,7 @@ def _vendor_name(rows: list[ArrivalRow], hint: str | None) -> str:
     return _clean(vendor_display(hint if agree else titled) or 'vendor', 40)
 
 
-def _tagged(rows: list[ArrivalRow], people: People | None) -> bool:
+def _tagged(rows: list[PurchasingRow], people: People | None) -> bool:
     """Someone on these rows gets an @-mention."""
     return bool(people) and any(n in people for r in rows for n in r.point_of_contact)  # type: ignore[operator]
 
@@ -693,7 +704,7 @@ def build_reply(scan: Scan, resolutions: list[Resolution], ctx: ReplyContext) ->
 def _days_between(from_iso: str, to_iso: str) -> int:
     start = _parse_when(from_iso)
     try:
-        end = parse_iso(to_iso)
+        end = utils.parse_iso(to_iso)
     except ValueError:
         return 0
     if not start:
@@ -701,7 +712,7 @@ def _days_between(from_iso: str, to_iso: str) -> int:
     return max(0, math.floor((end - start).total_seconds() / 86_400 + 0.5))
 
 
-def lead_time_line(rows: list[ArrivalRow], arrived_at_iso: str) -> str | None:
+def lead_time_line(rows: list[PurchasingRow], arrived_at_iso: str) -> str | None:
     """"Ordered Sep 28 → here Oct 10 (12 days) · requested Sep 20 (20 days end to end)"."""
     ordered = _earliest([r.ordered_at for r in rows])
     requested = _earliest([r.submitted_at for r in rows])
@@ -781,7 +792,7 @@ def settle_card(
     blocks: list[Block],
     index: int,
     outcome: str,
-    marked: list[ArrivalRow] | None = None,
+    marked: list[PurchasingRow] | None = None,
     undo: ArrivalButtonValue | None = None,
 ) -> list[Block]:
     """Settle card `index` after a tap. The headline stays; the checkboxes become a linked list of
@@ -813,7 +824,7 @@ def settle_card(
     return out
 
 
-def arrival_dm(rows: list[ArrivalRow], clicker: str, poster: str, permalink: str | None, arrived_at_iso: str) -> str:
+def arrival_dm(rows: list[PurchasingRow], clicker: str, poster: str, permalink: str | None, arrived_at_iso: str) -> str:
     """The DM a requester gets once their order is confirmed."""
     vendor = _vendor_name(rows, None)
     lines = [item_line(r, 50) for r in rows[:8]]

@@ -14,12 +14,24 @@ from arrivals.blocks import (
     who,
 )
 from arrivals.models import Resolution, Scan
-from arrivals.orders import addressee_matches, eligible_rows, group_orders, orders_for_vendor, rank_orders
-from arrivals.pick import Pick, build_pick_prompt, ground_picks, is_generic, parse_picks, stem
+from arrivals.orders import (
+    addressee_matches,
+    eligible_rows,
+    group_orders,
+    orders_for_vendor,
+    rank_orders,
+)
+from arrivals.pick import (
+    Pick,
+    build_pick_prompt,
+    ground_picks,
+    is_generic,
+    parse_picks,
+    stem,
+)
 from arrivals.resolve import resolve_package, resolve_scan
 from arrivals.slack import thread_orders
-
-from .helpers import BASE, line, pkg, row
+from tests.arrivals.helpers import BASE, line, pkg, row
 
 OCT10 = datetime(2026, 10, 10, 16, 0, tzinfo=timezone.utc)
 

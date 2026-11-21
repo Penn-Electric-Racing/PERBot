@@ -6,16 +6,15 @@ Notion payloads are typed loosely; values are validated before they reach here.
 """
 from __future__ import annotations
 
+import logging
 import re
 import threading
 from dataclasses import dataclass
 from typing import Any
 
-from config import config
-from notion_api import NotionClient
-from utils.clock import iso_now
-from utils.logger import logger
-from sponsorship.dates import today_iso_et
+from core import utils
+from core.config import config
+from core.notion import Notion, NotionUser
 from sponsorship.domain import extract_hostname
 from sponsorship.fsae_ties import FsaeScan, format_fsae_evidence
 from sponsorship.models import (
@@ -26,7 +25,6 @@ from sponsorship.models import (
     Category,
     HunterContact,
     LossReason,
-    NotionUser,
     PipelineDealInput,
     PipelineRow,
     QuotaAuditResult,
@@ -34,8 +32,23 @@ from sponsorship.models import (
     Stage,
     WonKind,
 )
-from sponsorship.next_actions import NextActionChange, next_action_after_touch, next_action_for_stage, next_action_properties
+from sponsorship.next_actions import (
+    NextActionChange,
+    next_action_after_touch,
+    next_action_for_stage,
+    next_action_properties,
+)
 from sponsorship.scoring import SponsorScores
+
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    'BankPageRef', 'DRAFT_EMAIL_MARKER', 'SPECIFIC_ASK_MARKER', 'read_title', 'read_rich_text',
+    'read_select', 'read_number', 'read_date', 'read_people_ids', 'FSAE_TIES_PROP',
+    'FSAE_EVIDENCE_PROP', 'FSAE_SCANNED_PROP', 'CONTACTED_AT_PROP', 'LOSS_REASON_PROP',
+    'COLD_ASKED_PROP', 'APPLY_VIA_PROP', 'RELEASE_ASKED_PROP', 'CONTACTED_STAGES',
+    'parse_bank_row', 'parse_pipeline_row', 'ACTIVE_STAGE_FILTER', 'SponsorNotion',
+]
 
 
 @dataclass
@@ -223,9 +236,14 @@ def _date(start: str) -> dict[str, Any]:
     return {'date': {'start': start}}
 
 
+def _block_text(block: Any) -> str | None:
+    rich = ((block or {}).get(block.get('type')) or {}).get('rich_text') if block else None
+    return ''.join((t or {}).get('plain_text') or '' for t in rich) if isinstance(rich, list) else None
+
+
 class SponsorNotion:
     def __init__(self, token: str | None = None, client: Any = None):
-        self.client = client or NotionClient(auth=token or config.notion.token, notion_version=config.notion.api_version)
+        self.client = client or (Notion(token, config.notion.api_version) if token else Notion.shared())
         self._loss_columns_ready: list[str] | None = None
         self._loss_columns_lock = threading.Lock()
 
@@ -286,7 +304,7 @@ class SponsorNotion:
         if row.claimed_by_notion_ids:
             properties['Claimed by'] = {'people': [{'id': i} for i in row.claimed_by_notion_ids]}
         if row.fsae:
-            properties.update(_fsae_properties(row.fsae, today_iso_et()))
+            properties.update(_fsae_properties(row.fsae, utils.today_iso()))
 
         result = self.client.pages.create(
             parent={'type': 'data_source_id', 'data_source_id': config.sponsorship.bank_data_source_id},
@@ -616,7 +634,7 @@ class SponsorNotion:
             properties['Deal value ($)'] = {'number': amount_usd}
         # Won straight from Prospect still means outreach happened — date it for the quota audit.
         if not row.contacted_at:
-            properties[CONTACTED_AT_PROP] = _date(iso_now())
+            properties[CONTACTED_AT_PROP] = _date(utils.iso_now())
         if note:
             merged = f'{date_iso}: WON — {note}' + (f'\n{row.notes}' if row.notes else '')
             properties['Notes'] = _rt(merged[:1900])
@@ -633,7 +651,7 @@ class SponsorNotion:
             self.ensure_loss_columns()
             properties[LOSS_REASON_PROP] = {'select': {'name': loss_reason}}
         if stage in CONTACTED_STAGES and not row.contacted_at:
-            properties[CONTACTED_AT_PROP] = _date(iso_now())
+            properties[CONTACTED_AT_PROP] = _date(utils.iso_now())
         # Swap PERBot's own Next action ("Send first outreach") for the one this stage needs.
         nxt = next_action_for_stage(row, stage, date_iso)
         if nxt:
@@ -658,7 +676,7 @@ class SponsorNotion:
             name = read_title(p.get('Name'))
             ids = read_people_ids(p.get('Member'))
             if not ids:
-                logger.warn(f"Quota roster: \"{name or page['id']}\" has no Member person — skipping.")
+                logger.warning(f"Quota roster: \"{name or page['id']}\" has no Member person — skipping.")
                 continue
             members.append(QuotaRosterMember(name=name or ids[0], notion_user_id=ids[0]))
         return members
@@ -687,7 +705,7 @@ class SponsorNotion:
             'Quota': {'number': result.quota},
             'Met': {'checkbox': result.met},
             'Deals': {'relation': [{'id': d.id} for d in result.deals]},
-            'Checked at': _date(iso_now()),
+            'Checked at': _date(utils.iso_now()),
         }
         hits = existing.get('results') or []
         if hits:
@@ -711,11 +729,6 @@ class SponsorNotion:
             if not cursor:
                 return blocks
 
-    @staticmethod
-    def _block_text(block: Any) -> str | None:
-        rich = ((block or {}).get(block.get('type')) or {}).get('rich_text') if block else None
-        return ''.join((t or {}).get('plain_text') or '' for t in rich) if isinstance(rich, list) else None
-
     def fetch_page_paragraphs(self, page_id: str) -> list[str]:
         """Plain-text paragraphs of a page's body — used to read the team's outreach email template
         live, so ops can edit the template in Notion without a redeploy. Every block with rich text
@@ -723,7 +736,7 @@ class SponsorNotion:
         dropped (the draft is a plain-text email)."""
         out: list[str] = []
         for block in self._children(page_id):
-            text = self._block_text(block)
+            text = _block_text(block)
             if text and text.strip():
                 out.append(text.strip())
         return out
@@ -736,7 +749,7 @@ class SponsorNotion:
             return []
         lines: list[str] = []
         for block in self._children(block_id):
-            text = self._block_text(block)
+            text = _block_text(block)
             if text is not None and text.strip():
                 lines.append(f"{'  ' * depth}- {text.strip()}")
             if block.get('has_children'):
@@ -748,7 +761,7 @@ class SponsorNotion:
         bullet-line text ('' when there is no ask). Humans paste detailed multi-line specs under the
         toggle in Notion; `/sponsor ask` creates/replaces it from Slack."""
         for block in self._children(page_id):
-            text = self._block_text(block)
+            text = _block_text(block)
             if text is not None and text.startswith(SPECIFIC_ASK_MARKER) and block.get('has_children'):
                 return '\n'.join(self._read_block_lines(block['id'], 0))
         return ''
@@ -766,7 +779,6 @@ class SponsorNotion:
         """Create/replace the `🎯 Specific ask` toggle on a Bank row (powers `/sponsor ask`). Each
         input line becomes one bullet under the toggle; people then refine the details in Notion.
         Same replace-the-marker-toggle pattern as write_draft_email. Returns the toggle's block id."""
-        import re
 
         self._delete_toggles(page_id, SPECIFIC_ASK_MARKER)
         lines = [l for l in (re.sub(r'^\s*[-•]\s*', '', x).strip() for x in ask.split('\n')) if l]
@@ -820,17 +832,4 @@ class SponsorNotion:
         """Workspace users (id + display name + email) for bridging Notion DRI persons to Slack
         identities. Email may be None if the integration lacks the "read user emails" capability —
         the identity resolver falls back to name matching then."""
-        users: list[NotionUser] = []
-        cursor: str | None = None
-        while True:
-            response = self.client.users.list(start_cursor=cursor, page_size=100)
-            for user in response.get('results') or []:
-                if user.get('type') == 'bot' or not user.get('id'):
-                    continue
-                email = (user.get('person') or {}).get('email')
-                users.append(
-                    NotionUser(user['id'], user['name'] if isinstance(user.get('name'), str) else '', email if isinstance(email, str) else None)
-                )
-            cursor = response.get('next_cursor') if response.get('has_more') else None
-            if not cursor:
-                return users
+        return Notion.list_users(self.client)

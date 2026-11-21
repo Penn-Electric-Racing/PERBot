@@ -1,20 +1,22 @@
 """Pure formatting helpers for Ops tasks — shared by the digest text and its Block Kit version."""
 from __future__ import annotations
 
-from sponsorship.dates import days_until
+from core import utils
 from ops_tasks.notion import OpsTask
+
+__all__ = ['carried_weeks', 'is_overdue', 'sort_tasks', 'task_line']
 
 
 def carried_weeks(task: OpsTask) -> int:
     """Whole Saturday meetings that have passed since the task was assigned (0 = fresh)."""
     if not task.week:
         return 0
-    age = -days_until(task.week)
+    age = -utils.days_until(task.week)
     return age // 7 if age > 0 else 0
 
 
 def is_overdue(task: OpsTask) -> bool:
-    return task.due is not None and days_until(task.due) < 0
+    return task.due is not None and utils.days_until(task.due) < 0
 
 
 def _short_date(iso: str) -> str:

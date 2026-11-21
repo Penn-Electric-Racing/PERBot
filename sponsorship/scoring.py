@@ -17,6 +17,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+__all__ = [
+    'SponsorScores', 'HIGH_FIT', 'HIGH_IMPACT', 'TIER1_PRIORITY', 'TIER2_PRIORITY', 'fit_score',
+    'impact_score', 'priority_score', 'quadrant', 'tier', 'rank_key',
+]
+
 
 @dataclass
 class SponsorScores:

@@ -16,7 +16,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-from benbuys.models import PurchasingRow
+from core.purchasing import PurchasingRow
+
+__all__ = [
+    'OrderNumberKind', 'Scene', 'SlipLine', 'OrderNumber', 'Extraction', 'Scan',
+    'MatchConfidence', 'LineMatch', 'SlipMatch', 'OpenOrder', 'Resolution',
+]
 
 OrderNumberKind = Literal['purchase_order', 'sales_order', 'invoice', 'customer_reference', 'other']
 
@@ -67,21 +72,6 @@ class Scan:
     packages: list[Extraction]
 
 
-@dataclass(eq=False)
-class ArrivalRow(PurchasingRow):
-    """A Purchasing row plus the fields arrivals needs on top of what BenBuys reads."""
-
-    vendor: str = ''
-    run_id: str = ''
-    # `Arrived?` status name: No / Ready for Pickup / Yes.
-    arrived: str = ''
-    # `Exported?` — the row went out on an order.
-    exported: bool = False
-    # `Submitted at` — when the request was filed (internal lead-time start).
-    submitted_at: str | None = None
-    # `Last Email Update` — when the order went out (vendor lead-time start).
-    ordered_at: str | None = None
-
 
 MatchConfidence = Literal['exact', 'strong', 'weak', 'none']
 
@@ -89,7 +79,7 @@ MatchConfidence = Literal['exact', 'strong', 'weak', 'none']
 @dataclass
 class LineMatch:
     line: SlipLine
-    row: ArrivalRow | None
+    row: PurchasingRow | None
 
 
 @dataclass(eq=False)
@@ -98,9 +88,9 @@ class SlipMatch:
     # The order most of the slip belongs to (`Run ID`), or None when the matched rows have none.
     run_id: str | None
     # Every open row of that order — what "all arrived" would mark.
-    order_rows: list[ArrivalRow]
+    order_rows: list[PurchasingRow]
     # Rows the slip actually shows (inside or outside the main order).
-    matched_rows: list[ArrivalRow]
+    matched_rows: list[PurchasingRow]
     lines: list[LineMatch]
 
 
@@ -110,7 +100,7 @@ class OpenOrder:
 
     key: str
     run_id: str | None
-    rows: list[ArrivalRow]
+    rows: list[PurchasingRow]
     vendor: str
     requesters: list[str]
     # When it was ordered (or requested, if no order date), ISO.

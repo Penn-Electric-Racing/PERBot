@@ -1,22 +1,15 @@
-from __future__ import annotations
+"""Vendor adapters for BenBuys: how each vendor's cart and requisition are built.
 
-from benbuys.models import VendorAdapter
-from benbuys.adapters.digikey import digikey_adapter
-from benbuys.adapters.mcmaster import mcmaster_adapter
+  registry.py   resolve_adapter, LIVE_VENDORS: the adapters by key
+  digikey.py    DigiKey (electrical)
+  mcmaster.py   McMaster-Carr (mechanical; a stub, not live)
+"""
 
-DEFAULT_VENDOR = 'digikey'
+from .digikey import *
+from .mcmaster import *
+from .registry import *
 
-_ADAPTERS: dict[str, VendorAdapter] = {digikey_adapter.key: digikey_adapter, mcmaster_adapter.key: mcmaster_adapter}
-
-# Vendors that are actually usable from Slack (the McMaster stub is registered but not live).
-LIVE_VENDORS: list[str] = [digikey_adapter.key]
-
-
-def resolve_adapter(key: str | None) -> VendorAdapter | None:
-    k = (key if key is not None else DEFAULT_VENDOR).strip().lower()
-    adapter = _ADAPTERS.get(k)
-    return adapter if adapter and k in LIVE_VENDORS else None
-
-
-def is_vendor_key(token: str) -> bool:
-    return token.strip().lower() in _ADAPTERS
+__all__ = (
+    'digikey_adapter', 'mcmaster_adapter', 'DEFAULT_VENDOR', 'LIVE_VENDORS', 'resolve_adapter',
+    'is_vendor_key',
+)

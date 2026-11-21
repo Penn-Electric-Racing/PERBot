@@ -13,6 +13,9 @@ dependencies = [
     "cryptography>=43",
     "pypdf>=5.0",
     "mammoth>=1.8",
+    # price_check/scrapers (part search for the price listener)
+    "requests>=2.31",
+    "beautifulsoup4>=4.12",
 ]
 
 [project.optional-dependencies]
@@ -22,3 +25,5 @@ dev = ["pytest>=8"]
 testpaths = ["tests"]
 # Code lives at the repo root (no package folder); make it importable from tests.
 pythonpath = ["."]
+# caplog sees INFO lines too (log assertions check job summaries).
+log_level = "INFO"

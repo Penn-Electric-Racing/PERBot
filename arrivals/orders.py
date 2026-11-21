@@ -10,9 +10,15 @@ from __future__ import annotations
 import re
 from datetime import datetime
 
-from utils.clock import parse_iso
 from arrivals.match import row_vendor_key, vendor_key
-from arrivals.models import ArrivalRow, Extraction, OpenOrder
+from arrivals.models import Extraction, OpenOrder
+from core import utils
+from core.purchasing import PurchasingRow
+
+__all__ = [
+    'DAY_S', 'STALE_DAYS', 'MAX_AGE_DAYS', 'iso_time', 'eligible_rows', 'order_key', 'is_stale',
+    'group_orders', 'orders_for_vendor', 'addressee_matches', 'rank_orders',
+]
 
 DAY_S = 86_400
 # Older than this, an open order has almost certainly arrived unrecorded (nothing was marked
@@ -28,12 +34,12 @@ def iso_time(iso: str | None) -> float | None:
     if not iso:
         return None
     try:
-        return parse_iso(f'{iso}T12:00:00Z' if len(iso) == 10 else iso).timestamp()
+        return utils.parse_iso(f'{iso}T12:00:00Z' if len(iso) == 10 else iso).timestamp()
     except ValueError:
         return None
 
 
-def eligible_rows(rows: list[ArrivalRow], as_of: datetime) -> list[ArrivalRow]:
+def eligible_rows(rows: list[PurchasingRow], as_of: datetime) -> list[PurchasingRow]:
     cutoff = as_of.timestamp()
     out = []
     for r in rows:
@@ -50,7 +56,7 @@ def eligible_rows(rows: list[ArrivalRow], as_of: datetime) -> list[ArrivalRow]:
     return out
 
 
-def order_key(row: ArrivalRow) -> str:
+def order_key(row: PurchasingRow) -> str:
     """The order a row belongs to: `Run ID`, else request day, plus vendor (see group_orders)."""
     return f"{row.run_id or (row.submitted_at or '')[:10]}|{row_vendor_key(row) or 'unknown'}"
 
@@ -61,11 +67,11 @@ def is_stale(order: OpenOrder, as_of: datetime) -> bool:
     return t is not None and as_of.timestamp() - t > STALE_DAYS * DAY_S
 
 
-def group_orders(rows: list[ArrivalRow]) -> list[OpenOrder]:
+def group_orders(rows: list[PurchasingRow]) -> list[OpenOrder]:
     """One order = one vendor's rows in a run. PEFS export runs (PERPO-…) batch several vendors, and
     a box only ever holds one vendor's slice; `run_id` is kept only when the slice is the whole run,
     so a button that re-reads the run at click time can't sweep in another vendor's rows."""
-    by_key: dict[str, list[ArrivalRow]] = {}
+    by_key: dict[str, list[PurchasingRow]] = {}
     run_size: dict[str, int] = {}
     for r in rows:
         by_key.setdefault(order_key(r), []).append(r)

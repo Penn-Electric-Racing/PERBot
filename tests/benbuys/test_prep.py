@@ -2,10 +2,10 @@ import os
 import re
 from pathlib import Path
 
-from benbuys.prep import aggregate_rows, build_prep, format_prep, normalize_part_number, warnings_for
+from benbuys.prep import aggregate_rows, build_prep, format_prep, warnings_for
 from benbuys.reference import clean_reference_text, truncate_at_word, truncate_reference
-
-from .helpers import row, test_adapter
+from core.purchasing import normalize_part_number
+from tests.benbuys.helpers import row, test_adapter
 
 
 def test_normalize_part_number_trims_collapses_wrapped_whitespace_uppercases():

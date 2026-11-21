@@ -10,6 +10,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
+__all__ = [
+    'TIERS', 'Tier', 'SPONSOR_TYPES', 'SponsorType', 'CHANNELS', 'Channel', 'CATEGORIES',
+    'Category', 'BANK_STATUSES', 'BankStatus', 'RELATIONSHIPS', 'STAGES', 'Stage', 'WON_KINDS',
+    'WonKind', 'LOSS_REASONS', 'LossReason', 'CompanyClassification', 'HunterContact',
+    'BankLeadRow', 'PipelineRow', 'QuotaRosterMember', 'QuotaAuditResult', 'BankRowInput',
+    'PipelineDealInput', 'AssignmentInfo', 'EnrichResult',
+]
+
 if TYPE_CHECKING:
     from sponsorship.fsae_ties import FsaeScan
     from sponsorship.scoring import SponsorScores
@@ -91,15 +99,6 @@ class CompanyClassification:
     market_fit: int
     value_band: int
     category_need: int
-
-
-@dataclass
-class NotionUser:
-    """A Notion workspace user, for bridging DRI persons to Slack identities."""
-
-    id: str
-    name: str
-    email: str | None = None
 
 
 @dataclass

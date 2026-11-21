@@ -6,8 +6,13 @@ import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
-from sources.drive import FileRoute, build_folder_index, route_file
-from sources.google_auth import ServiceAccountAuth, ServiceAccountKey, build_assertion, parse_service_account_key
+from search.drive import FileRoute, build_folder_index, route_file
+from search.google_auth import (
+    ServiceAccountAuth,
+    ServiceAccountKey,
+    build_assertion,
+    parse_service_account_key,
+)
 
 _private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 _public = _private.public_key()

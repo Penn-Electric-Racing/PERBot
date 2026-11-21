@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
@@ -9,12 +8,18 @@ from typing import Any
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
+from core.slack import Slack
 from meeting_notes.config import KICKOFF_SIGNATURE, SLACK_WORKSPACE_SUBDOMAIN
+
+__all__ = [
+    'get_channel_id', 'post_kickoff_message', 'find_most_recent_bot_thread',
+    'get_thread_replies', 'get_message_permalink', 'get_user_display_name',
+]
 
 
 @lru_cache(maxsize=1)
 def _slack() -> WebClient:
-    return WebClient(token=os.environ.get('SLACK_BOT_TOKEN'))
+    return Slack.shared()
 
 
 # Cache channel IDs across calls within a single job run

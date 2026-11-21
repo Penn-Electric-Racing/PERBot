@@ -12,14 +12,17 @@ the Slack writers link it (see `meeting_for_date`) and the digest relinks stragg
 from __future__ import annotations
 
 import dataclasses
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from config import config
-from notion_api import NotionClient
-from sponsorship.models import NotionUser
-from utils.logger import logger
+from core.config import config
+from core.notion import Notion, NotionUser
 from ops_tasks.meetings import OpsMeeting, pick_meeting
+
+logger = logging.getLogger(__name__)
+
+__all__ = ['OpsTaskOwner', 'OpsTask', 'parse_ops_task', 'OpsTasksNotion']
 
 OpsTaskOwner = NotionUser
 
@@ -115,7 +118,7 @@ def _parse_meeting(page: Any) -> OpsMeeting | None:
 
 class OpsTasksNotion:
     def __init__(self, token: str | None = None):
-        self.client = NotionClient(auth=token or config.notion.token, notion_version=config.notion.api_version)
+        self.client = Notion(token, config.notion.api_version) if token else Notion.shared()
 
     def query_open_tasks(self) -> list[OpsTask]:
         """Every row whose Status is not Done (paginated)."""

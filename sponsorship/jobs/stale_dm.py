@@ -5,13 +5,14 @@ claims never contacted (Prospect 14+ days), each asked about once with one-tap b
 if a member has none of these (silence is valid).
 
 DMs post straight to the user ID (needs only `chat:write`, not `im:write`). Idempotency: the gate
-is "Wednesday, 9am ET or later" (GitHub cron fires hours late — utils/schedule.py) and the ⚙️ Job
+is "Wednesday, 9am ET or later" (GitHub cron fires hours late — core.utils.is_slot_open) and the ⚙️ Job
 Log claim makes the second DST trigger a no-op.
 
 Run: `python -m sponsorship.jobs.stale_dm`
 """
 from __future__ import annotations
 
+import logging
 import math
 import os
 import sys
@@ -20,21 +21,25 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from utils.clock import parse_iso, to_iso
-from utils.logger import logger
-from utils.schedule import claim_job_run, is_slot_open_et
-from sponsorship.dates import days_until, iso_add_days, today_iso_et
-from sponsorship.deal_blocks import cold_deal_blocks, deal_list_blocks, stale_claim_blocks
-from sponsorship.identity import fetch_slack_directory, notion_user_to_slack_id
+from core import utils
+from core.job_log import JobLog
+from core.log import setup_logging
+from core.slack import Slack
+from sponsorship.deal_blocks import (
+    cold_deal_blocks,
+    deal_list_blocks,
+    stale_claim_blocks,
+)
 from sponsorship.models import PipelineRow
 from sponsorship.next_actions import COLD_AFTER_DAYS
 from sponsorship.notion import COLD_ASKED_PROP, SponsorNotion
-from sponsorship.jobs.quota_audit import fmt_date
-from sponsorship.jobs.shared import make_slack_client
+from sponsorship.quota import fmt_date
+
+logger = logging.getLogger(__name__)
 
 
 def _overdue_line(row: PipelineRow) -> str:
-    overdue = abs(days_until(row.next_action_date)) if row.next_action_date else 0
+    overdue = abs(utils.days_until(row.next_action_date)) if row.next_action_date else 0
     days = '1 day' if overdue == 1 else f'{overdue} days'
     nxt = f'Next: {row.next_action} — ' if row.next_action else ''
     return f"• <{row.url}|{row.company or 'Untitled'}> — {nxt}overdue by *{days}* (due {row.next_action_date})."
@@ -54,7 +59,7 @@ MAX_STALE_CLAIMS_SHOWN = 6
 
 
 def _days_since(iso: str, now: datetime) -> int:
-    return math.floor((now - parse_iso(iso)).total_seconds() / 86_400)
+    return math.floor((now - utils.parse_iso(iso)).total_seconds() / 86_400)
 
 
 def _cold_line(row: PipelineRow, now: datetime) -> str:
@@ -74,8 +79,8 @@ def split_stale_claims(claims: list[PipelineRow], today_iso: str) -> tuple[list[
     about RELEASE_AFTER_ASK_DAYS+ ago and still at Prospect is released. So is one with no DRI
     that's a week past the ask threshold, since there's nobody to ask. The rest that were never
     asked get asked."""
-    release_by = iso_add_days(today_iso, -RELEASE_AFTER_ASK_DAYS)
-    ownerless_by = iso_add_days(today_iso, -(STALE_CLAIM_DAYS + RELEASE_AFTER_ASK_DAYS))
+    release_by = utils.iso_add_days(today_iso, -RELEASE_AFTER_ASK_DAYS)
+    ownerless_by = utils.iso_add_days(today_iso, -(STALE_CLAIM_DAYS + RELEASE_AFTER_ASK_DAYS))
     release: list[PipelineRow] = []
     ask: list[PipelineRow] = []
     for d in claims:
@@ -178,23 +183,23 @@ def build_stale_dm(data: StaleDmInput, slack_user_id: str, now: datetime | None 
 def run_stale_dm(force: bool | None = None) -> None:
     if force is None:
         force = (os.environ.get('FORCE_STALE_DM') or '').lower() == 'true'
-    if not force and not is_slot_open_et('Wednesday', 9):
+    if not force and not utils.is_slot_open('Wednesday', 9):
         logger.info('Stale DM: not Wednesday ≥9:00 ET and not forced — skipping.')
         return
     # STALE_DRY_RUN=true logs each DM and makes no writes: no Slack, no Notion stamps or releases, no schema change.
     dry_run = (os.environ.get('STALE_DRY_RUN') or '').lower() == 'true'
     # Late-tolerant gate + two DST crons ⇒ dedupe via the Job Log (DM jobs can't read DM history).
-    if not force and not dry_run and not claim_job_run('sponsor-stale-dm'):
+    if not force and not dry_run and not JobLog.shared().claim_run('sponsor-stale-dm'):
         return
 
-    client = make_slack_client()
+    client = Slack.shared()
     notion = SponsorNotion()
-    today = today_iso_et()
+    today = utils.today_iso()
 
     missing = notion.ensure_loss_columns(not dry_run)
 
     def days_ago(n: int) -> str:
-        return to_iso(datetime.now(timezone.utc) - timedelta(days=n))
+        return utils.to_iso(datetime.now(timezone.utc) - timedelta(days=n))
 
     with ThreadPoolExecutor(max_workers=3) as pool:
         f_stale = pool.submit(notion.query_stale_deals, today)
@@ -220,7 +225,7 @@ def run_stale_dm(force: bool | None = None) -> None:
             notion.release_claim(d)
             released.append(d)
         except Exception as err:
-            logger.error(f'Stale DM: could not release {d.company or d.id}', err)
+            logger.error(f'Stale DM: could not release {d.company or d.id}', exc_info=err)
 
     # Group deals by their DRI(s).
     by_user: dict[str, StaleDmInput] = {}
@@ -246,17 +251,17 @@ def run_stale_dm(force: bool | None = None) -> None:
 
     # Build both directories once for identity resolution (email first, name fallback).
     notion_user_by_id = {u.id: u for u in notion.list_notion_users()}
-    slack_dir = fetch_slack_directory(client)
+    slack_dir = Slack.wrap(client).fetch_directory()
 
     for notion_id, deals in by_user.items():
         notion_user = notion_user_by_id.get(notion_id)
         if not notion_user:
-            logger.warn(f'Stale DM: DRI {notion_id} not in Notion directory — skipping.')
+            logger.warning(f'Stale DM: DRI {notion_id} not in Notion directory — skipping.')
             continue
 
-        slack_user_id = notion_user_to_slack_id(client, notion_user, slack_dir)
+        slack_user_id = Slack.wrap(client).notion_user_to_slack_id(notion_user, slack_dir)
         if not slack_user_id:
-            logger.warn(f'Stale DM: no Slack match for {notion_user.name or notion_id} — skipping.')
+            logger.warning(f'Stale DM: no Slack match for {notion_user.name or notion_id} — skipping.')
             continue
 
         dm = build_stale_dm(deals, slack_user_id)
@@ -280,8 +285,9 @@ def run_stale_dm(force: bool | None = None) -> None:
 
 
 if __name__ == '__main__':
+    setup_logging()
     try:
         run_stale_dm()
     except Exception as err:
-        logger.error('Stale DM job failed.', err)
+        logger.error('Stale DM job failed.', exc_info=err)
         sys.exit(1)

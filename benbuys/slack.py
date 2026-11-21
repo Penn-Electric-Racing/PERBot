@@ -3,23 +3,32 @@ All replies are ephemeral. Vendor defaults to digikey.
 """
 from __future__ import annotations
 
+import logging
 import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
-from slack_bolt import App
-
-from config import config
-from utils.logger import logger
-from utils.text import js_round
-from benbuys.adapters import DEFAULT_VENDOR, LIVE_VENDORS, is_vendor_key, resolve_adapter
+from benbuys.adapters.registry import (
+    DEFAULT_VENDOR,
+    LIVE_VENDORS,
+    is_vendor_key,
+)
 from benbuys.cache import PrepCache
 from benbuys.email import build_requisition_email, render_email
 from benbuys.mailer import Mailer, create_mailer
 from benbuys.models import VendorAdapter
 from benbuys.notion import PurchasingNotion
 from benbuys.prep import build_prep, format_prep, money
+from core import utils
+from core.config import config
+
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    'ParsedBenbuys', 'REQUISITION_RE', 'parse_money', 'parse_benbuys', 'USAGE',
+    'MAX_MESSAGE_CHARS', 'chunk_fenced', 'BenbuysDeps', 'handle_prep', 'handle_done',
+]
 
 Respond = Callable[..., Any]
 
@@ -118,8 +127,8 @@ def _pending_prep_warning(deps: BenbuysDeps, adapter: VendorAdapter, user_id: st
     pending = deps.cache.get(user_id, adapter.key)
     if not pending:
         return ''
-    age_min = max(1, js_round((time.time() * 1000 - pending.created_at) / 60_000))
-    age = f'{js_round(age_min / 60)}h' if age_min >= 60 else f'{age_min}m'
+    age_min = max(1, utils.js_round((time.time() * 1000 - pending.created_at) / 60_000))
+    age = f'{utils.js_round(age_min / 60)}h' if age_min >= 60 else f'{age_min}m'
     return (
         f'⚠️ You prepped {len(pending.prep.lines)} {adapter.label} lines {age} ago and never ran `/benbuys done`. '
         'If you already placed that order, run `done` for it FIRST — otherwise those rows are still un-exported and will be ordered again.\n'
@@ -207,7 +216,7 @@ def handle_done(deps: BenbuysDeps, adapter: VendorAdapter, user_id: str, parsed:
     try:
         deps.mailer.send(email)
     except Exception as err:
-        logger.error('BenBuys email send failed', err)
+        logger.error('BenBuys email send failed', exc_info=err)
         respond(
             response_type='ephemeral',
             text=f'✗ Couldn’t send the requisition email ({err}). Notion was NOT updated — fix the mail config and run `done` again.',
@@ -233,31 +242,3 @@ def handle_done(deps: BenbuysDeps, adapter: VendorAdapter, user_id: str, parsed:
             'the Run ID guard will block until you clear it):\n' + '\n'.join(failed_rows)
         )
     respond(response_type='ephemeral', text='\n'.join(lines))
-
-
-def register_benbuys_command(app: App, deps: BenbuysDeps | None = None) -> None:
-    deps = deps or BenbuysDeps()
-    if not deps.mailer:
-        logger.warn('BenBuys: no email transport configured — `/benbuys done` will only work with --no-send.')
-
-    @app.command('/benbuys')
-    def _benbuys(ack, command, respond):
-        ack()
-        parsed = parse_benbuys(command.get('text') or '')
-        if parsed.kind == 'help':
-            respond(response_type='ephemeral', text=USAGE)
-            return
-        adapter = resolve_adapter(parsed.vendor)
-        if not adapter:
-            respond(response_type='ephemeral', text=f"Vendor \"{parsed.vendor}\" isn’t live yet. Available: {', '.join(LIVE_VENDORS)}.")
-            return
-        try:
-            if parsed.kind == 'prep':
-                handle_prep(deps, adapter, command['user_id'], respond)
-            elif parsed.error:
-                respond(response_type='ephemeral', text=f'{parsed.error}\nUsage: `/benbuys done <requisition#> <BEN total>`')
-            else:
-                handle_done(deps, adapter, command['user_id'], parsed, respond)
-        except Exception as err:
-            logger.error(f'/benbuys {parsed.kind} failed', err)
-            respond(response_type='ephemeral', text=f'✗ /benbuys {parsed.kind} hit an error: {err}. Check the PERBot logs.')

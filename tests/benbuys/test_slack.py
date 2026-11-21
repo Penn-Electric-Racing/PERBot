@@ -4,9 +4,16 @@ from types import SimpleNamespace
 from benbuys.cache import PrepCache
 from benbuys.notion import RowSelection, WriteBackResult
 from benbuys.prep import build_prep
-from benbuys.slack import BenbuysDeps, ParsedBenbuys, chunk_fenced, handle_done, handle_prep, parse_benbuys, parse_money
-
-from .helpers import row, test_adapter
+from benbuys.slack import (
+    BenbuysDeps,
+    ParsedBenbuys,
+    chunk_fenced,
+    handle_done,
+    handle_prep,
+    parse_benbuys,
+    parse_money,
+)
+from tests.benbuys.helpers import row, test_adapter
 
 
 def test_parse_benbuys_prep_defaults_to_digikey_vendor_may_be_given():

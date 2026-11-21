@@ -19,6 +19,7 @@ channel is private), then reinstall.
 from __future__ import annotations
 
 import dataclasses
+import logging
 import re
 import threading
 import time
@@ -29,17 +30,10 @@ from functools import lru_cache
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
-from slack_bolt import App
 from slack_sdk import WebClient
 
-from config import config
-from sponsorship.identity import Indexed, index_notion_users, slack_user_to_notion_id
-from sponsorship.jobs.shared import resolve_channel_id
-from utils.clock import to_iso
-from utils.logger import logger
 from arrivals.blocks import (
     ARRIVAL_ACTION_IDS,
-    ARRIVAL_ACTION_RE,
     ArrivalButtonValue,
     arrival_dm,
     card_index,
@@ -55,11 +49,32 @@ from arrivals.blocks import (
     settle_card,
     target_ids,
 )
-from arrivals.models import ArrivalRow, Extraction
+from arrivals.models import Extraction
 from arrivals.notion import ARRIVED_YES, ArrivalsNotion, ArrivalWrite
 from arrivals.orders import eligible_rows, group_orders, orders_for_vendor, rank_orders
 from arrivals.people import people_map
-from arrivals.pipeline import DeliveryMessage, is_image, load_images, parent_text, process_delivery, slack_name, with_names
+from arrivals.pipeline import (
+    DeliveryMessage,
+    is_image,
+    load_images,
+    parent_text,
+    process_delivery,
+    slack_name,
+    with_names,
+)
+from core import utils
+from core.config import config
+from core.purchasing import PurchasingRow
+from core.slack import Indexed, Slack, index_notion_users
+
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    'AWAIT_S', 'thread_orders', 'handle_photo', 'handle_arrivals_mention', 'SWEEP_WINDOW_S',
+    'SWEEP_EVERY_S', 'SWEEP_MIN_AGE_S', 'is_photo_post', 'already_answered',
+    'recent_photo_posts', 'REMIND_AFTER_S', 'UNDO_WINDOW_S', 'NO_PACKAGE', 'sweep_once',
+    'handle_message', 'handle_click',
+]
 
 
 @lru_cache(maxsize=1)
@@ -76,9 +91,9 @@ def _arrivals_channel_id(client: WebClient) -> str | None:
     global _channel_id
     with _channel_lock:
         if _channel_id is None:
-            found = resolve_channel_id(client, config.arrivals.channel)
+            found = Slack.wrap(client).resolve_channel_id(config.arrivals.channel)
             if not found:
-                logger.warn(f'Arrivals: channel "{config.arrivals.channel}" not found; the listener is idle.')
+                logger.warning(f'Arrivals: channel "{config.arrivals.channel}" not found; the listener is idle.')
             _channel_id = found or ''
         return _channel_id or None
 
@@ -151,7 +166,7 @@ def _thread_messages(client: WebClient, channel: str, thread_ts: str) -> list[An
     try:
         return client.conversations_replies(channel=channel, ts=thread_ts, limit=200).get('messages') or []
     except Exception as err:
-        logger.warn(f'Arrivals: could not read thread {thread_ts}', err)
+        logger.warning(f'Arrivals: could not read thread {thread_ts}', exc_info=err)
         return []
 
 
@@ -246,11 +261,11 @@ def handle_photo(
                     for k in keys:
                         _packages[k] = link
     except Exception as err:
-        logger.error('Arrivals: photo handling failed', err)
+        logger.error('Arrivals: photo handling failed', exc_info=err)
         # Stay quiet in threads (most thread photos are banter); a top-level failure or an asked-for look gets one line.
         if not in_thread or correction:
             try:
-                reply(':warning: I couldn’t process that photo. Mark the order in Notion for now; the error is in the Render logs.')
+                reply(':warning: I couldn’t process that photo. Mark the order in Notion for now; the error is in the bot’s server logs.')
             except Exception:
                 pass
 
@@ -400,7 +415,7 @@ def _sweep(client: WebClient) -> None:
             handle_photo(client, {**msg, 'channel': channel})
         _remind_stale(client, channel, [t for _, t in posts], bot)
     except Exception as err:
-        logger.warn('Arrivals: catch-up sweep failed', err)
+        logger.warning('Arrivals: catch-up sweep failed', exc_info=err)
     finally:
         _sweeping.release()
 
@@ -433,7 +448,7 @@ def _remind_stale(client: WebClient, channel: str, threads: list[list[Any]], bot
             if (m or {}).get('bot_id') == bot and float(m['ts']) < cutoff and isinstance(m.get('blocks'), list):
                 replies[m['ts']] = m
 
-    open_rows: list[ArrivalRow] | None = None
+    open_rows: list[PurchasingRow] | None = None
     people: dict[str, str] | None = None
     for m in replies.values():
         blocks: list[Any] = m['blocks']
@@ -462,7 +477,7 @@ def _remind_stale(client: WebClient, channel: str, threads: list[list[Any]], bot
                 try:
                     client.chat_postMessage(channel=target, text=reminder_dm(order, link), unfurl_links=False)
                 except Exception as err:
-                    logger.warn(f'Arrivals: reminder DM to {target} failed', err)
+                    logger.warning(f'Arrivals: reminder DM to {target} failed', exc_info=err)
             note = (
                 f":bell: Reminded {', '.join(f'<@{t}>' for t in targets)} by DM"
                 if targets
@@ -478,7 +493,7 @@ def _remind_stale(client: WebClient, channel: str, threads: list[list[Any]], bot
             try:
                 client.chat_update(channel=channel, ts=m['ts'], text=m.get('text') or 'Package arrived', blocks=blocks)
             except Exception as err:
-                logger.warn('Arrivals: could not note the reminder', err)
+                logger.warning('Arrivals: could not note the reminder', exc_info=err)
 
 
 # --- Click handling ---------------------------------------------------------------------------
@@ -497,13 +512,13 @@ def _notion_people() -> list[Indexed]:
 
 def _receiver_notion_id(client: WebClient, slack_user_id: str) -> str | None:
     try:
-        return slack_user_to_notion_id(client, slack_user_id, _notion_people())
+        return Slack.wrap(client).slack_user_to_notion_id(slack_user_id, _notion_people())
     except Exception as err:
-        logger.warn(f'Arrivals: could not resolve {slack_user_id} to a Notion person', err)
+        logger.warning(f'Arrivals: could not resolve {slack_user_id} to a Notion person', exc_info=err)
         return None
 
 
-def _rows_for(ids: list[str], known: list[ArrivalRow]) -> list[ArrivalRow]:
+def _rows_for(ids: list[str], known: list[PurchasingRow]) -> list[PurchasingRow]:
     by_id = {r.id.replace('-', ''): r for r in known}
     return [by_id.get(i) or _notion().fetch_row(i) for i in ids]
 
@@ -527,7 +542,7 @@ def _card_for_order(
     key: str,
     base: dict[str, str],
     lead: str,
-    restored: list[ArrivalRow] | None = None,
+    restored: list[PurchasingRow] | None = None,
     rejected: list[str] | None = None,
 ) -> list[Any] | None:
     """A fresh card for order `key`, as of the photo: its open rows plus `restored` (rows an Undo just
@@ -553,10 +568,10 @@ def _select_keys(blocks: list[Any], index: int) -> list[str]:
     return [str(o.get('value') or '') for o in (select or {}).get('options') or [] if o.get('value')]
 
 
-def _dm_requesters(client: WebClient, rows: list[ArrivalRow], clicker: str, poster: str, permalink: str | None, arrived_at_iso: str) -> None:
+def _dm_requesters(client: WebClient, rows: list[PurchasingRow], clicker: str, poster: str, permalink: str | None, arrived_at_iso: str) -> None:
     """DM each requester whose rows were just marked (not the person who tapped, nor the one who posted the photo)."""
     people = people_map(client, _notion())
-    by_person: dict[str, list[ArrivalRow]] = {}
+    by_person: dict[str, list[PurchasingRow]] = {}
     for row in rows:
         for name in row.point_of_contact:
             slack_id = people.get(name)
@@ -571,64 +586,43 @@ def _dm_requesters(client: WebClient, rows: list[ArrivalRow], clicker: str, post
                 unfurl_links=False,
             )
         except Exception as err:
-            logger.warn(f'Arrivals: could not DM {slack_id}', err)
+            logger.warning(f'Arrivals: could not DM {slack_id}', exc_info=err)
 
 
-def _start_sweeps(client: WebClient) -> None:
-    def loop() -> None:
-        time.sleep(30)
-        while True:
-            _sweep(client)
-            time.sleep(SWEEP_EVERY_S)
-
-    threading.Thread(target=loop, name='arrivals-sweep', daemon=True).start()
+def sweep_once(client: WebClient) -> None:
+    """One pass of the sweep (nudging requesters about cards nobody tapped)."""
+    _sweep(client)
 
 
-def register_arrivals(app: App) -> None:
-    if not config.arrivals.channel:
-        logger.info('Arrivals: ARRIVALS_CHANNEL unset; delivery-photo listener disabled.')
+def handle_message(client: WebClient, event: dict[str, Any]) -> None:
+    """A message in the arrivals channel: a delivery photo, or a reply to a card that asked
+    what's in the box."""
+    e = event
+    photo = is_photo_post(e)
+    if not photo and not _awaited_reply(e):
         return
-
-    logger.info(f'Arrivals: listening for delivery photos in "{config.arrivals.channel}".')
-    _start_sweeps(app.client)
-
-    @app.event('message')
-    def _message(event, client):
-        e = event
-        photo = is_photo_post(e)
-        if not photo and not _awaited_reply(e):
-            return
-        try:
-            arrivals = _arrivals_channel_id(client)
-        except Exception as err:
-            logger.error('Arrivals: could not resolve the channel', err)
-            return
-        if e.get('channel') != arrivals or not _claim(f"{e['channel']}:{e['ts']}"):
-            return
-        if photo:
-            handle_photo(client, e)
-            return
-        me = _own_ids(client)[1]
-        if me and f'<@{me}' in str(e.get('text')):
-            return  # the mention handler has it
-        with _state_lock:
-            _awaiting.pop(e['thread_ts'], None)
-        try:
-            _correct(client, e, str(e.get('text')))
-        except Exception as err:
-            logger.error('Arrivals: correction failed', err)
-
-    @app.action(ARRIVAL_ACTION_RE)
-    def _action(ack, body, action, respond, client):
-        ack()
-        action_id = action.get('action_id', '')
-        # A checkbox toggled: its state rides along with the next button tap.
-        if action_id == ARRIVAL_ACTION_IDS['items']:
-            return
-        _handle_click(body, action, respond, client)
+    try:
+        arrivals = _arrivals_channel_id(client)
+    except Exception as err:
+        logger.error('Arrivals: could not resolve the channel', exc_info=err)
+        return
+    if e.get('channel') != arrivals or not _claim(f"{e['channel']}:{e['ts']}"):
+        return
+    if photo:
+        handle_photo(client, e)
+        return
+    me = _own_ids(client)[1]
+    if me and f'<@{me}' in str(e.get('text')):
+        return  # the mention handler has it
+    with _state_lock:
+        _awaiting.pop(e['thread_ts'], None)
+    try:
+        _correct(client, e, str(e.get('text')))
+    except Exception as err:
+        logger.error('Arrivals: correction failed', exc_info=err)
 
 
-def _handle_click(body: dict[str, Any], action: dict[str, Any], respond: Any, client: WebClient) -> None:
+def handle_click(body: dict[str, Any], action: dict[str, Any], respond: Any, client: WebClient) -> None:
     action_id: str = action.get('action_id', '')
     block_id: str = action.get('block_id', '')
     clicker = (body.get('user') or {}).get('id')
@@ -672,7 +666,7 @@ def _handle_click(body: dict[str, Any], action: dict[str, Any], respond: Any, cl
                 whisper('Too late to undo here — fix it in Notion.')
                 return
             ready = set(value.get('p') or [])
-            restored: list[ArrivalRow] = []
+            restored: list[PurchasingRow] = []
             for id_ in value.get('r') or []:
                 previous = 'Ready for Pickup' if id_ in ready else 'No'
                 notion.unmark_arrived(id_, previous)
@@ -706,7 +700,7 @@ def _handle_click(body: dict[str, Any], action: dict[str, Any], respond: Any, cl
             return
 
         # Mark arrived: the ticked checkboxes. Legacy/whole-set buttons: the ids in the value.
-        run_rows: list[ArrivalRow] = []
+        run_rows: list[PurchasingRow] = []
         if action_id == ARRIVAL_ACTION_IDS['mark']:
             state = (((body.get('state') or {}).get('values') or {}).get(f'arrival_items:{index}') or {}).get(ARRIVAL_ACTION_IDS['items'])
             # No state for an untouched box group: fall back to what the card pre-ticked.
@@ -724,7 +718,7 @@ def _handle_click(body: dict[str, Any], action: dict[str, Any], respond: Any, cl
         already = [r for r in rows if r.arrived == ARRIVED_YES]
         todo = [r for r in rows if r.arrived != ARRIVED_YES]
 
-        arrived_at = to_iso(datetime.fromtimestamp(float(value['ts']), tz=timezone.utc))
+        arrived_at = utils.to_iso(datetime.fromtimestamp(float(value['ts']), tz=timezone.utc))
         with ThreadPoolExecutor(max_workers=3) as pool:
             received_f = pool.submit(_receiver_notion_id, client, value['u'])
             name_f = pool.submit(slack_name, client, value['u'])
@@ -740,14 +734,14 @@ def _handle_click(body: dict[str, Any], action: dict[str, Any], respond: Any, cl
             except Exception:
                 permalink = None
 
-        marked: list[ArrivalRow] = []
-        failed: list[ArrivalRow] = []
+        marked: list[PurchasingRow] = []
+        failed: list[PurchasingRow] = []
         for row in todo:
             try:
                 notion.mark_arrived(row.id, ArrivalWrite(arrived_at, received_by, received_by_name, permalink))
                 marked.append(row)
             except Exception as err:
-                logger.error(f'Arrivals: write failed for {row.id}', err)
+                logger.error(f'Arrivals: write failed for {row.id}', exc_info=err)
                 failed.append(row)
 
         done = len(marked)
@@ -779,5 +773,5 @@ def _handle_click(body: dict[str, Any], action: dict[str, Any], respond: Any, cl
         if done:
             _dm_requesters(client, marked, clicker, value['u'], permalink, arrived_at)
     except Exception as err:
-        logger.error(f'Arrivals: {action_id} failed', err)
+        logger.error(f'Arrivals: {action_id} failed', exc_info=err)
         whisper('✗ Could not update Notion. Try again, or set Arrived? in Notion.')
